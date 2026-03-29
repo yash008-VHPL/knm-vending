@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vending Machine Dispense Report</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f0f4f8;
+            color: #333;
+            min-height: 100vh;
+        }
+
+        /* ── Header ── */
+        header {
+            background: #1a56db;
+            color: white;
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+        }
+        header h1 { font-size: 1.2rem; font-weight: 700; }
+        header p  { font-size: 0.8rem; opacity: 0.75; margin-top: 2px; }
+
+        .header-user {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            font-size: 0.85rem;
+        }
+        .role-badge {
+            background: rgba(255,255,255,0.2);
+            border-radius: 20px;
+            padding: 3px 10px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: capitalize;
+        }
+        .logout-btn {
+            background: rgba(255,255,255,0.15);
+            color: white;
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 6px;
+            padding: 5px 14px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            text-decoration: none;
+            transition: background 0.15s;
+        }
+        .logout-btn:hover { background: rgba(255,255,255,0.25); }
+
+        /* ── Layout ── */
+        .container {
+            max-width: 980px;
+            margin: 32px auto;
+            padding: 0 24px;
+        }
+
+        .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+        .card-title {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #f3f4f6;
+        }
+
+        /* ── Controls ── */
+        .controls {
+            display: flex;
+            gap: 20px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+        .field-group { display: flex; flex-direction: column; gap: 6px; }
+        .field-label {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: #6b7280;
+            letter-spacing: 0.06em;
+        }
+        .datetime-row { display: flex; gap: 8px; }
+
+        select,
+        input[type="text"],
+        input[type="date"],
+        input[type="time"] {
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 0.875rem;
+            color: #111827;
+            background: white;
+        }
+        select           { min-width: 180px; }
+        input[type="text"] { width: 110px; }
+        input[type="date"] { width: 150px; }
+
+        select:focus,
+        input[type="text"]:focus,
+        input[type="date"]:focus,
+        input[type="time"]:focus {
+            outline: none;
+            border-color: #1a56db;
+            box-shadow: 0 0 0 3px rgba(26,86,219,0.15);
+        }
+
+        /* ── Buttons ── */
+        .btn {
+            border: none;
+            border-radius: 6px;
+            padding: 8px 20px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s;
+            white-space: nowrap;
+        }
+        .btn-primary   { background: #1a56db; color: white; }
+        .btn-primary:hover   { background: #1e429f; }
+        .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+        .btn-secondary:hover { background: #e5e7eb; }
+        .btn-sm { padding: 5px 12px; font-size: 0.8rem; }
+        .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+
+        /* ── Status ── */
+        .status {
+            font-size: 0.85rem;
+            padding: 10px 14px;
+            border-radius: 6px;
+            margin-top: 16px;
+        }
+        .status.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+        .status.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+        .status.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+
+        /* ── Summary boxes ── */
+        .summary { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+        .stat-box {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 14px 22px;
+            min-width: 140px;
+        }
+        .stat-box .value { font-size: 2rem; font-weight: 700; color: #1a56db; line-height: 1; }
+        .stat-box .label { font-size: 0.75rem; color: #6b7280; margin-top: 4px; }
+
+        /* ── Results table ── */
+        table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+        thead tr { border-bottom: 2px solid #e5e7eb; }
+        th {
+            text-align: left;
+            padding: 10px 16px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: #6b7280;
+            letter-spacing: 0.06em;
+            background: #f9fafb;
+        }
+        th.right, td.right { text-align: right; }
+        tbody tr { border-bottom: 1px solid #f3f4f6; transition: background 0.1s; }
+        tbody tr:hover { background: #f8faff; }
+        td { padding: 12px 16px; color: #374151; vertical-align: middle; }
+        td .sku-code { font-size: 0.72rem; color: #9ca3af; margin-top: 2px; }
+
+        .bar-cell { width: 130px; }
+        .bar-bg { background: #e5e7eb; border-radius: 4px; height: 8px; overflow: hidden; }
+        .bar-fill { background: #1a56db; height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+
+        tfoot tr { border-top: 2px solid #e5e7eb; background: #f9fafb; }
+        tfoot td  { font-weight: 700; color: #111827; }
+
+        /* ── Admin: location table ── */
+        .admin-table td input[type="text"] {
+            width: 100%;
+            padding: 5px 8px;
+            font-size: 0.875rem;
+        }
+        .action-cell { display: flex; gap: 6px; }
+
+        /* ── Admin: add form ── */
+        .add-form {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #f3f4f6;
+        }
+        .add-form input[type="text"] { width: 200px; }
+
+        #results-section { display: none; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div>
+        <h1>Vending Machine Dispense Report</h1>
+        <p>View total dispenses by SKU within a selected time range</p>
+    </div>
+    <div class="header-user">
+        <span>{{ username }}</span>
+        <span class="role-badge">{{ role }}</span>
+        <a href="/.auth/logout?post_logout_redirect_uri=/" class="logout-btn">Sign out</a>
+    </div>
+</header>
+
+<div class="container">
+
+    <!-- ── Search ── -->
+    <div class="card">
+        <div class="controls">
+            <div class="field-group">
+                <div class="field-label">Location</div>
+                <select id="locationSelect">
+                    <option value="">All Locations</option>
+                </select>
+            </div>
+            <div class="field-group">
+                <div class="field-label">Start</div>
+                <div class="datetime-row">
+                    <input type="date" id="startDate">
+                    <input type="time" id="startTime" value="00:00">
+                </div>
+            </div>
+            <div class="field-group">
+                <div class="field-label">End</div>
+                <div class="datetime-row">
+                    <input type="date" id="endDate">
+                    <input type="time" id="endTime" value="23:59">
+                </div>
+            </div>
+            <button class="btn btn-primary" id="searchBtn" onclick="search()">Search</button>
+        </div>
+        <div id="status" style="display:none"></div>
+    </div>
+
+    <!-- ── Results ── -->
+    <div id="results-section">
+        <div class="card">
+            <div class="summary">
+                <div class="stat-box">
+                    <div class="value" id="totalCount">0</div>
+                    <div class="label">Total Dispenses</div>
+                </div>
+                <div class="stat-box">
+                    <div class="value" id="skuCount">0</div>
+                    <div class="label">Unique SKUs</div>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:40px">#</th>
+                        <th>SKU</th>
+                        <th class="right" style="width:100px">Count</th>
+                        <th class="right" style="width:90px">% of Total</th>
+                        <th class="bar-cell"></th>
+                    </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+                <tfoot>
+                    <tr>
+                        <td colspan="2">Total</td>
+                        <td class="right" id="footer-total"></td>
+                        <td class="right">100%</td>
+                        <td></td>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    </div>
+
+    <!-- ── Admin: Location Management (admin role only) ── -->
+    {% if role == 'admin' %}
+    <div class="card">
+        <div class="card-title">Location Management</div>
+        <div id="adminStatus" style="display:none"></div>
+
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>Location Name</th>
+                    <th style="width:160px">Machine Code</th>
+                    <th style="width:160px"></th>
+                </tr>
+            </thead>
+            <tbody id="adminTableBody">
+                <tr><td colspan="3" style="color:#9ca3af;padding:16px">Loading…</td></tr>
+            </tbody>
+        </table>
+
+        <!-- Add new location -->
+        <div class="add-form">
+            <div class="field-group">
+                <div class="field-label">Location Name</div>
+                <input type="text" id="newName" placeholder="e.g. Marina Bay">
+            </div>
+            <div class="field-group">
+                <div class="field-label">Machine Code</div>
+                <input type="text" id="newCode" placeholder="e.g. 43020634">
+            </div>
+            <button class="btn btn-primary" onclick="addLocation()">Add Location</button>
+        </div>
+    </div>
+    {% endif %}
+
+</div>
+
+<script>
+    const USER_ROLE = "{{ role }}";
+
+    // ── Date defaults ──────────────────────────────────────────────────────────
+    const now   = new Date();
+    const yyyy  = now.getFullYear();
+    const mm    = String(now.getMonth() + 1).padStart(2, '0');
+    const dd    = String(now.getDate()).padStart(2, '0');
+    const today = `${yyyy}-${mm}-${dd}`;
+    document.getElementById('startDate').value = today;
+    document.getElementById('endDate').value   = today;
+
+    // ── Load locations dropdown ────────────────────────────────────────────────
+    async function loadLocations() {
+        try {
+            const resp = await fetch('/api/locations');
+            const data = await resp.json();
+            if (!data.error) {
+                const sel = document.getElementById('locationSelect');
+                // Clear all but first "All Locations" option
+                while (sel.options.length > 1) sel.remove(1);
+                data.forEach(loc => {
+                    const opt = document.createElement('option');
+                    opt.value = loc.code;
+                    opt.textContent = loc.name;
+                    sel.appendChild(opt);
+                });
+                if (USER_ROLE === 'admin') renderAdminTable(data);
+            }
+        } catch (e) { /* silently ignore */ }
+    }
+    loadLocations();
+
+    // ── Search ─────────────────────────────────────────────────────────────────
+    function setStatus(msg, type, elId = 'status') {
+        const el = document.getElementById(elId);
+        el.style.display = msg ? 'block' : 'none';
+        el.className = 'status ' + (type || '');
+        el.textContent = msg;
+    }
+
+    async function search() {
+        const startDate = document.getElementById('startDate').value;
+        const startTime = document.getElementById('startTime').value;
+        const endDate   = document.getElementById('endDate').value;
+        const endTime   = document.getElementById('endTime').value;
+
+        if (!startDate || !endDate) {
+            setStatus('Please enter a start and end date in YY-MM-DD format.', 'error');
+            return;
+        }
+
+        const start   = `${startDate} ${startTime}`;
+        const end     = `${endDate} ${endTime}`;
+        const machine = document.getElementById('locationSelect').value;
+
+        const btn = document.getElementById('searchBtn');
+        btn.disabled = true;
+        setStatus('Querying database…', 'loading');
+        document.getElementById('results-section').style.display = 'none';
+
+        try {
+            let url = `/api/dispenses?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
+            const resp = await fetch(url);
+            const data = await resp.json();
+
+            if (data.error) { setStatus('Error: ' + data.error, 'error'); return; }
+            setStatus('', '');
+            renderResults(data.results, data.total);
+        } catch (e) {
+            setStatus('Could not reach the server. Make sure app.py is running.', 'error');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function renderResults(results, total) {
+        document.getElementById('totalCount').textContent   = total.toLocaleString();
+        document.getElementById('skuCount').textContent     = results.length;
+        document.getElementById('footer-total').textContent = total.toLocaleString();
+
+        const tbody    = document.getElementById('results-body');
+        const maxCount = results.length > 0 ? results[0].count : 1;
+
+        if (results.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:32px">No dispense records found in this time range.</td></tr>`;
+        } else {
+            tbody.innerHTML = results.map((r, i) => {
+                const pct    = total > 0 ? ((r.count / total) * 100).toFixed(1) : '0.0';
+                const barPct = ((r.count / maxCount) * 100).toFixed(1);
+                return `
+                    <tr>
+                        <td>${i + 1}</td>
+                        <td>${esc(r.sku)}</td>
+                        <td class="right">${r.count.toLocaleString()}</td>
+                        <td class="right">${pct}%</td>
+                        <td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:${barPct}%"></div></div></td>
+                    </tr>`;
+            }).join('');
+        }
+        document.getElementById('results-section').style.display = 'block';
+    }
+
+    // ── Admin: location table ──────────────────────────────────────────────────
+    function renderAdminTable(locations) {
+        const tbody = document.getElementById('adminTableBody');
+        if (!tbody) return;
+
+        if (locations.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="3" style="color:#9ca3af;padding:16px">No locations found.</td></tr>`;
+            return;
+        }
+
+        tbody.innerHTML = locations.map(loc => `
+            <tr id="row-${esc(loc.code)}">
+                <td id="name-${esc(loc.code)}">${esc(loc.name)}</td>
+                <td>${esc(loc.code)}</td>
+                <td>
+                    <div class="action-cell">
+                        <button class="btn btn-secondary btn-sm" onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}')">Edit</button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function startEdit(code, currentName) {
+        const nameCell = document.getElementById(`name-${code}`);
+        const row      = document.getElementById(`row-${code}`);
+        const actCell  = row.querySelector('.action-cell');
+
+        nameCell.innerHTML = `<input type="text" value="${esc(currentName)}" id="edit-input-${esc(code)}">`;
+        actCell.innerHTML  = `
+            <button class="btn btn-primary btn-sm" onclick="saveEdit('${esc(code)}')">Save</button>
+            <button class="btn btn-secondary btn-sm" onclick="loadLocations()">Cancel</button>
+        `;
+    }
+
+    async function saveEdit(code) {
+        const input = document.getElementById(`edit-input-${code}`);
+        const name  = input.value.trim();
+        if (!name) { setStatus('Location name cannot be empty.', 'error', 'adminStatus'); return; }
+
+        try {
+            const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
+            setStatus('Location updated.', 'success', 'adminStatus');
+            setTimeout(() => setStatus('', '', 'adminStatus'), 3000);
+            loadLocations();
+        } catch (e) {
+            setStatus('Failed to save. Check your connection.', 'error', 'adminStatus');
+        }
+    }
+
+    async function addLocation() {
+        const name = document.getElementById('newName').value.trim();
+        const code = document.getElementById('newCode').value.trim();
+        if (!name || !code) {
+            setStatus('Both location name and machine code are required.', 'error', 'adminStatus');
+            return;
+        }
+        try {
+            const resp = await fetch('/api/admin/locations', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, code }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
+            setStatus('Location added.', 'success', 'adminStatus');
+            setTimeout(() => setStatus('', '', 'adminStatus'), 3000);
+            document.getElementById('newName').value = '';
+            document.getElementById('newCode').value = '';
+            loadLocations();
+        } catch (e) {
+            setStatus('Failed to add. Check your connection.', 'error', 'adminStatus');
+        }
+    }
+
+    function esc(str) {
+        return String(str)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+</script>
+
+</body>
+</html>
