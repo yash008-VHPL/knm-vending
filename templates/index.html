@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vending Machine Dispense Report</title>
+    <title>KNM Vending Dashboard</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -54,9 +54,36 @@
         }
         .logout-btn:hover { background: rgba(255,255,255,0.25); }
 
+        /* ── Tab bar ── */
+        .tab-bar {
+            background: white;
+            border-bottom: 1px solid #e5e7eb;
+            display: flex;
+            padding: 0 32px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+        }
+        .tab-btn {
+            padding: 14px 24px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: #6b7280;
+            border: none;
+            border-bottom: 3px solid transparent;
+            background: none;
+            cursor: pointer;
+            transition: color 0.15s, border-color 0.15s;
+            margin-bottom: -1px;
+        }
+        .tab-btn:hover { color: #1a56db; }
+        .tab-btn.active { color: #1a56db; border-bottom-color: #1a56db; }
+
+        /* ── Tab panes ── */
+        .tab-pane { display: none; }
+        .tab-pane.active { display: block; }
+
         /* ── Layout ── */
         .container {
-            max-width: 980px;
+            max-width: 1000px;
             margin: 32px auto;
             padding: 0 24px;
         }
@@ -80,7 +107,7 @@
         /* ── Controls ── */
         .controls {
             display: flex;
-            gap: 20px;
+            gap: 16px;
             align-items: flex-end;
             flex-wrap: wrap;
         }
@@ -105,7 +132,7 @@
             color: #111827;
             background: white;
         }
-        select           { min-width: 180px; }
+        select             { min-width: 180px; }
         input[type="text"] { width: 110px; }
         input[type="date"] { width: 150px; }
 
@@ -133,8 +160,10 @@
         .btn-primary:hover   { background: #1e429f; }
         .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
         .btn-secondary:hover { background: #e5e7eb; }
+        .btn-danger    { background: #dc2626; color: white; }
+        .btn-danger:hover    { background: #b91c1c; }
         .btn-sm { padding: 5px 12px; font-size: 0.8rem; }
-        .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+        .btn:disabled { background: #9ca3af !important; cursor: not-allowed; color: white; }
 
         /* ── Status ── */
         .status {
@@ -147,7 +176,7 @@
         .status.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
         .status.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
 
-        /* ── Summary boxes ── */
+        /* ── Summary boxes (Sales) ── */
         .summary { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
         .stat-box {
             background: #f9fafb;
@@ -159,7 +188,7 @@
         .stat-box .value { font-size: 2rem; font-weight: 700; color: #1a56db; line-height: 1; }
         .stat-box .label { font-size: 0.75rem; color: #6b7280; margin-top: 4px; }
 
-        /* ── Results table ── */
+        /* ── Tables ── */
         table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
         thead tr { border-bottom: 2px solid #e5e7eb; }
         th {
@@ -176,16 +205,16 @@
         tbody tr { border-bottom: 1px solid #f3f4f6; transition: background 0.1s; }
         tbody tr:hover { background: #f8faff; }
         td { padding: 12px 16px; color: #374151; vertical-align: middle; }
-        td .sku-code { font-size: 0.72rem; color: #9ca3af; margin-top: 2px; }
-
-        .bar-cell { width: 130px; }
-        .bar-bg { background: #e5e7eb; border-radius: 4px; height: 8px; overflow: hidden; }
-        .bar-fill { background: #1a56db; height: 100%; border-radius: 4px; transition: width 0.5s ease; }
 
         tfoot tr { border-top: 2px solid #e5e7eb; background: #f9fafb; }
         tfoot td  { font-weight: 700; color: #111827; }
 
-        /* ── Admin: location table ── */
+        /* ── Bar chart cell (Sales) ── */
+        .bar-cell { width: 130px; }
+        .bar-bg { background: #e5e7eb; border-radius: 4px; height: 8px; overflow: hidden; }
+        .bar-fill { background: #1a56db; height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+
+        /* ── Admin table ── */
         .admin-table td input[type="text"] {
             width: 100%;
             padding: 5px 8px;
@@ -193,7 +222,6 @@
         }
         .action-cell { display: flex; gap: 6px; }
 
-        /* ── Admin: add form ── */
         .add-form {
             display: flex;
             gap: 12px;
@@ -203,17 +231,18 @@
             padding-top: 20px;
             border-top: 1px solid #f3f4f6;
         }
-        .add-form input[type="text"] { width: 200px; }
+        .add-form input[type="text"] { width: 150px; }
 
-        #results-section { display: none; }
+        /* ── Topup status table ── */
+        .never-tag { color: #9ca3af; font-style: italic; }
     </style>
 </head>
 <body>
 
 <header>
     <div>
-        <h1>Vending Machine Dispense Report</h1>
-        <p>View total dispenses by SKU within a selected time range</p>
+        <h1>KNM Vending Dashboard</h1>
+        <p>Sales, messages and topup management</p>
     </div>
     <div class="header-user">
         <span>{{ username }}</span>
@@ -222,73 +251,199 @@
     </div>
 </header>
 
+<div class="tab-bar">
+    <button class="tab-btn active" onclick="switchTab('sales', this)">Sales</button>
+    <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
+    <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
+</div>
+
 <div class="container">
 
-    <!-- ── Search ── -->
-    <div class="card">
-        <div class="controls">
-            <div class="field-group">
-                <div class="field-label">Location</div>
-                <select id="locationSelect">
-                    <option value="">All Locations</option>
-                </select>
-            </div>
-            <div class="field-group">
-                <div class="field-label">Start</div>
-                <div class="datetime-row">
-                    <input type="date" id="startDate">
-                    <input type="time" id="startTime" value="00:00">
-                </div>
-            </div>
-            <div class="field-group">
-                <div class="field-label">End</div>
-                <div class="datetime-row">
-                    <input type="date" id="endDate">
-                    <input type="time" id="endTime" value="23:59">
-                </div>
-            </div>
-            <button class="btn btn-primary" id="searchBtn" onclick="search()">Search</button>
-        </div>
-        <div id="status" style="display:none"></div>
-    </div>
+    <!-- ══════════════════════════════════════════
+         TAB: Sales
+    ══════════════════════════════════════════ -->
+    <div id="tab-sales" class="tab-pane active">
 
-    <!-- ── Results ── -->
-    <div id="results-section">
         <div class="card">
-            <div class="summary">
-                <div class="stat-box">
-                    <div class="value" id="totalCount">0</div>
-                    <div class="label">Total Dispenses</div>
+            <div class="controls">
+                <div class="field-group">
+                    <div class="field-label">Location</div>
+                    <select id="locationSelect">
+                        <option value="">All Locations</option>
+                    </select>
                 </div>
-                <div class="stat-box">
-                    <div class="value" id="skuCount">0</div>
-                    <div class="label">Unique SKUs</div>
+                <div class="field-group">
+                    <div class="field-label">Start</div>
+                    <div class="datetime-row">
+                        <input type="date" id="startDate">
+                        <input type="time" id="startTime" value="00:00">
+                    </div>
+                </div>
+                <div class="field-group">
+                    <div class="field-label">End</div>
+                    <div class="datetime-row">
+                        <input type="date" id="endDate">
+                        <input type="time" id="endTime" value="23:59">
+                    </div>
+                </div>
+                <button class="btn btn-primary" id="searchBtn" onclick="searchSales()">Search</button>
+            </div>
+            <div id="status" style="display:none"></div>
+        </div>
+
+        <div id="results-section" style="display:none">
+            <div class="card">
+                <div class="summary">
+                    <div class="stat-box">
+                        <div class="value" id="totalCount">0</div>
+                        <div class="label">Total Dispenses</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="value" id="skuCount">0</div>
+                        <div class="label">Unique SKUs</div>
+                    </div>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:40px">#</th>
+                            <th>SKU</th>
+                            <th class="right" style="width:100px">Count</th>
+                            <th class="right" style="width:90px">% of Total</th>
+                            <th class="bar-cell"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body"></tbody>
+                    <tfoot>
+                        <tr>
+                            <td colspan="2">Total</td>
+                            <td class="right" id="footer-total"></td>
+                            <td class="right">100%</td>
+                            <td></td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+        </div>
+
+    </div><!-- /tab-sales -->
+
+
+    <!-- ══════════════════════════════════════════
+         TAB: Messages
+    ══════════════════════════════════════════ -->
+    <div id="tab-messages" class="tab-pane">
+
+        <div class="card">
+            <div class="controls">
+                <div class="field-group">
+                    <div class="field-label">Start</div>
+                    <div class="datetime-row">
+                        <input type="date" id="msgStartDate">
+                        <input type="time" id="msgStartTime" value="00:00">
+                    </div>
+                </div>
+                <div class="field-group">
+                    <div class="field-label">End</div>
+                    <div class="datetime-row">
+                        <input type="date" id="msgEndDate">
+                        <input type="time" id="msgEndTime" value="23:59">
+                    </div>
                 </div>
             </div>
+            <div class="controls" style="margin-top:16px">
+                <div class="field-group">
+                    <div class="field-label">Machine</div>
+                    <select id="msgMachineSelect">
+                        <option value="">All Machines</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <div class="field-label">Message Type</div>
+                    <select id="msgTypeSelect">
+                        <option value="">-- Select Type --</option>
+                        <option value="error">Error</option>
+                        <option value="exception">Exception</option>
+                        <option value="event">Event</option>
+                        <option value="message">Message</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" id="msgSearchBtn" onclick="searchMessages()">Search</button>
+            </div>
+            <div id="msgStatus" style="display:none"></div>
+        </div>
+
+        <div id="msgResults" style="display:none">
+            <div class="card">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:200px">Timestamp</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody id="msgBody"></tbody>
+                </table>
+                <div id="msgCount" style="margin-top:12px;font-size:0.8rem;color:#6b7280"></div>
+            </div>
+        </div>
+
+    </div><!-- /tab-messages -->
+
+
+    <!-- ══════════════════════════════════════════
+         TAB: Topups
+    ══════════════════════════════════════════ -->
+    <div id="tab-topups" class="tab-pane">
+
+        <!-- Log Topup form -->
+        <div class="card">
+            <div class="card-title">Log Topup</div>
+            <div class="controls">
+                <div class="field-group">
+                    <div class="field-label">Machine</div>
+                    <select id="topupMachineSelect">
+                        <option value="">-- Select Machine --</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <div class="field-label">Topup Date &amp; Time</div>
+                    <div class="datetime-row">
+                        <input type="date" id="topupDate">
+                        <input type="time" id="topupTime" value="12:00">
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="logTopup()">Log Topup</button>
+                <button class="btn btn-danger"  onclick="undoTopup()">Undo Last Topup</button>
+            </div>
+            <div id="topupFormStatus" style="display:none"></div>
+        </div>
+
+        <!-- Topup status table -->
+        <div class="card">
+            <div class="card-title">Topup Status — All Machines</div>
+            <div id="topupTableStatus" style="display:none"></div>
             <table>
                 <thead>
                     <tr>
-                        <th style="width:40px">#</th>
-                        <th>SKU</th>
-                        <th class="right" style="width:100px">Count</th>
-                        <th class="right" style="width:90px">% of Total</th>
-                        <th class="bar-cell"></th>
+                        <th>Machine</th>
+                        <th>Last Topup</th>
+                        <th class="right">Vends Before Topup</th>
+                        <th class="right">Vends Since Topup</th>
                     </tr>
                 </thead>
-                <tbody id="results-body"></tbody>
-                <tfoot>
-                    <tr>
-                        <td colspan="2">Total</td>
-                        <td class="right" id="footer-total"></td>
-                        <td class="right">100%</td>
-                        <td></td>
-                    </tr>
-                </tfoot>
+                <tbody id="topupTableBody">
+                    <tr><td colspan="4" style="color:#9ca3af;padding:16px">Loading…</td></tr>
+                </tbody>
             </table>
         </div>
-    </div>
 
-    <!-- ── Admin: Location Management (admin role only) ── -->
+    </div><!-- /tab-topups -->
+
+
+    <!-- ══════════════════════════════════════════
+         Admin: Location Management (admin only)
+    ══════════════════════════════════════════ -->
     {% if role == 'admin' %}
     <div class="card">
         <div class="card-title">Location Management</div>
@@ -298,16 +453,17 @@
             <thead>
                 <tr>
                     <th>Location Name</th>
-                    <th style="width:160px">Machine Code</th>
-                    <th style="width:160px"></th>
+                    <th style="width:140px">Machine Code</th>
+                    <th style="width:110px">Latitude</th>
+                    <th style="width:110px">Longitude</th>
+                    <th style="width:150px"></th>
                 </tr>
             </thead>
             <tbody id="adminTableBody">
-                <tr><td colspan="3" style="color:#9ca3af;padding:16px">Loading…</td></tr>
+                <tr><td colspan="5" style="color:#9ca3af;padding:16px">Loading…</td></tr>
             </tbody>
         </table>
 
-        <!-- Add new location -->
         <div class="add-form">
             <div class="field-group">
                 <div class="field-label">Location Name</div>
@@ -317,12 +473,20 @@
                 <div class="field-label">Machine Code</div>
                 <input type="text" id="newCode" placeholder="e.g. 43020634">
             </div>
+            <div class="field-group">
+                <div class="field-label">Latitude</div>
+                <input type="text" id="newLat" placeholder="e.g. 1.2847">
+            </div>
+            <div class="field-group">
+                <div class="field-label">Longitude</div>
+                <input type="text" id="newLon" placeholder="e.g. 103.8481">
+            </div>
             <button class="btn btn-primary" onclick="addLocation()">Add Location</button>
         </div>
     </div>
     {% endif %}
 
-</div>
+</div><!-- /container -->
 
 <script>
     const USER_ROLE = "{{ role }}";
@@ -333,17 +497,41 @@
     const mm    = String(now.getMonth() + 1).padStart(2, '0');
     const dd    = String(now.getDate()).padStart(2, '0');
     const today = `${yyyy}-${mm}-${dd}`;
-    document.getElementById('startDate').value = today;
-    document.getElementById('endDate').value   = today;
 
-    // ── Load locations dropdown ────────────────────────────────────────────────
+    ['startDate', 'endDate', 'msgStartDate', 'msgEndDate', 'topupDate'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = today;
+    });
+
+    // ── Tab switching ──────────────────────────────────────────────────────────
+    function switchTab(name, btn) {
+        document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.getElementById('tab-' + name).classList.add('active');
+        if (btn) btn.classList.add('active');
+        if (name === 'topups') loadTopups();
+    }
+
+    // ── Status helper ──────────────────────────────────────────────────────────
+    function setStatus(msg, type, elId) {
+        const el = document.getElementById(elId || 'status');
+        if (!el) return;
+        el.style.display = msg ? 'block' : 'none';
+        el.className = 'status ' + (type || '');
+        el.textContent = msg;
+    }
+
+    // ── Load locations (populates all dropdowns + admin table) ─────────────────
     async function loadLocations() {
         try {
             const resp = await fetch('/api/locations');
             const data = await resp.json();
-            if (!data.error) {
-                const sel = document.getElementById('locationSelect');
-                // Clear all but first "All Locations" option
+            if (data.error) return;
+
+            // Sales + Messages dropdowns (with "All" option already in HTML)
+            [['locationSelect', true], ['msgMachineSelect', true]].forEach(([id, hasAll]) => {
+                const sel = document.getElementById(id);
+                if (!sel) return;
                 while (sel.options.length > 1) sel.remove(1);
                 data.forEach(loc => {
                     const opt = document.createElement('option');
@@ -351,38 +539,42 @@
                     opt.textContent = loc.name;
                     sel.appendChild(opt);
                 });
-                if (USER_ROLE === 'admin') renderAdminTable(data);
+            });
+
+            // Topup dropdown (no "all" option — one machine required)
+            const topupSel = document.getElementById('topupMachineSelect');
+            if (topupSel) {
+                topupSel.innerHTML = '<option value="">-- Select Machine --</option>';
+                data.forEach(loc => {
+                    const opt = document.createElement('option');
+                    opt.value = loc.code;
+                    opt.textContent = loc.name;
+                    topupSel.appendChild(opt);
+                });
             }
+
+            if (USER_ROLE === 'admin') renderAdminTable(data);
         } catch (e) { /* silently ignore */ }
     }
     loadLocations();
 
-    // ── Search ─────────────────────────────────────────────────────────────────
-    function setStatus(msg, type, elId = 'status') {
-        const el = document.getElementById(elId);
-        el.style.display = msg ? 'block' : 'none';
-        el.className = 'status ' + (type || '');
-        el.textContent = msg;
-    }
+    // ══════════════════════════════════════════
+    // SALES
+    // ══════════════════════════════════════════
 
-    async function search() {
-        const startDate = document.getElementById('startDate').value;
-        const startTime = document.getElementById('startTime').value;
-        const endDate   = document.getElementById('endDate').value;
-        const endTime   = document.getElementById('endTime').value;
+    async function searchSales() {
+        const start   = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
+        const end     = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
+        const machine = document.getElementById('locationSelect').value;
 
-        if (!startDate || !endDate) {
-            setStatus('Please enter a start and end date in YY-MM-DD format.', 'error');
+        if (!document.getElementById('startDate').value || !document.getElementById('endDate').value) {
+            setStatus('Please enter a start and end date.', 'error', 'status');
             return;
         }
 
-        const start   = `${startDate} ${startTime}`;
-        const end     = `${endDate} ${endTime}`;
-        const machine = document.getElementById('locationSelect').value;
-
         const btn = document.getElementById('searchBtn');
         btn.disabled = true;
-        setStatus('Querying database…', 'loading');
+        setStatus('Querying database…', 'loading', 'status');
         document.getElementById('results-section').style.display = 'none';
 
         try {
@@ -390,18 +582,17 @@
             if (machine) url += `&machine=${encodeURIComponent(machine)}`;
             const resp = await fetch(url);
             const data = await resp.json();
-
-            if (data.error) { setStatus('Error: ' + data.error, 'error'); return; }
-            setStatus('', '');
-            renderResults(data.results, data.total);
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'status'); return; }
+            setStatus('', '', 'status');
+            renderSalesResults(data.results, data.total);
         } catch (e) {
-            setStatus('Could not reach the server. Make sure app.py is running.', 'error');
+            setStatus('Could not reach the server.', 'error', 'status');
         } finally {
             btn.disabled = false;
         }
     }
 
-    function renderResults(results, total) {
+    function renderSalesResults(results, total) {
         document.getElementById('totalCount').textContent   = total.toLocaleString();
         document.getElementById('skuCount').textContent     = results.length;
         document.getElementById('footer-total').textContent = total.toLocaleString();
@@ -428,35 +619,184 @@
         document.getElementById('results-section').style.display = 'block';
     }
 
-    // ── Admin: location table ──────────────────────────────────────────────────
-    function renderAdminTable(locations) {
-        const tbody = document.getElementById('adminTableBody');
-        if (!tbody) return;
+    // ══════════════════════════════════════════
+    // MESSAGES
+    // ══════════════════════════════════════════
 
-        if (locations.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="3" style="color:#9ca3af;padding:16px">No locations found.</td></tr>`;
+    async function searchMessages() {
+        const start   = `${document.getElementById('msgStartDate').value} ${document.getElementById('msgStartTime').value}`;
+        const end     = `${document.getElementById('msgEndDate').value} ${document.getElementById('msgEndTime').value}`;
+        const machine = document.getElementById('msgMachineSelect').value;
+        const type    = document.getElementById('msgTypeSelect').value;
+
+        if (!document.getElementById('msgStartDate').value || !document.getElementById('msgEndDate').value) {
+            setStatus('Please enter a start and end date.', 'error', 'msgStatus');
+            return;
+        }
+        if (!type) {
+            setStatus('Please select a message type.', 'error', 'msgStatus');
             return;
         }
 
+        const btn = document.getElementById('msgSearchBtn');
+        btn.disabled = true;
+        setStatus('Querying database…', 'loading', 'msgStatus');
+        document.getElementById('msgResults').style.display = 'none';
+
+        try {
+            let url = `/api/messages?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&type=${type}`;
+            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'msgStatus'); return; }
+            setStatus('', '', 'msgStatus');
+            renderMessages(data.results);
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'msgStatus');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function renderMessages(results) {
+        const tbody = document.getElementById('msgBody');
+        if (results.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="2" style="text-align:center;color:#9ca3af;padding:32px">No messages found in this time range.</td></tr>`;
+        } else {
+            tbody.innerHTML = results.map(r => `
+                <tr>
+                    <td>${esc(r.timestamp)}</td>
+                    <td>${esc(r.name)}</td>
+                </tr>
+            `).join('');
+        }
+        document.getElementById('msgCount').textContent = results.length
+            ? `${results.length.toLocaleString()} record${results.length !== 1 ? 's' : ''} found`
+            : '';
+        document.getElementById('msgResults').style.display = 'block';
+    }
+
+    // ══════════════════════════════════════════
+    // TOPUPS
+    // ══════════════════════════════════════════
+
+    async function loadTopups() {
+        setStatus('Loading…', 'loading', 'topupTableStatus');
+        try {
+            const resp = await fetch('/api/topups');
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'topupTableStatus'); return; }
+            setStatus('', '', 'topupTableStatus');
+            renderTopupTable(data.machines);
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'topupTableStatus');
+        }
+    }
+
+    function renderTopupTable(machines) {
+        const tbody = document.getElementById('topupTableBody');
+        if (!machines || machines.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" style="color:#9ca3af;padding:16px">No machines found.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = machines.map(m => `
+            <tr>
+                <td>${esc(m.name)}</td>
+                <td>${m.last_topup
+                        ? esc(m.last_topup)
+                        : '<span class="never-tag">Never</span>'}</td>
+                <td class="right">${m.vends_before !== null && m.last_topup
+                        ? m.vends_before.toLocaleString()
+                        : '<span style="color:#9ca3af">—</span>'}</td>
+                <td class="right">${m.vends_since.toLocaleString()}</td>
+            </tr>
+        `).join('');
+    }
+
+    async function logTopup() {
+        const code = document.getElementById('topupMachineSelect').value;
+        const date = document.getElementById('topupDate').value;
+        const time = document.getElementById('topupTime').value;
+
+        if (!code) { setStatus('Please select a machine.', 'error', 'topupFormStatus'); return; }
+        if (!date) { setStatus('Please select a date.', 'error', 'topupFormStatus'); return; }
+
+        setStatus('Saving topup…', 'loading', 'topupFormStatus');
+        try {
+            const resp = await fetch(`/api/topups/${encodeURIComponent(code)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ timestamp: `${date} ${time}` }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'topupFormStatus'); return; }
+            setStatus('Topup logged successfully.', 'success', 'topupFormStatus');
+            setTimeout(() => setStatus('', '', 'topupFormStatus'), 3000);
+            loadTopups();
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'topupFormStatus');
+        }
+    }
+
+    async function undoTopup() {
+        const code = document.getElementById('topupMachineSelect').value;
+        if (!code) { setStatus('Please select a machine.', 'error', 'topupFormStatus'); return; }
+
+        const machineName = document.getElementById('topupMachineSelect').selectedOptions[0].text;
+        if (!confirm(`Undo the last topup for "${machineName}"? This cannot be undone.`)) return;
+
+        setStatus('Reversing topup…', 'loading', 'topupFormStatus');
+        try {
+            const resp = await fetch(`/api/topups/${encodeURIComponent(code)}`, { method: 'DELETE' });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'topupFormStatus'); return; }
+            setStatus('Last topup reversed.', 'success', 'topupFormStatus');
+            setTimeout(() => setStatus('', '', 'topupFormStatus'), 3000);
+            loadTopups();
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'topupFormStatus');
+        }
+    }
+
+    // ══════════════════════════════════════════
+    // ADMIN: Location management
+    // ══════════════════════════════════════════
+
+    function renderAdminTable(locations) {
+        const tbody = document.getElementById('adminTableBody');
+        if (!tbody) return;
+        if (locations.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="5" style="color:#9ca3af;padding:16px">No locations found.</td></tr>`;
+            return;
+        }
         tbody.innerHTML = locations.map(loc => `
             <tr id="row-${esc(loc.code)}">
                 <td id="name-${esc(loc.code)}">${esc(loc.name)}</td>
                 <td>${esc(loc.code)}</td>
+                <td id="lat-${esc(loc.code)}">${loc.lat !== null ? loc.lat : ''}</td>
+                <td id="lon-${esc(loc.code)}">${loc.lon !== null ? loc.lon : ''}</td>
                 <td>
                     <div class="action-cell">
-                        <button class="btn btn-secondary btn-sm" onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}')">Edit</button>
+                        <button class="btn btn-secondary btn-sm"
+                            onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}', '${loc.lat ?? ''}', '${loc.lon ?? ''}')">
+                            Edit
+                        </button>
                     </div>
                 </td>
             </tr>
         `).join('');
     }
 
-    function startEdit(code, currentName) {
+    function startEdit(code, name, lat, lon) {
+        const row     = document.getElementById(`row-${code}`);
         const nameCell = document.getElementById(`name-${code}`);
-        const row      = document.getElementById(`row-${code}`);
+        const latCell  = document.getElementById(`lat-${code}`);
+        const lonCell  = document.getElementById(`lon-${code}`);
         const actCell  = row.querySelector('.action-cell');
 
-        nameCell.innerHTML = `<input type="text" value="${esc(currentName)}" id="edit-input-${esc(code)}">`;
+        nameCell.innerHTML = `<input type="text" value="${esc(name)}" id="edit-name-${esc(code)}" style="width:100%;padding:5px 8px">`;
+        latCell.innerHTML  = `<input type="text" value="${esc(lat)}"  id="edit-lat-${esc(code)}"  style="width:100%;padding:5px 8px" placeholder="e.g. 1.2847">`;
+        lonCell.innerHTML  = `<input type="text" value="${esc(lon)}"  id="edit-lon-${esc(code)}"  style="width:100%;padding:5px 8px" placeholder="e.g. 103.8481">`;
         actCell.innerHTML  = `
             <button class="btn btn-primary btn-sm" onclick="saveEdit('${esc(code)}')">Save</button>
             <button class="btn btn-secondary btn-sm" onclick="loadLocations()">Cancel</button>
@@ -464,15 +804,15 @@
     }
 
     async function saveEdit(code) {
-        const input = document.getElementById(`edit-input-${code}`);
-        const name  = input.value.trim();
+        const name = document.getElementById(`edit-name-${code}`).value.trim();
+        const lat  = document.getElementById(`edit-lat-${code}`).value.trim();
+        const lon  = document.getElementById(`edit-lon-${code}`).value.trim();
         if (!name) { setStatus('Location name cannot be empty.', 'error', 'adminStatus'); return; }
-
         try {
             const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name }),
+                body: JSON.stringify({ name, lat: lat || null, lon: lon || null }),
             });
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
@@ -480,35 +820,39 @@
             setTimeout(() => setStatus('', '', 'adminStatus'), 3000);
             loadLocations();
         } catch (e) {
-            setStatus('Failed to save. Check your connection.', 'error', 'adminStatus');
+            setStatus('Failed to save.', 'error', 'adminStatus');
         }
     }
 
     async function addLocation() {
         const name = document.getElementById('newName').value.trim();
         const code = document.getElementById('newCode').value.trim();
+        const lat  = document.getElementById('newLat').value.trim();
+        const lon  = document.getElementById('newLon').value.trim();
         if (!name || !code) {
-            setStatus('Both location name and machine code are required.', 'error', 'adminStatus');
+            setStatus('Location name and machine code are required.', 'error', 'adminStatus');
             return;
         }
         try {
             const resp = await fetch('/api/admin/locations', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, code }),
+                body: JSON.stringify({ name, code, lat: lat || null, lon: lon || null }),
             });
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
             setStatus('Location added.', 'success', 'adminStatus');
             setTimeout(() => setStatus('', '', 'adminStatus'), 3000);
-            document.getElementById('newName').value = '';
-            document.getElementById('newCode').value = '';
+            ['newName', 'newCode', 'newLat', 'newLon'].forEach(id => {
+                document.getElementById(id).value = '';
+            });
             loadLocations();
         } catch (e) {
-            setStatus('Failed to add. Check your connection.', 'error', 'adminStatus');
+            setStatus('Failed to add.', 'error', 'adminStatus');
         }
     }
 
+    // ── Escape HTML ────────────────────────────────────────────────────────────
     function esc(str) {
         return String(str)
             .replace(/&/g, '&amp;').replace(/</g, '&lt;')
