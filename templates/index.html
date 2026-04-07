@@ -255,6 +255,9 @@
     <button class="tab-btn active" onclick="switchTab('sales', this)">Sales</button>
     <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
+    {% if role == 'admin' %}
+    <button class="tab-btn"        onclick="switchTab('admin', this)">Locations</button>
+    {% endif %}
 </div>
 
 <div class="container">
@@ -442,9 +445,10 @@
 
 
     <!-- ══════════════════════════════════════════
-         Admin: Location Management (admin only)
+         TAB: Locations (admin only)
     ══════════════════════════════════════════ -->
     {% if role == 'admin' %}
+    <div id="tab-admin" class="tab-pane">
     <div class="card">
         <div class="card-title">Location Management</div>
         <div id="adminStatus" style="display:none"></div>
@@ -484,6 +488,7 @@
             <button class="btn btn-primary" onclick="addLocation()">Add Location</button>
         </div>
     </div>
+    </div><!-- /tab-admin -->
     {% endif %}
 
 </div><!-- /container -->
