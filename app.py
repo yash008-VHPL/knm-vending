@@ -1,5 +1,6 @@
 import base64
 import json
+import math
 from flask import Flask, render_template, request, jsonify, redirect
 from functools import wraps
 import pymssql
@@ -300,6 +301,113 @@ try:
     seed_locations()
 except Exception as e:
     print(f"[startup] seed_locations failed: {e}")
+
+
+# ── Routing helpers (no external dependencies) ────────────────────────────────
+
+def haversine(lat1, lon1, lat2, lon2):
+    """Straight-line distance in km between two lat/lon points."""
+    R = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def kmeans_cluster(stops, k, max_iter=100):
+    """
+    Partition stops into k geographic clusters.
+    Uses k-means++ seeding for better initial centroids.
+    Each stop is a dict with 'lat' and 'lon'.
+    Returns a list of k lists (some may be empty if k > len(stops)).
+    """
+    if k >= len(stops):
+        return [[s] for s in stops] + [[] for _ in range(k - len(stops))]
+
+    # k-means++ seed: spread centroids out
+    import random
+    random.seed(42)
+    centroids = [stops[random.randrange(len(stops))]]
+    while len(centroids) < k:
+        dists = []
+        for s in stops:
+            d = min(haversine(s['lat'], s['lon'], c['lat'], c['lon']) for c in centroids)
+            dists.append(d ** 2)
+        total = sum(dists)
+        r = random.random() * total
+        cumul = 0
+        for i, d in enumerate(dists):
+            cumul += d
+            if cumul >= r:
+                centroids.append(stops[i])
+                break
+
+    # Iterate
+    cents = [(c['lat'], c['lon']) for c in centroids]
+    for _ in range(max_iter):
+        clusters = [[] for _ in range(k)]
+        for s in stops:
+            nearest = min(range(k), key=lambda i: haversine(s['lat'], s['lon'], cents[i][0], cents[i][1]))
+            clusters[nearest].append(s)
+        new_cents = []
+        for i, cluster in enumerate(clusters):
+            if cluster:
+                new_cents.append((
+                    sum(s['lat'] for s in cluster) / len(cluster),
+                    sum(s['lon'] for s in cluster) / len(cluster),
+                ))
+            else:
+                new_cents.append(cents[i])
+        if new_cents == cents:
+            break
+        cents = new_cents
+
+    return clusters
+
+
+def nearest_neighbor_tsp(stops):
+    """Order stops using nearest-neighbor heuristic. Starts from southernmost stop."""
+    if not stops:
+        return []
+    remaining = stops[:]
+    # Start at southernmost (lowest lat) as rough proxy for a south-side depot
+    start = min(remaining, key=lambda s: s['lat'])
+    remaining.remove(start)
+    route = [start]
+    while remaining:
+        last = route[-1]
+        nearest = min(remaining, key=lambda s: haversine(last['lat'], last['lon'], s['lat'], s['lon']))
+        route.append(nearest)
+        remaining.remove(nearest)
+    return route
+
+
+def build_maps_url(stops):
+    """
+    Build Google Maps driving directions URL(s) for an ordered list of stops.
+    Google Maps URL supports origin + up to 9 waypoints + destination (11 total).
+    Returns (url1, url2) where url2 is None unless there are >11 stops.
+    """
+    BASE = "https://www.google.com/maps/dir/?api=1&travelmode=driving"
+
+    def fmt(s):
+        return f"{s['lat']},{s['lon']}"
+
+    def make_url(segment):
+        if len(segment) < 2:
+            return f"{BASE}&origin={fmt(segment[0])}&destination={fmt(segment[0])}"
+        url = f"{BASE}&origin={fmt(segment[0])}&destination={fmt(segment[-1])}"
+        middle = segment[1:-1]
+        if middle:
+            url += "&waypoints=" + "|".join(fmt(s) for s in middle)
+        return url
+
+    if not stops:
+        return None, None
+    chunk1 = stops[:11]
+    chunk2 = [stops[10]] + stops[11:] if len(stops) > 11 else []
+    return make_url(chunk1), make_url(chunk2) if chunk2 else None
 
 
 # ── Message type prefix map ────────────────────────────────────────────────────
@@ -615,6 +723,131 @@ def delete_topup(code):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Dispatch planning ──────────────────────────────────────────────────────────
+
+SHIFT_HOURS   = 10.0   # 08:00–18:00
+HOURS_PER_STOP = 1.0
+AVG_SPEED_KMH  = 35.0  # Singapore urban average
+ROAD_FACTOR    = 1.3   # haversine-to-road distance multiplier
+
+DRIVER_COLOURS = [
+    "#1a56db", "#0891b2", "#7c3aed", "#059669",
+    "#d97706", "#dc2626", "#db2777", "#65a30d",
+]
+
+
+@app.route("/api/dispatch/plan", methods=["POST"])
+@dispatch_or_admin_required
+def plan_dispatch():
+    data      = request.get_json() or {}
+    codes     = [str(c).strip() for c in data.get("machine_codes", []) if c]
+    try:
+        num_drivers = max(1, min(20, int(data.get("num_drivers", 1))))
+    except (ValueError, TypeError):
+        return jsonify({"error": "num_drivers must be an integer between 1 and 20."}), 400
+
+    if not codes:
+        return jsonify({"error": "No locations selected."}), 400
+
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+
+        # Fetch selected locations that have coordinates
+        placeholders = ", ".join(["%s"] * len(codes))
+        cursor.execute(f"""
+            SELECT
+                ml.MachineCode,
+                ml.MachineName,
+                ml.Latitude,
+                ml.Longitude,
+                ml.LastTopupTimestamp,
+                (
+                    SELECT COUNT(*)
+                    FROM [MasterData Table] mdt
+                    WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
+                      AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+                      AND (
+                          ml.LastTopupTimestamp IS NULL
+                          OR CAST(mdt.[Date Time] AS FLOAT) >= ml.LastTopupTimestamp
+                      )
+                ) AS VendsSince
+            FROM MachineLookup ml
+            WHERE ml.MachineCode IN ({placeholders})
+              AND ml.Latitude  IS NOT NULL
+              AND ml.Longitude IS NOT NULL
+        """, tuple(codes))
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    found_codes = {str(row[0]) for row in rows}
+    skipped     = [c for c in codes if c not in found_codes]
+
+    if not rows:
+        return jsonify({"error": "None of the selected locations have coordinates on file."}), 400
+
+    stops = [{
+        "code":        str(row[0]),
+        "name":        row[1],
+        "lat":         float(row[2]),
+        "lon":         float(row[3]),
+        "last_topup":  from_ole_date(row[4]).strftime("%Y-%m-%d") if row[4] else None,
+        "vends_since": int(row[5]),
+    } for row in rows]
+
+    # Cap drivers to number of stops
+    effective_drivers = min(num_drivers, len(stops))
+    clusters = kmeans_cluster(stops, effective_drivers)
+
+    routes   = []
+    warnings = []
+
+    for i, cluster in enumerate(clusters):
+        if not cluster:
+            continue
+        ordered = nearest_neighbor_tsp(cluster)
+
+        # Estimate total shift time
+        travel_h = 0.0
+        for j in range(1, len(ordered)):
+            d = haversine(ordered[j-1]['lat'], ordered[j-1]['lon'],
+                          ordered[j]['lat'],  ordered[j]['lon'])
+            travel_h += (d * ROAD_FACTOR) / AVG_SPEED_KMH
+        total_h = travel_h + len(ordered) * HOURS_PER_STOP
+        within  = total_h <= SHIFT_HOURS
+
+        if not within:
+            warnings.append(
+                f"Driver {i+1}: estimated {total_h:.1f}h exceeds the 10-hour shift window."
+            )
+
+        url1, url2 = build_maps_url(ordered)
+        routes.append({
+            "driver":          i + 1,
+            "colour":          DRIVER_COLOURS[i % len(DRIVER_COLOURS)],
+            "stops":           ordered,
+            "stop_count":      len(ordered),
+            "estimated_hours": round(total_h, 1),
+            "within_shift":    within,
+            "maps_url":        url1,
+            "maps_url_2":      url2,
+        })
+
+    if skipped:
+        warnings.append(
+            f"{len(skipped)} location(s) skipped — no coordinates on file: "
+            + ", ".join(skipped)
+        )
+    if effective_drivers < num_drivers:
+        warnings.append(
+            f"Only {effective_drivers} driver(s) needed for {len(stops)} stop(s)."
+        )
+
+    return jsonify({"routes": routes, "warnings": warnings})
 
 
 # ── Admin: location management ─────────────────────────────────────────────────

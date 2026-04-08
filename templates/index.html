@@ -257,6 +257,7 @@
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
     {% if role == 'admin' or role == 'dispatch' %}
     <button class="tab-btn"        onclick="switchTab('admin', this)">Locations</button>
+    <button class="tab-btn"        onclick="switchTab('dispatch', this)">Dispatch</button>
     {% endif %}
 </div>
 
@@ -448,6 +449,39 @@
     <!-- ══════════════════════════════════════════
          TAB: Locations (admin only)
     ══════════════════════════════════════════ -->
+    <!-- ══════════════════════════════════════════
+         TAB: Dispatch (admin + dispatch only)
+    ══════════════════════════════════════════ -->
+    {% if role == 'admin' or role == 'dispatch' %}
+    <div id="tab-dispatch" class="tab-pane">
+
+        <div class="card">
+            <div class="card-title">Plan Dispatch Routes</div>
+            <div class="controls" style="margin-bottom:16px">
+                <button class="btn btn-secondary btn-sm" onclick="dispatchSelectAll()">Select All</button>
+                <button class="btn btn-secondary btn-sm" onclick="dispatchClearAll()">Clear All</button>
+                <div style="flex:1"></div>
+                <div class="field-group">
+                    <div class="field-label">Number of Drivers</div>
+                    <input type="number" id="numDrivers" value="2" min="1" max="20"
+                           style="width:80px;border:1px solid #d1d5db;border-radius:6px;padding:8px 12px;font-size:0.875rem">
+                </div>
+                <button class="btn btn-primary" id="planBtn" onclick="planRoutes()">Plan Routes</button>
+            </div>
+            <div id="dispatchStatus" style="display:none"></div>
+
+            <!-- Checkbox list -->
+            <div id="dispatchList" style="max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
+                <div style="color:#9ca3af;padding:16px">Loading locations…</div>
+            </div>
+        </div>
+
+        <!-- Route output cards -->
+        <div id="dispatchRoutes"></div>
+
+    </div><!-- /tab-dispatch -->
+    {% endif %}
+
     {% if role == 'admin' or role == 'dispatch' %}
     <div id="tab-admin" class="tab-pane">
     <div class="card">
@@ -517,7 +551,8 @@
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         document.getElementById('tab-' + name).classList.add('active');
         if (btn) btn.classList.add('active');
-        if (name === 'topups') loadTopups();
+        if (name === 'topups')   loadTopups();
+        if (name === 'dispatch') loadDispatchList();
     }
 
     // ── Status helper ──────────────────────────────────────────────────────────
@@ -859,6 +894,127 @@
         } catch (e) {
             setStatus('Failed to add.', 'error', 'adminStatus');
         }
+    }
+
+    // ══════════════════════════════════════════
+    // DISPATCH
+    // ══════════════════════════════════════════
+
+    let _dispatchLoaded = false;
+
+    async function loadDispatchList() {
+        if (_dispatchLoaded) return;
+        const resp = await fetch('/api/topups');
+        const data = await resp.json();
+        if (data.error) {
+            setStatus('Error loading locations: ' + data.error, 'error', 'dispatchStatus');
+            return;
+        }
+        const machines = data.machines.filter(m => m.code);
+        const list = document.getElementById('dispatchList');
+        if (!machines.length) {
+            list.innerHTML = '<div style="color:#9ca3af;padding:16px">No machines with coordinates found.</div>';
+            return;
+        }
+        list.innerHTML = machines.map(m => {
+            const since = m.vends_since !== null ? `${m.vends_since.toLocaleString()} vends since topup` : '';
+            const topup = m.last_topup ? `Last topup: ${esc(m.last_topup)}` : 'Never topped up';
+            return `
+            <label style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-bottom:1px solid #f3f4f6;cursor:pointer">
+                <input type="checkbox" class="dispatch-cb" value="${esc(m.code)}" checked style="width:16px;height:16px;cursor:pointer">
+                <span style="flex:1;font-size:0.875rem;font-weight:500">${esc(m.name)}</span>
+                <span style="font-size:0.75rem;color:#6b7280">${topup}</span>
+                ${since ? `<span style="font-size:0.75rem;color:#374151;font-weight:600;min-width:120px;text-align:right">${esc(since)}</span>` : ''}
+            </label>`;
+        }).join('');
+        _dispatchLoaded = true;
+    }
+
+    function dispatchSelectAll() {
+        document.querySelectorAll('.dispatch-cb').forEach(cb => cb.checked = true);
+    }
+    function dispatchClearAll() {
+        document.querySelectorAll('.dispatch-cb').forEach(cb => cb.checked = false);
+    }
+
+    async function planRoutes() {
+        const codes = [...document.querySelectorAll('.dispatch-cb:checked')].map(cb => cb.value);
+        if (!codes.length) {
+            setStatus('Please select at least one location.', 'error', 'dispatchStatus');
+            return;
+        }
+        const numDrivers = parseInt(document.getElementById('numDrivers').value) || 1;
+        const btn = document.getElementById('planBtn');
+        btn.disabled = true;
+        setStatus('Planning routes…', 'loading', 'dispatchStatus');
+        document.getElementById('dispatchRoutes').innerHTML = '';
+
+        try {
+            const resp = await fetch('/api/dispatch/plan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ machine_codes: codes, num_drivers: numDrivers }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'dispatchStatus'); return; }
+
+            // Show warnings inline
+            if (data.warnings && data.warnings.length) {
+                setStatus(data.warnings.join('  |  '), 'error', 'dispatchStatus');
+            } else {
+                setStatus('', '', 'dispatchStatus');
+            }
+            renderRoutes(data.routes);
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'dispatchStatus');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function renderRoutes(routes) {
+        const container = document.getElementById('dispatchRoutes');
+        container.innerHTML = routes.map(r => {
+            const shiftTag = r.within_shift
+                ? `<span style="color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:2px 10px;font-size:0.72rem">Within shift</span>`
+                : `<span style="color:#991b1b;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:2px 10px;font-size:0.72rem">Exceeds shift</span>`;
+
+            const rows = r.stops.map((s, i) => `
+                <tr>
+                    <td style="color:#9ca3af">${i + 1}</td>
+                    <td><strong>${esc(s.name)}</strong></td>
+                    <td>${s.last_topup ? esc(s.last_topup) : '<span style="color:#9ca3af">Never</span>'}</td>
+                    <td class="right">${s.vends_since.toLocaleString()}</td>
+                </tr>`).join('');
+
+            const mapsBtn = r.maps_url
+                ? `<a href="${r.maps_url}" target="_blank" class="btn btn-secondary btn-sm">Open in Google Maps</a>`
+                : '';
+            const mapsBtn2 = r.maps_url_2
+                ? `<a href="${r.maps_url_2}" target="_blank" class="btn btn-secondary btn-sm">Open in Google Maps (cont.)</a>`
+                : '';
+
+            return `
+            <div class="card" style="border-left:4px solid ${esc(r.colour)}">
+                <div class="card-title" style="display:flex;align-items:center;gap:12px">
+                    <span>Driver ${r.driver} — ${r.stop_count} stop${r.stop_count !== 1 ? 's' : ''}</span>
+                    <span style="font-size:0.8rem;color:#6b7280">Est. ${r.estimated_hours}h</span>
+                    ${shiftTag}
+                </div>
+                <table>
+                    <thead><tr>
+                        <th style="width:32px">#</th>
+                        <th>Location</th>
+                        <th style="width:130px">Last Topup</th>
+                        <th class="right" style="width:120px">Vends Since</th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+                <div style="margin-top:14px;display:flex;gap:10px">
+                    ${mapsBtn}${mapsBtn2}
+                </div>
+            </div>`;
+        }).join('');
     }
 
     // ── Escape HTML ────────────────────────────────────────────────────────────
