@@ -255,7 +255,7 @@
     <button class="tab-btn active" onclick="switchTab('sales', this)">Sales</button>
     <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
-    {% if role == 'admin' %}
+    {% if role == 'admin' or role == 'dispatch' %}
     <button class="tab-btn"        onclick="switchTab('admin', this)">Locations</button>
     {% endif %}
 </div>
@@ -448,7 +448,7 @@
     <!-- ══════════════════════════════════════════
          TAB: Locations (admin only)
     ══════════════════════════════════════════ -->
-    {% if role == 'admin' %}
+    {% if role == 'admin' or role == 'dispatch' %}
     <div id="tab-admin" class="tab-pane">
     <div class="card">
         <div class="card-title">Location Management</div>
@@ -469,6 +469,7 @@
             </tbody>
         </table>
 
+        {% if role == 'admin' %}
         <div class="add-form">
             <div class="field-group">
                 <div class="field-label">Location Name</div>
@@ -488,6 +489,7 @@
             </div>
             <button class="btn btn-primary" onclick="addLocation()">Add Location</button>
         </div>
+        {% endif %}
     </div>
     </div><!-- /tab-admin -->
     {% endif %}
@@ -559,7 +561,7 @@
                 });
             }
 
-            if (USER_ROLE === 'admin') renderAdminTable(data);
+            if (USER_ROLE === 'admin' || USER_ROLE === 'dispatch') renderAdminTable(data);
         } catch (e) { /* silently ignore */ }
     }
     loadLocations();

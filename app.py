@@ -65,6 +65,16 @@ def admin_required(f):
     return decorated
 
 
+def dispatch_or_admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        email = get_current_user()
+        if not email or get_role(email) not in ("admin", "dispatch"):
+            return jsonify({"error": "Unauthorized"}), 403
+        return f(*args, **kwargs)
+    return decorated
+
+
 # ── DB helpers ─────────────────────────────────────────────────────────────────
 
 OLE_EPOCH = datetime(1899, 12, 30)
@@ -637,7 +647,7 @@ def add_location():
 
 
 @app.route("/api/admin/locations/<path:code>", methods=["PUT"])
-@admin_required
+@dispatch_or_admin_required
 def update_location(code):
     data = request.get_json()
     name = (data.get("name") or "").strip()
