@@ -245,14 +245,15 @@ LOCATION_SEED = [
 def seed_locations():
     """
     Upsert location seed data into MachineLookup.
-    - Rows with a machine code: INSERT if code not present, UPDATE name+coords if it is.
+    - Rows with a machine code: UPDATE name+coords if code exists, INSERT otherwise.
     - Rows without a machine code: INSERT only if no row with that exact name exists.
-    Runs once at startup; safe to run repeatedly.
+    Each row is committed individually so one failure cannot roll back the rest.
     """
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        for code, name, lon, lat in LOCATION_SEED:
+    ok = fail = 0
+    for code, name, lon, lat in LOCATION_SEED:
+        try:
+            conn = get_connection()
+            cursor = conn.cursor()
             if code:
                 cursor.execute(
                     "SELECT COUNT(*) FROM MachineLookup WHERE MachineCode = %s", (code,)
@@ -276,11 +277,13 @@ def seed_locations():
                         "INSERT INTO MachineLookup (MachineName, Longitude, Latitude) VALUES (%s, %s, %s)",
                         (name, lon, lat),
                     )
-        conn.commit()
-        conn.close()
-        print("[seed_locations] Done.")
-    except Exception as e:
-        print(f"[seed_locations] Warning: {e}")
+            conn.commit()
+            conn.close()
+            ok += 1
+        except Exception as e:
+            print(f"[seed_locations] FAILED row ({code}, {name}): {e}")
+            fail += 1
+    print(f"[seed_locations] Done — {ok} ok, {fail} failed.")
 
 
 try:
