@@ -267,10 +267,13 @@ def get_messages():
     query = f"""
         SELECT
             CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
-            mc.EventName                   AS MessageName
+            mc.EventName                   AS MessageName,
+            ISNULL(ml.MachineName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
         FROM [MasterData Table] mdt
         INNER JOIN MasterCode mc
             ON mdt.[Event Code] = mc.ItemCode
+        LEFT JOIN MachineLookup ml
+            ON CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
         WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
           AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
           AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '{prefix}%'
@@ -291,7 +294,8 @@ def get_messages():
             dt = from_ole_date(row[0])
             results.append({
                 "timestamp": dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "Unknown",
-                "name": row[1],
+                "name":    row[1],
+                "machine": row[2],
             })
         return jsonify({"results": results})
     except Exception as e:
