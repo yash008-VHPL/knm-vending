@@ -315,63 +315,22 @@ def haversine(lat1, lon1, lat2, lon2):
     return 2 * R * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def kmeans_cluster(stops, k, max_iter=100):
-    """
-    Partition stops into k geographic clusters.
-    Uses k-means++ seeding for better initial centroids.
-    Each stop is a dict with 'lat' and 'lon'.
-    Returns a list of k lists (some may be empty if k > len(stops)).
-    """
-    if k >= len(stops):
-        return [[s] for s in stops] + [[] for _ in range(k - len(stops))]
-
-    # k-means++ seed: spread centroids out
-    import random
-    random.seed(42)
-    centroids = [stops[random.randrange(len(stops))]]
-    while len(centroids) < k:
-        dists = []
-        for s in stops:
-            d = min(haversine(s['lat'], s['lon'], c['lat'], c['lon']) for c in centroids)
-            dists.append(d ** 2)
-        total = sum(dists)
-        r = random.random() * total
-        cumul = 0
-        for i, d in enumerate(dists):
-            cumul += d
-            if cumul >= r:
-                centroids.append(stops[i])
-                break
-
-    # Iterate
-    cents = [(c['lat'], c['lon']) for c in centroids]
-    for _ in range(max_iter):
-        clusters = [[] for _ in range(k)]
-        for s in stops:
-            nearest = min(range(k), key=lambda i: haversine(s['lat'], s['lon'], cents[i][0], cents[i][1]))
-            clusters[nearest].append(s)
-        new_cents = []
-        for i, cluster in enumerate(clusters):
-            if cluster:
-                new_cents.append((
-                    sum(s['lat'] for s in cluster) / len(cluster),
-                    sum(s['lon'] for s in cluster) / len(cluster),
-                ))
-            else:
-                new_cents.append(cents[i])
-        if new_cents == cents:
-            break
-        cents = new_cents
-
-    return clusters
+def route_distance(route):
+    """Total haversine distance for an ordered list of stops."""
+    return sum(
+        haversine(route[i]['lat'], route[i]['lon'], route[i+1]['lat'], route[i+1]['lon'])
+        for i in range(len(route) - 1)
+    )
 
 
 def nearest_neighbor_tsp(stops):
-    """Order stops using nearest-neighbor heuristic. Starts from southernmost stop."""
+    """
+    Build an initial tour using the nearest-neighbor heuristic.
+    Starts from the southernmost stop (lowest lat) as a rough south-depot proxy.
+    """
     if not stops:
         return []
     remaining = stops[:]
-    # Start at southernmost (lowest lat) as rough proxy for a south-side depot
     start = min(remaining, key=lambda s: s['lat'])
     remaining.remove(start)
     route = [start]
@@ -381,6 +340,39 @@ def nearest_neighbor_tsp(stops):
         route.append(nearest)
         remaining.remove(nearest)
     return route
+
+
+def two_opt_improve(route):
+    """
+    Improve a route by repeatedly reversing segments that reduce total distance.
+    Eliminates crossing edges (loops). O(n^2) per pass, runs until no improvement.
+    """
+    best = route[:]
+    improved = True
+    while improved:
+        improved = False
+        for i in range(1, len(best) - 1):
+            for j in range(i + 1, len(best)):
+                candidate = best[:i] + best[i:j+1][::-1] + best[j+1:]
+                if route_distance(candidate) < route_distance(best) - 1e-9:
+                    best = candidate
+                    improved = True
+    return best
+
+
+def split_tour_equally(tour, k):
+    """
+    Split an ordered tour into k consecutive segments of as-equal size as possible.
+    Returns a list of k non-empty lists.
+    """
+    n = len(tour)
+    segments, idx = [], 0
+    for i in range(k):
+        size = (n - idx) // (k - i)   # distribute remainder evenly
+        if size > 0:
+            segments.append(tour[idx:idx + size])
+            idx += size
+    return segments
 
 
 def build_maps_url(stops):
@@ -801,23 +793,26 @@ def plan_dispatch():
 
     # Cap drivers to number of stops
     effective_drivers = min(num_drivers, len(stops))
-    clusters = kmeans_cluster(stops, effective_drivers)
-
-    routes   = []
     warnings = []
 
-    for i, cluster in enumerate(clusters):
-        if not cluster:
-            continue
-        ordered = nearest_neighbor_tsp(cluster)
+    # 1. Build one globally optimised tour over all stops
+    global_tour = nearest_neighbor_tsp(stops)
+    global_tour = two_opt_improve(global_tour)
 
-        # Estimate total shift time
+    # 2. Split into equal consecutive segments — adjacent stops in the
+    #    optimised tour are already geographically compact, so each
+    #    segment forms a natural area and all drivers get equal workload.
+    segments = split_tour_equally(global_tour, effective_drivers)
+
+    routes = []
+    for i, segment in enumerate(segments):
+        # Estimate total shift time for this segment
         travel_h = 0.0
-        for j in range(1, len(ordered)):
-            d = haversine(ordered[j-1]['lat'], ordered[j-1]['lon'],
-                          ordered[j]['lat'],  ordered[j]['lon'])
+        for j in range(1, len(segment)):
+            d = haversine(segment[j-1]['lat'], segment[j-1]['lon'],
+                          segment[j]['lat'],   segment[j]['lon'])
             travel_h += (d * ROAD_FACTOR) / AVG_SPEED_KMH
-        total_h = travel_h + len(ordered) * HOURS_PER_STOP
+        total_h = travel_h + len(segment) * HOURS_PER_STOP
         within  = total_h <= SHIFT_HOURS
 
         if not within:
@@ -825,12 +820,12 @@ def plan_dispatch():
                 f"Driver {i+1}: estimated {total_h:.1f}h exceeds the 10-hour shift window."
             )
 
-        url1, url2 = build_maps_url(ordered)
+        url1, url2 = build_maps_url(segment)
         routes.append({
             "driver":          i + 1,
             "colour":          DRIVER_COLOURS[i % len(DRIVER_COLOURS)],
-            "stops":           ordered,
-            "stop_count":      len(ordered),
+            "stops":           segment,
+            "stop_count":      len(segment),
             "estimated_hours": round(total_h, 1),
             "within_shift":    within,
             "maps_url":        url1,
