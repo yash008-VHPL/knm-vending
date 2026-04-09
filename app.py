@@ -305,6 +305,9 @@ except Exception as e:
 
 # ── Routing helpers (no external dependencies) ────────────────────────────────
 
+DEPOT_LAT = 1.3407711524195856
+DEPOT_LON = 103.8896748329062
+
 def haversine(lat1, lon1, lat2, lon2):
     """Straight-line distance in km between two lat/lon points."""
     R = 6371.0
@@ -323,22 +326,31 @@ def route_distance(route):
     )
 
 
-def nearest_neighbor_tsp(stops):
+def nearest_neighbor_tsp(stops, start_lat=None, start_lon=None):
     """
     Build an initial tour using the nearest-neighbor heuristic.
-    Starts from the southernmost stop (lowest lat) as a rough south-depot proxy.
+    If start_lat/start_lon are given (e.g. depot), the tour begins from
+    that external point — it is not added to the returned route.
+    Otherwise starts from the southernmost stop.
     """
     if not stops:
         return []
     remaining = stops[:]
-    start = min(remaining, key=lambda s: s['lat'])
-    remaining.remove(start)
-    route = [start]
+
+    if start_lat is not None and start_lon is not None:
+        cur_lat, cur_lon = start_lat, start_lon
+        route = []
+    else:
+        start = min(remaining, key=lambda s: s['lat'])
+        remaining.remove(start)
+        cur_lat, cur_lon = start['lat'], start['lon']
+        route = [start]
+
     while remaining:
-        last = route[-1]
-        nearest = min(remaining, key=lambda s: haversine(last['lat'], last['lon'], s['lat'], s['lon']))
+        nearest = min(remaining, key=lambda s: haversine(cur_lat, cur_lon, s['lat'], s['lon']))
         route.append(nearest)
         remaining.remove(nearest)
+        cur_lat, cur_lon = nearest['lat'], nearest['lon']
     return route
 
 
@@ -375,31 +387,40 @@ def split_tour_equally(tour, k):
     return segments
 
 
-def build_maps_url(stops):
+def build_maps_url(stops, origin_lat=DEPOT_LAT, origin_lon=DEPOT_LON):
     """
-    Build Google Maps driving directions URL(s) for an ordered list of stops.
-    Google Maps URL supports origin + up to 9 waypoints + destination (11 total).
-    Returns (url1, url2) where url2 is None unless there are >11 stops.
+    Build Google Maps driving directions URL(s) starting from origin (default: depot).
+    All stops are treated as waypoints + final destination after the origin.
+    Google Maps URL supports origin + up to 9 waypoints + destination = 10 stops max.
+    Returns (url1, url2) where url2 is only set when there are >10 stops.
     """
     BASE = "https://www.google.com/maps/dir/?api=1&travelmode=driving"
 
-    def fmt(s):
-        return f"{s['lat']},{s['lon']}"
+    def fmtc(lat, lon): return f"{lat},{lon}"
+    def fmt(s):         return fmtc(s['lat'], s['lon'])
 
-    def make_url(segment):
-        if len(segment) < 2:
-            return f"{BASE}&origin={fmt(segment[0])}&destination={fmt(segment[0])}"
-        url = f"{BASE}&origin={fmt(segment[0])}&destination={fmt(segment[-1])}"
-        middle = segment[1:-1]
+    def make_url(orig_str, segment):
+        url = f"{BASE}&origin={orig_str}&destination={fmt(segment[-1])}"
+        middle = segment[:-1]
         if middle:
             url += "&waypoints=" + "|".join(fmt(s) for s in middle)
         return url
 
     if not stops:
         return None, None
-    chunk1 = stops[:11]
-    chunk2 = [stops[10]] + stops[11:] if len(stops) > 11 else []
-    return make_url(chunk1), make_url(chunk2) if chunk2 else None
+
+    origin_str = fmtc(origin_lat, origin_lon)
+    chunk1 = stops[:10]
+    url1   = make_url(origin_str, chunk1)
+
+    if len(stops) > 10:
+        # Second leg starts from where chunk1 ended
+        chunk2 = stops[9:]          # overlap one stop so the driver sees continuity
+        url2   = make_url(fmt(stops[9]), chunk2[1:]) if len(chunk2) > 1 else None
+    else:
+        url2 = None
+
+    return url1, url2
 
 
 # ── Message type prefix map ────────────────────────────────────────────────────
@@ -795,8 +816,8 @@ def plan_dispatch():
     effective_drivers = min(num_drivers, len(stops))
     warnings = []
 
-    # 1. Build one globally optimised tour over all stops
-    global_tour = nearest_neighbor_tsp(stops)
+    # 1. Build one globally optimised tour starting from the factory depot
+    global_tour = nearest_neighbor_tsp(stops, start_lat=DEPOT_LAT, start_lon=DEPOT_LON)
     global_tour = two_opt_improve(global_tour)
 
     # 2. Split into equal consecutive segments — adjacent stops in the
