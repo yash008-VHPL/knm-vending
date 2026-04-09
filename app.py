@@ -389,36 +389,36 @@ def split_tour_equally(tour, k):
 
 def build_maps_url(stops, origin_lat=DEPOT_LAT, origin_lon=DEPOT_LON):
     """
-    Build Google Maps driving directions URL(s) starting from origin (default: depot).
-    All stops are treated as waypoints + final destination after the origin.
-    Google Maps URL supports origin + up to 9 waypoints + destination = 10 stops max.
-    Returns (url1, url2) where url2 is only set when there are >10 stops.
+    Build Google Maps driving directions URL(s) starting AND ending at the depot.
+    All stops are waypoints; destination = depot so the driver returns to base.
+    Google Maps allows up to 9 waypoints between origin and destination.
+    Returns (url1, url2) where url2 is only set when there are >9 stops.
     """
     BASE = "https://www.google.com/maps/dir/?api=1&travelmode=driving"
 
     def fmtc(lat, lon): return f"{lat},{lon}"
     def fmt(s):         return fmtc(s['lat'], s['lon'])
 
-    def make_url(orig_str, segment):
-        url = f"{BASE}&origin={orig_str}&destination={fmt(segment[-1])}"
-        middle = segment[:-1]
-        if middle:
-            url += "&waypoints=" + "|".join(fmt(s) for s in middle)
+    def make_url(orig_str, waypoints, dest_str):
+        url = f"{BASE}&origin={orig_str}&destination={dest_str}"
+        if waypoints:
+            url += "&waypoints=" + "|".join(fmt(s) for s in waypoints)
         return url
 
     if not stops:
         return None, None
 
     origin_str = fmtc(origin_lat, origin_lon)
-    chunk1 = stops[:10]
-    url1   = make_url(origin_str, chunk1)
 
-    if len(stops) > 10:
-        # Second leg starts from where chunk1 ended
-        chunk2 = stops[9:]          # overlap one stop so the driver sees continuity
-        url2   = make_url(fmt(stops[9]), chunk2[1:]) if len(chunk2) > 1 else None
-    else:
+    if len(stops) <= 9:
+        # All stops fit as waypoints; full round trip back to depot in one URL
+        url1 = make_url(origin_str, stops, origin_str)
         url2 = None
+    else:
+        # First leg: depot → stops[0..7] → stops[8]  (8 waypoints + destination)
+        url1 = make_url(origin_str, stops[:8], fmt(stops[8]))
+        # Second leg: stops[8] → stops[9..] → depot
+        url2 = make_url(fmt(stops[8]), stops[9:], origin_str)
 
     return url1, url2
 

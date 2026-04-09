@@ -235,7 +235,74 @@
 
         /* ── Topup status table ── */
         .never-tag { color: #9ca3af; font-style: italic; }
+        /* ── Dispatch Map & Editor ── */
+        #mapSection { margin-top: 0; }
+        #dispatchMap { height: 440px; border-radius: 8px; border: 1px solid #e5e7eb; }
+        .route-editor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 12px;
+            margin-top: 4px;
+        }
+        .editor-route-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        .editor-route-header {
+            padding: 8px 12px;
+            font-weight: 600;
+            font-size: 0.82rem;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .editor-stop-row {
+            display: flex;
+            align-items: center;
+            padding: 5px 10px;
+            border-bottom: 1px solid #f3f4f6;
+            font-size: 0.8rem;
+            gap: 6px;
+        }
+        .editor-stop-row:last-child { border-bottom: none; }
+        .stop-num {
+            font-weight: 700;
+            min-width: 20px;
+            text-align: right;
+            font-size: 0.75rem;
+        }
+        .stop-name { flex: 1; }
+        .stop-actions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+        .stop-actions button {
+            background: #f9fafb;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            line-height: 1.4;
+        }
+        .stop-actions button:hover { background: #e5e7eb; }
+        .stop-actions button:disabled { opacity: 0.35; cursor: default; }
+        .stop-actions select {
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-size: 0.7rem;
+            max-width: 90px;
+        }
+        .editor-maps-row {
+            padding: 8px 10px;
+            border-top: 1px solid #e5e7eb;
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
     </style>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 
@@ -478,6 +545,21 @@
 
         <!-- Route output cards -->
         <div id="dispatchRoutes"></div>
+
+        <!-- Interactive map + route editor (shown after planning) -->
+        <div id="mapSection" style="display:none">
+            <div class="card">
+                <div class="card-title">Route Map</div>
+                <div id="dispatchMap"></div>
+            </div>
+            <div class="card">
+                <div class="card-title" style="display:flex;align-items:center;gap:12px">
+                    Route Editor
+                    <span style="font-size:0.75rem;font-weight:400;color:#6b7280">Reorder stops or move them between drivers — the map updates live.</span>
+                </div>
+                <div class="route-editor-grid" id="routeEditor"></div>
+            </div>
+        </div>
 
     </div><!-- /tab-dispatch -->
     {% endif %}
@@ -1037,6 +1119,7 @@
                 setStatus('', '', 'dispatchStatus');
             }
             renderRoutes(data.routes);
+            initDispatchMap(data.routes);
         } catch (e) {
             setStatus('Could not reach the server.', 'error', 'dispatchStatus');
         } finally {
@@ -1087,6 +1170,163 @@
                 </div>
             </div>`;
         }).join('');
+    }
+
+    // ── Dispatch Map ───────────────────────────────────────────────────────────
+    const DEPOT_LAT = 1.3407711524195856;
+    const DEPOT_LON = 103.8896748329062;
+
+    let _leafletMap   = null;
+    let _mapLayers    = [];
+    let _editableRoutes = [];   // mutable copy of routes for the editor
+
+    function initDispatchMap(routes) {
+        _editableRoutes = routes.map(r => ({
+            driver: r.driver,
+            colour: r.colour,
+            stops:  r.stops.map(s => ({ ...s })),
+        }));
+
+        document.getElementById('mapSection').style.display = '';
+
+        if (!_leafletMap) {
+            _leafletMap = L.map('dispatchMap').setView([1.3521, 103.8198], 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+                maxZoom: 18,
+            }).addTo(_leafletMap);
+        }
+
+        renderMapLayers();
+        renderRouteEditor();
+    }
+
+    function renderMapLayers() {
+        _mapLayers.forEach(l => _leafletMap.removeLayer(l));
+        _mapLayers = [];
+
+        // Depot marker
+        const depotIcon = L.divIcon({
+            html: `<div style="background:#1f2937;color:white;border-radius:6px;padding:2px 5px;font-weight:700;font-size:10px;white-space:nowrap;box-shadow:0 2px 4px rgba(0,0,0,0.4)">DEPOT</div>`,
+            iconSize: [46, 22], iconAnchor: [23, 11], className: '',
+        });
+        _mapLayers.push(
+            L.marker([DEPOT_LAT, DEPOT_LON], { icon: depotIcon })
+             .bindPopup('<strong>Depot (Factory)</strong>')
+             .addTo(_leafletMap)
+        );
+
+        _editableRoutes.forEach(route => {
+            const { colour, stops, driver } = route;
+            if (!stops.length) return;
+
+            // Polyline: depot → each stop → back to depot
+            const pts = [[DEPOT_LAT, DEPOT_LON], ...stops.map(s => [s.lat, s.lon]), [DEPOT_LAT, DEPOT_LON]];
+            _mapLayers.push(
+                L.polyline(pts, { color: colour, weight: 4, opacity: 0.8 })
+                 .addTo(_leafletMap)
+            );
+
+            stops.forEach((s, i) => {
+                const icon = L.divIcon({
+                    html: `<div style="background:${colour};color:white;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.35)">${i + 1}</div>`,
+                    iconSize: [26, 26], iconAnchor: [13, 13], className: '',
+                });
+                _mapLayers.push(
+                    L.marker([s.lat, s.lon], { icon })
+                     .bindPopup(`<strong>Driver ${driver} — Stop ${i + 1}</strong><br>${s.name}`)
+                     .addTo(_leafletMap)
+                );
+            });
+        });
+    }
+
+    function renderRouteEditor() {
+        const grid = document.getElementById('routeEditor');
+        grid.innerHTML = _editableRoutes.map((route, ri) => {
+            const otherRoutes = _editableRoutes.filter((_, j) => j !== ri);
+            const stopRows = route.stops.map((s, si) => {
+                const upDisabled  = si === 0                      ? 'disabled' : '';
+                const dnDisabled  = si === route.stops.length - 1 ? 'disabled' : '';
+                const xferOptions = otherRoutes.map(r2 =>
+                    `<option value="${r2.driver}">Driver ${r2.driver}</option>`
+                ).join('');
+                const xferControls = otherRoutes.length ? `
+                    <select id="xfer_${ri}_${si}">${xferOptions}</select>
+                    <button onclick="transferStop(${ri},${si})" title="Move to selected driver">→</button>
+                ` : '';
+                return `
+                <div class="editor-stop-row">
+                    <span class="stop-num" style="color:${route.colour}">${si + 1}</span>
+                    <span class="stop-name">${esc(s.name)}</span>
+                    <span class="stop-actions">
+                        <button onclick="moveStop(${ri},${si},-1)" ${upDisabled}>▲</button>
+                        <button onclick="moveStop(${ri},${si},1)"  ${dnDisabled}>▼</button>
+                        ${xferControls}
+                    </span>
+                </div>`;
+            }).join('');
+
+            const mapsUrls = buildClientMapsUrl(route.stops);
+            const mapsBtn  = mapsUrls[0]
+                ? `<a href="${mapsUrls[0]}" target="_blank" class="btn btn-secondary btn-sm">Maps${mapsUrls[1] ? ' (1)' : ''}</a>`
+                : '';
+            const mapsBtn2 = mapsUrls[1]
+                ? `<a href="${mapsUrls[1]}" target="_blank" class="btn btn-secondary btn-sm">Maps (cont.)</a>`
+                : '';
+
+            return `
+            <div class="editor-route-card">
+                <div class="editor-route-header" style="background:${route.colour}">
+                    <span>Driver ${route.driver}</span>
+                    <span>${route.stops.length} stop${route.stops.length !== 1 ? 's' : ''}</span>
+                </div>
+                ${stopRows}
+                <div class="editor-maps-row">${mapsBtn}${mapsBtn2}</div>
+            </div>`;
+        }).join('');
+    }
+
+    function buildClientMapsUrl(stops) {
+        const BASE = 'https://www.google.com/maps/dir/?api=1&travelmode=driving';
+        const depotStr = `${DEPOT_LAT},${DEPOT_LON}`;
+        const fmt = s => `${s.lat},${s.lon}`;
+
+        function makeUrl(orig, wps, dest) {
+            let url = `${BASE}&origin=${orig}&destination=${dest}`;
+            if (wps.length) url += '&waypoints=' + wps.map(fmt).join('|');
+            return url;
+        }
+
+        if (!stops.length) return [null, null];
+        if (stops.length <= 9) {
+            return [makeUrl(depotStr, stops, depotStr), null];
+        }
+        return [
+            makeUrl(depotStr, stops.slice(0, 8), fmt(stops[8])),
+            makeUrl(fmt(stops[8]), stops.slice(9), depotStr),
+        ];
+    }
+
+    function moveStop(ri, si, dir) {
+        const route = _editableRoutes[ri];
+        const newSi = si + dir;
+        if (newSi < 0 || newSi >= route.stops.length) return;
+        [route.stops[si], route.stops[newSi]] = [route.stops[newSi], route.stops[si]];
+        renderMapLayers();
+        renderRouteEditor();
+    }
+
+    function transferStop(ri, si) {
+        const selectEl = document.getElementById(`xfer_${ri}_${si}`);
+        if (!selectEl) return;
+        const targetDriver = parseInt(selectEl.value);
+        const targetRi = _editableRoutes.findIndex(r => r.driver === targetDriver);
+        if (targetRi === -1) return;
+        const [stop] = _editableRoutes[ri].stops.splice(si, 1);
+        _editableRoutes[targetRi].stops.push(stop);
+        renderMapLayers();
+        renderRouteEditor();
     }
 
     // ── Escape HTML ────────────────────────────────────────────────────────────
