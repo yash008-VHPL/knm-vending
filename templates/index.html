@@ -1207,8 +1207,9 @@
     }
 
     // ── Heartbeat ─────────────────────────────────────────────────────────────
-    let _hbData       = [];   // full machine list from last fetch
-    let _hbTimer      = null;
+    let _hbData         = [];   // full machine list from last fetch
+    let _hbTimer        = null;
+    let _hbStatusFilter = null; // 'green' | 'yellow' | 'red' | null = all
 
     function fmtAge(minutes) {
         if (minutes === null || minutes === undefined) return 'Never';
@@ -1257,10 +1258,12 @@
             setStatus('', '', 'hbStatus');
             _hbData = data.machines;
 
-            // Summary bar
+            // Summary bar — clickable badges to filter by status
             const c = data.counts;
             document.getElementById('hbSummary').innerHTML =
-                `💚 ${c.green} &nbsp; 💛 ${c.yellow} &nbsp; ❤️ ${c.red}`;
+                `<span onclick="toggleHbFilter('green')"  id="hbBadge-green"  style="cursor:pointer;padding:2px 8px;border-radius:12px">💚 ${c.green}</span>`  +
+                `<span onclick="toggleHbFilter('yellow')" id="hbBadge-yellow" style="cursor:pointer;padding:2px 8px;border-radius:12px">💛 ${c.yellow}</span>` +
+                `<span onclick="toggleHbFilter('red')"    id="hbBadge-red"    style="cursor:pointer;padding:2px 8px;border-radius:12px">❤️ ${c.red}</span>`;
             document.getElementById('hbThreshold').textContent = data.threshold_minutes;
 
             filterHeartbeat();
@@ -1269,9 +1272,24 @@
         }
     }
 
+    function toggleHbFilter(status) {
+        _hbStatusFilter = (_hbStatusFilter === status) ? null : status;
+        // Highlight active badge
+        ['green','yellow','red'].forEach(s => {
+            const el = document.getElementById('hbBadge-' + s);
+            if (!el) return;
+            el.style.background    = (_hbStatusFilter === s) ? (s === 'green' ? '#bbf7d0' : s === 'yellow' ? '#fde68a' : '#fecaca') : '';
+            el.style.fontWeight    = (_hbStatusFilter === s) ? '700' : '400';
+            el.style.outline       = (_hbStatusFilter === s) ? '2px solid #6b7280' : '';
+        });
+        filterHeartbeat();
+    }
+
     function filterHeartbeat() {
         const q = (document.getElementById('hbSearch').value || '').toLowerCase();
-        const visible = q ? _hbData.filter(m => m.name.toLowerCase().includes(q)) : _hbData;
+        let visible = _hbData;
+        if (_hbStatusFilter) visible = visible.filter(m => m.status === _hbStatusFilter);
+        if (q)               visible = visible.filter(m => m.name.toLowerCase().includes(q));
         renderHeartbeatGrid(visible);
     }
 
