@@ -954,7 +954,7 @@ def get_heartbeat():
                     THEN md.[Date Time]
                 END) AS LastErrorEvent
             FROM MachineLookup ml
-            LEFT JOIN MasterData md ON ml.MachineCode = md.[Machine Code]
+            LEFT JOIN [MasterData Table] md ON ml.MachineCode = md.[Machine Code]
             GROUP BY ml.MachineName, ml.MachineCode
             ORDER BY ml.MachineName
         """)
@@ -1013,7 +1013,7 @@ def heartbeat_analysis():
         # [Date Time] - FLOOR([Date Time]) extracts the fractional (time-of-day) part
         cursor.execute(f"""
             SELECT [Machine Code], [Date Time]
-            FROM MasterData
+            FROM [MasterData Table]
             WHERE [Date Time] >= {ole_90}
               AND (
                 ([Date Time] - FLOOR([Date Time])) >= {frac_23}
