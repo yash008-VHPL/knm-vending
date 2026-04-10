@@ -307,7 +307,7 @@ except Exception as e:
 # Default threshold: a machine is RED if silent longer than this.
 # Run /api/admin/heartbeat-analysis (admin only) to measure the actual
 # average off-hours gap for your fleet and tune this value.
-HEARTBEAT_THRESHOLD_MINUTES = 45
+HEARTBEAT_THRESHOLD_MINUTES = 225   # p95 off-hours gap (180 min) + 25 % headroom
 
 # ── Routing helpers (no external dependencies) ────────────────────────────────
 
