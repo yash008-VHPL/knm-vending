@@ -1299,11 +1299,20 @@
             grid.innerHTML = '<div style="color:#9ca3af;padding:12px">No machines match.</div>';
             return;
         }
-        // Sort: red first, then yellow, then green; alpha within each group
+        // Sort: red first, then yellow, then green
+        // Within red: longest silence first, nulls (no data) last; others alpha
         const order = { red: 0, yellow: 1, green: 2 };
-        const sorted = [...machines].sort((a, b) =>
-            order[a.status] - order[b.status] || a.name.localeCompare(b.name)
-        );
+        const sorted = [...machines].sort((a, b) => {
+            const statusDiff = order[a.status] - order[b.status];
+            if (statusDiff !== 0) return statusDiff;
+            if (a.status === 'red') {
+                if (a.last_any_min === null && b.last_any_min === null) return a.name.localeCompare(b.name);
+                if (a.last_any_min === null) return 1;
+                if (b.last_any_min === null) return -1;
+                return b.last_any_min - a.last_any_min;  // longest silence first
+            }
+            return a.name.localeCompare(b.name);
+        });
         grid.innerHTML = sorted.map(m => `
             <div style="
                 background:${statusBg(m.status)};
