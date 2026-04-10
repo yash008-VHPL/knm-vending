@@ -303,6 +303,12 @@ except Exception as e:
     print(f"[startup] seed_locations failed: {e}")
 
 
+# ── Heartbeat config ──────────────────────────────────────────────────────────
+# Default threshold: a machine is RED if silent longer than this.
+# Run /api/admin/heartbeat-analysis (admin only) to measure the actual
+# average off-hours gap for your fleet and tune this value.
+HEARTBEAT_THRESHOLD_MINUTES = 45
+
 # ── Routing helpers (no external dependencies) ────────────────────────────────
 
 DEPOT_LAT = 1.3407711524195856
@@ -919,6 +925,158 @@ def update_location(code):
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Heartbeat ─────────────────────────────────────────────────────────────────
+
+@app.route("/api/heartbeat")
+@login_required
+def get_heartbeat():
+    """
+    For every machine in MachineLookup return:
+      - last_any_event  : OLE float of most recent event of any kind
+      - last_error_event: OLE float of most recent error/exception (codes 2x or 3x)
+    Status logic applied in the browser using the threshold sent with the response.
+    """
+    threshold_min = HEARTBEAT_THRESHOLD_MINUTES
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        # Single-pass GROUP BY for efficiency.
+        # LEFT JOIN so machines with zero history still appear.
+        cursor.execute("""
+            SELECT
+                ml.MachineName,
+                ml.MachineCode,
+                MAX(md.[Date Time]) AS LastAnyEvent,
+                MAX(CASE
+                    WHEN LEFT(CAST(md.[Event Code] AS VARCHAR(20)), 1) IN ('2','3')
+                    THEN md.[Date Time]
+                END) AS LastErrorEvent
+            FROM MachineLookup ml
+            LEFT JOIN MasterData md ON ml.MachineCode = md.[Machine Code]
+            GROUP BY ml.MachineName, ml.MachineCode
+            ORDER BY ml.MachineName
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    now_ole = to_ole_date(datetime.utcnow())
+    machines = []
+    for name, code, last_any_ole, last_err_ole in rows:
+        last_any_min  = (now_ole - float(last_any_ole))  * 1440 if last_any_ole  is not None else None
+        last_err_min  = (now_ole - float(last_err_ole))  * 1440 if last_err_ole  is not None else None
+
+        if last_any_min is None or last_any_min > threshold_min:
+            status = "red"
+        elif last_err_min is not None and last_err_min < 60:
+            status = "yellow"
+        else:
+            status = "green"
+
+        machines.append({
+            "name":          name,
+            "code":          str(code),
+            "status":        status,
+            "last_any_min":  round(last_any_min,  1) if last_any_min  is not None else None,
+            "last_err_min":  round(last_err_min,  1) if last_err_min  is not None else None,
+        })
+
+    return jsonify({
+        "machines":           machines,
+        "threshold_minutes":  threshold_min,
+        "counts": {
+            "green":  sum(1 for m in machines if m["status"] == "green"),
+            "yellow": sum(1 for m in machines if m["status"] == "yellow"),
+            "red":    sum(1 for m in machines if m["status"] == "red"),
+        },
+    })
+
+
+@app.route("/api/admin/heartbeat-analysis")
+@admin_required
+def heartbeat_analysis():
+    """
+    Analyse the average gap between consecutive messages during off-hours
+    (23:00-06:00 local, proxied via OLE fractional part) over the last 90 days.
+    Use the result to calibrate HEARTBEAT_THRESHOLD_MINUTES.
+    """
+    frac_23 = 23.0 / 24.0   # 0.9583…
+    frac_06 =  6.0 / 24.0   # 0.25
+    ole_90  = to_ole_date(datetime.utcnow() - timedelta(days=90))
+
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        # [Date Time] - FLOOR([Date Time]) extracts the fractional (time-of-day) part
+        cursor.execute(f"""
+            SELECT [Machine Code], [Date Time]
+            FROM MasterData
+            WHERE [Date Time] >= {ole_90}
+              AND (
+                ([Date Time] - FLOOR([Date Time])) >= {frac_23}
+                OR ([Date Time] - FLOOR([Date Time])) <  {frac_06}
+              )
+            ORDER BY [Machine Code], [Date Time]
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    if not rows:
+        return jsonify({"error": "No off-hours data found in the last 90 days."}), 404
+
+    # Group events by machine and compute consecutive gaps (in minutes)
+    from collections import defaultdict
+    machine_events = defaultdict(list)
+    for code, ole_dt in rows:
+        machine_events[str(code)].append(float(ole_dt))
+
+    gaps = []
+    for events in machine_events.values():
+        events.sort()
+        for j in range(1, len(events)):
+            gap_min = (events[j] - events[j - 1]) * 1440  # days → minutes
+            # Exclude gaps that span across the off-hours window boundary
+            # (i.e., > 7 hours means a new night, not a within-night gap)
+            if 0 < gap_min <= 420:
+                gaps.append(gap_min)
+
+    if not gaps:
+        return jsonify({"error": "Could not compute gaps (too few consecutive off-hours events)."}), 404
+
+    gaps.sort()
+    n   = len(gaps)
+    avg = sum(gaps) / n
+    p50 = gaps[int(0.50 * n)]
+    p90 = gaps[int(0.90 * n)]
+    p95 = gaps[int(0.95 * n)]
+    mx  = gaps[-1]
+
+    recommendation = round(p95 * 1.25)  # 25 % headroom above 95th percentile
+
+    print(f"[heartbeat-analysis] gaps={n} machines={len(machine_events)} "
+          f"avg={avg:.1f}m p50={p50:.1f}m p90={p90:.1f}m p95={p95:.1f}m max={mx:.1f}m "
+          f"recommended_threshold={recommendation}m")
+
+    return jsonify({
+        "sample_gaps":             n,
+        "machines_with_data":      len(machine_events),
+        "avg_gap_minutes":         round(avg, 1),
+        "p50_gap_minutes":         round(p50, 1),
+        "p90_gap_minutes":         round(p90, 1),
+        "p95_gap_minutes":         round(p95, 1),
+        "max_gap_minutes":         round(mx,  1),
+        "recommended_threshold":   recommendation,
+        "current_threshold":       HEARTBEAT_THRESHOLD_MINUTES,
+        "note": (
+            "Set HEARTBEAT_THRESHOLD_MINUTES in app.py to 'recommended_threshold' "
+            "(or a value you're comfortable with), then redeploy."
+        ),
+    })
 
 
 if __name__ == "__main__":

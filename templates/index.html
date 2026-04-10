@@ -322,6 +322,7 @@
     <button class="tab-btn active" onclick="switchTab('sales', this)">Sales</button>
     <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
+    <button class="tab-btn"        onclick="switchTab('heartbeat', this)">💓 Heartbeat</button>
     {% if role == 'admin' or role == 'dispatch' %}
     <button class="tab-btn"        onclick="switchTab('admin', this)">Locations</button>
     <button class="tab-btn"        onclick="switchTab('dispatch', this)">Dispatch</button>
@@ -514,6 +515,38 @@
 
 
     <!-- ══════════════════════════════════════════
+         TAB: Heartbeat
+    ══════════════════════════════════════════ -->
+    <div id="tab-heartbeat" class="tab-pane">
+
+        <div class="card">
+            <div class="card-title" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+                Fleet Heartbeat
+                <span id="hbSummary" style="font-size:0.8rem;font-weight:400;color:#6b7280"></span>
+                <div style="flex:1"></div>
+                <input type="text" id="hbSearch" placeholder="Search location…"
+                       oninput="filterHeartbeat()"
+                       style="border:1px solid #d1d5db;border-radius:6px;padding:6px 10px;font-size:0.8rem;width:200px">
+                <button class="btn btn-secondary btn-sm" onclick="loadHeartbeat()">Refresh</button>
+            </div>
+            <div id="hbStatus" style="display:none;margin-top:8px"></div>
+            <div id="hbGrid" style="
+                display:grid;
+                grid-template-columns:repeat(auto-fill,minmax(210px,1fr));
+                gap:10px;
+                margin-top:14px;
+            ">
+                <div style="color:#9ca3af;padding:12px">Loading…</div>
+            </div>
+            <div style="margin-top:10px;font-size:0.72rem;color:#9ca3af">
+                Auto-refreshes every 2 minutes. Threshold: <span id="hbThreshold">—</span> min silence = ❤️
+            </div>
+        </div>
+
+    </div><!-- /tab-heartbeat -->
+
+
+    <!-- ══════════════════════════════════════════
          TAB: Locations (admin only)
     ══════════════════════════════════════════ -->
     <!-- ══════════════════════════════════════════
@@ -633,8 +666,9 @@
         document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
         document.getElementById('tab-' + name).classList.add('active');
         if (btn) btn.classList.add('active');
-        if (name === 'topups')   loadTopups();
-        if (name === 'dispatch') loadDispatchList();
+        if (name === 'topups')     loadTopups();
+        if (name === 'dispatch')   loadDispatchList();
+        if (name === 'heartbeat') { loadHeartbeat(); startHeartbeatAutoRefresh(); }
     }
 
     // ── Status helper ──────────────────────────────────────────────────────────
@@ -1170,6 +1204,108 @@
                 </div>
             </div>`;
         }).join('');
+    }
+
+    // ── Heartbeat ─────────────────────────────────────────────────────────────
+    let _hbData       = [];   // full machine list from last fetch
+    let _hbTimer      = null;
+
+    function fmtAge(minutes) {
+        if (minutes === null || minutes === undefined) return 'Never';
+        if (minutes < 1)   return 'Just now';
+        if (minutes < 60)  return `${Math.round(minutes)}m ago`;
+        const h = Math.floor(minutes / 60);
+        const m = Math.round(minutes % 60);
+        if (h < 24) return m > 0 ? `${h}h ${m}m ago` : `${h}h ago`;
+        const d = Math.floor(h / 24);
+        return `${d}d ${h % 24}h ago`;
+    }
+
+    function heartIcon(status) {
+        return status === 'green' ? '💚' : status === 'yellow' ? '💛' : '❤️';
+    }
+
+    function statusLabel(m) {
+        if (m.status === 'red') {
+            return m.last_any_min === null
+                ? 'No data on record'
+                : `Silent for ${fmtAge(m.last_any_min)}`;
+        }
+        if (m.status === 'yellow') {
+            return `Error/exception ${fmtAge(m.last_err_min)}`;
+        }
+        return `Last seen ${fmtAge(m.last_any_min)}`;
+    }
+
+    function statusBg(status) {
+        return status === 'green'  ? '#f0fdf4'
+             : status === 'yellow' ? '#fefce8'
+             : '#fef2f2';
+    }
+    function statusBorder(status) {
+        return status === 'green'  ? '#bbf7d0'
+             : status === 'yellow' ? '#fde68a'
+             : '#fecaca';
+    }
+
+    async function loadHeartbeat() {
+        setStatus('Loading…', 'loading', 'hbStatus');
+        try {
+            const resp = await fetch('/api/heartbeat');
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'hbStatus'); return; }
+            setStatus('', '', 'hbStatus');
+            _hbData = data.machines;
+
+            // Summary bar
+            const c = data.counts;
+            document.getElementById('hbSummary').innerHTML =
+                `💚 ${c.green} &nbsp; 💛 ${c.yellow} &nbsp; ❤️ ${c.red}`;
+            document.getElementById('hbThreshold').textContent = data.threshold_minutes;
+
+            filterHeartbeat();
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'hbStatus');
+        }
+    }
+
+    function filterHeartbeat() {
+        const q = (document.getElementById('hbSearch').value || '').toLowerCase();
+        const visible = q ? _hbData.filter(m => m.name.toLowerCase().includes(q)) : _hbData;
+        renderHeartbeatGrid(visible);
+    }
+
+    function renderHeartbeatGrid(machines) {
+        const grid = document.getElementById('hbGrid');
+        if (!machines.length) {
+            grid.innerHTML = '<div style="color:#9ca3af;padding:12px">No machines match.</div>';
+            return;
+        }
+        // Sort: red first, then yellow, then green; alpha within each group
+        const order = { red: 0, yellow: 1, green: 2 };
+        const sorted = [...machines].sort((a, b) =>
+            order[a.status] - order[b.status] || a.name.localeCompare(b.name)
+        );
+        grid.innerHTML = sorted.map(m => `
+            <div style="
+                background:${statusBg(m.status)};
+                border:1px solid ${statusBorder(m.status)};
+                border-radius:8px;
+                padding:10px 12px;
+                display:flex;
+                flex-direction:column;
+                gap:4px;
+            ">
+                <div style="font-size:1.4rem;line-height:1">${heartIcon(m.status)}</div>
+                <div style="font-weight:600;font-size:0.82rem;line-height:1.3">${esc(m.name)}</div>
+                <div style="font-size:0.72rem;color:#6b7280">${statusLabel(m)}</div>
+            </div>`
+        ).join('');
+    }
+
+    function startHeartbeatAutoRefresh() {
+        if (_hbTimer) clearInterval(_hbTimer);
+        _hbTimer = setInterval(loadHeartbeat, 2 * 60 * 1000);  // every 2 min
     }
 
     // ── Dispatch Map ───────────────────────────────────────────────────────────
