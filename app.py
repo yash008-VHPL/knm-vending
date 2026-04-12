@@ -514,7 +514,7 @@ def get_dispenses():
             ON mdt.[Event Code] = mc.ItemCode
         WHERE CAST(mdt.[Date Time] AS float) >= {start_ole}
           AND CAST(mdt.[Date Time] AS float) <= {end_ole}
-          AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+          AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
           {machine_filter}
         GROUP BY mdt.[Event Code]
         ORDER BY DispenseCount DESC
@@ -622,7 +622,7 @@ def get_topups():
                     SELECT COUNT(*)
                     FROM [MasterData Table] mdt
                     WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
-                      AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+                      AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
                       AND (
                           ml.LastTopupTimestamp IS NULL
                           OR CAST(mdt.[Date Time] AS FLOAT) >= ml.LastTopupTimestamp
@@ -686,14 +686,14 @@ def log_topup(code):
             cursor.execute(f"""
                 SELECT COUNT(*) FROM [MasterData Table]
                 WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
+                  AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6 AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
                   AND CAST([Date Time] AS FLOAT) >= {float(current_ole)}
             """, (code,))
         else:
             cursor.execute("""
                 SELECT COUNT(*) FROM [MasterData Table]
                 WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
+                  AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6 AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
             """, (code,))
         vends_since = int(cursor.fetchone()[0])
 
@@ -787,7 +787,7 @@ def plan_dispatch():
                     SELECT COUNT(*)
                     FROM [MasterData Table] mdt
                     WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
-                      AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+                      AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
                       AND (
                           ml.LastTopupTimestamp IS NULL
                           OR CAST(mdt.[Date Time] AS FLOAT) >= ml.LastTopupTimestamp
