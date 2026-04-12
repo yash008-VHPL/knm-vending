@@ -930,6 +930,52 @@ def update_location(code):
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+# ── Internal: vend counts for a given month (used by GitHub Actions reconcile) ─
+
+@app.route("/api/internal/vend-counts")
+def internal_vend_counts():
+    """
+    Returns vend counts per machine for a given year/month.
+    Protected by a shared secret key — not tied to Azure Easy Auth so it can
+    be called from GitHub Actions without a user session.
+    """
+    key = request.headers.get("X-Internal-Key", "")
+    if not key or key != config.INTERNAL_API_KEY:
+        return jsonify({"error": "Unauthorized"}), 403
+
+    try:
+        year  = int(request.args["year"])
+        month = int(request.args["month"])
+    except (KeyError, ValueError):
+        return jsonify({"error": "year and month query params required"}), 400
+
+    import calendar as cal
+    last_day  = cal.monthrange(year, month)[1]
+    start_ole = to_ole_date(datetime(year, month, 1, 0, 0, 0))
+    end_ole   = to_ole_date(datetime(year, month, last_day, 23, 59, 59))
+
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT ml.MachineCode, ml.MachineName, COUNT(*) AS VendCount
+            FROM [MasterData Table] mdt
+            INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
+            WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
+              AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
+              AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+              AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+            GROUP BY ml.MachineCode, ml.MachineName
+            ORDER BY ml.MachineName
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify([{"code": str(r[0]), "name": r[1], "vends": int(r[2])} for r in rows])
+
+
 # ── Temporary: March 2026 vend counts per machine (for NETS cross-check) ──────
 
 @app.route("/api/admin/march2026-vends")

@@ -1,0 +1,50 @@
+name: Monthly NETS Reconciliation
+
+on:
+  # Runs at 9:00 AM SGT (01:00 UTC) on the 2nd of every month
+  schedule:
+    - cron: '0 1 2 * *'
+
+  # Allow manual trigger from GitHub Actions UI (optionally specify month)
+  workflow_dispatch:
+    inputs:
+      year:
+        description: 'Year  (leave blank for previous month)'
+        required: false
+      month:
+        description: 'Month (leave blank for previous month)'
+        required: false
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip install playwright requests
+
+      - name: Install Playwright browser
+        run: playwright install chromium --with-deps
+
+      - name: Run reconciliation
+        env:
+          NETS_USERNAME:    ${{ secrets.NETS_USERNAME }}
+          NETS_PASSWORD:    ${{ secrets.NETS_PASSWORD }}
+          INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          APP_BASE_URL: https://knmdispenseviewer-eqdjbscahtfufxfj.southeastasia-01.azurewebsites.net
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.year }}" ]; then
+            ARGS="--year ${{ github.event.inputs.year }} --month ${{ github.event.inputs.month }}"
+          fi
+          python nets_reconcile.py $ARGS
+        working-directory: ${{ github.workspace }}/..
