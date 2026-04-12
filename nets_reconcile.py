@@ -169,15 +169,42 @@ def parse_nets(csv_text: str) -> dict:
     return dict(counts)
 
 
-# ── Step 3: Fetch DB vend counts via Flask API ─────────────────────────────────
+# ── Step 3: Fetch DB vend counts ──────────────────────────────────────────────
+DB_SERVER   = _env("DB_SERVER")
+DB_NAME     = _env("DB_NAME")
+DB_USER     = _env("DB_USER")
+DB_PASSWORD = _env("DB_PASSWORD")
+
+OLE_EPOCH = datetime(1899, 12, 30)
+def _to_ole(dt): return ((dt - OLE_EPOCH).days + (dt - OLE_EPOCH).seconds / 86400.0)
+
 def fetch_db_counts(year: int, month: int) -> dict:
-    """Returns {machine_name: vend_count}."""
-    url  = f"{APP_BASE_URL}/api/internal/vend-counts"
-    resp = requests.get(url, params={"year": year, "month": month},
-                        headers={"X-Internal-Key": INTERNAL_API_KEY},
-                        timeout=30)
-    resp.raise_for_status()
-    return {r["name"]: r["vends"] for r in resp.json()}
+    """
+    Connects directly to Azure SQL using pymssql.
+    GitHub Actions runs on Azure infrastructure so the SQL firewall's
+    'Allow Azure services' rule covers it — no extra firewall changes needed.
+    """
+    import pymssql, calendar as cal
+    last_day  = cal.monthrange(year, month)[1]
+    start_ole = _to_ole(datetime(year, month, 1, 0, 0, 0))
+    end_ole   = _to_ole(datetime(year, month, last_day, 23, 59, 59))
+
+    conn   = pymssql.connect(server=DB_SERVER, user=DB_USER,
+                             password=DB_PASSWORD, database=DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(f"""
+        SELECT ml.MachineName, COUNT(*) AS VendCount
+        FROM [MasterData Table] mdt
+        INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
+        WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
+          AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
+          AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+          AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+        GROUP BY ml.MachineName
+    """)
+    rows = cursor.fetchall()
+    conn.close()
+    return {row[0]: int(row[1]) for row in rows}
 
 
 # ── Step 4: Compare ────────────────────────────────────────────────────────────

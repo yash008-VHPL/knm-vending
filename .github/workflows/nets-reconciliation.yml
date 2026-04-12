@@ -29,18 +29,20 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python dependencies
-        run: pip install playwright requests
+        run: pip install playwright requests pymssql
 
       - name: Install Playwright browser
         run: playwright install chromium --with-deps
 
       - name: Run reconciliation
         env:
-          NETS_USERNAME:    ${{ secrets.NETS_USERNAME }}
-          NETS_PASSWORD:    ${{ secrets.NETS_PASSWORD }}
-          INTERNAL_API_KEY: ${{ secrets.INTERNAL_API_KEY }}
+          NETS_USERNAME:     ${{ secrets.NETS_USERNAME }}
+          NETS_PASSWORD:     ${{ secrets.NETS_PASSWORD }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-          APP_BASE_URL: https://knmdispenseviewer-eqdjbscahtfufxfj.southeastasia-01.azurewebsites.net
+          DB_SERVER:   machineserver.database.windows.net
+          DB_NAME:     "Machine DispensedDrink"
+          DB_USER:     ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           ARGS=""
           if [ -n "${{ github.event.inputs.year }}" ]; then
