@@ -47,4 +47,4 @@ jobs:
             ARGS="--year ${{ github.event.inputs.year }} --month ${{ github.event.inputs.month }}"
           fi
           python nets_reconcile.py $ARGS
-        working-directory: ${{ github.workspace }}/..
+        working-directory: ${{ github.workspace }}
