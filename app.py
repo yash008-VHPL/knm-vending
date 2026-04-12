@@ -930,6 +930,37 @@ def update_location(code):
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+# ── Temporary: March 2026 vend counts per machine (for NETS cross-check) ──────
+
+@app.route("/api/admin/march2026-vends")
+@admin_required
+def march2026_vends():
+    start_ole = to_ole_date(datetime(2026, 3,  1,  0,  0,  0))
+    end_ole   = to_ole_date(datetime(2026, 3, 31, 23, 59, 59))
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT
+                ml.MachineCode,
+                ml.MachineName,
+                COUNT(*) AS VendCount
+            FROM [MasterData Table] mdt
+            INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
+            WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
+              AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
+              AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+              AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+            GROUP BY ml.MachineCode, ml.MachineName
+            ORDER BY ml.MachineName
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    return jsonify([{"code": str(r[0]), "name": r[1], "vends": int(r[2])} for r in rows])
+
+
 # ── Heartbeat ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/heartbeat")
