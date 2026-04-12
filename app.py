@@ -507,16 +507,19 @@ def get_dispenses():
     query = f"""
         SELECT
             mdt.[Event Code]    AS EventCode,
-            MIN(mc.EventName)   AS SKUName,
+            mc.EventName        AS SKUName,
             COUNT(*)            AS DispenseCount
         FROM [MasterData Table] mdt
-        INNER JOIN MasterCode mc
-            ON mdt.[Event Code] = mc.ItemCode
+        INNER JOIN (
+            SELECT ItemCode, MIN(EventName) AS EventName
+            FROM MasterCode
+            GROUP BY ItemCode
+        ) mc ON mdt.[Event Code] = mc.ItemCode
         WHERE CAST(mdt.[Date Time] AS float) >= {start_ole}
           AND CAST(mdt.[Date Time] AS float) <= {end_ole}
           AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
           {machine_filter}
-        GROUP BY mdt.[Event Code]
+        GROUP BY mdt.[Event Code], mc.EventName
         ORDER BY DispenseCount DESC
     """
 
