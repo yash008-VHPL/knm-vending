@@ -309,8 +309,8 @@ def main():
     # Validate credentials
     if not NETS_USERNAME or not NETS_PASSWORD:
         sys.exit("NETS credentials missing. Set NETS_USERNAME and NETS_PASSWORD.")
-    if not INTERNAL_API_KEY or INTERNAL_API_KEY == "change-me-to-a-strong-random-string":
-        sys.exit("INTERNAL_API_KEY not set.")
+    if not DB_SERVER or not DB_USER or not DB_PASSWORD:
+        sys.exit("DB credentials missing. Set DB_SERVER, DB_USER, DB_PASSWORD.")
 
     csv_text = download_nets_csv(from_date, to_date)
     nets     = parse_nets(csv_text)
