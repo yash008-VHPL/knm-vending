@@ -235,6 +235,39 @@
 
         /* ── Topup status table ── */
         .never-tag { color: #9ca3af; font-style: italic; }
+        /* ── View toggle (Summary / Transactions) ── */
+        .view-toggle {
+            display: flex;
+            gap: 0;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        .view-toggle button {
+            border: none;
+            padding: 7px 18px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: white;
+            color: #6b7280;
+            transition: background 0.15s, color 0.15s;
+        }
+        .view-toggle button + button { border-left: 1px solid #d1d5db; }
+        .view-toggle button.active { background: #1a56db; color: white; }
+        .view-toggle button:hover:not(.active) { background: #f3f4f6; }
+
+        /* ── Transaction log table ── */
+        .txn-date  { white-space: nowrap; color: #374151; }
+        .txn-time  { white-space: nowrap; font-family: monospace; font-size: 0.82rem; color: #6b7280; }
+        .txn-item  { font-weight: 500; }
+        .txn-mach  { font-size: 0.82rem; color: #6b7280; }
+        .cap-note  {
+            font-size: 0.8rem; color: #92400e;
+            background: #fffbeb; border: 1px solid #fde68a;
+            border-radius: 6px; padding: 8px 14px; margin-bottom: 12px;
+        }
+
         /* ── Dispatch Map & Editor ── */
         #mapSection { margin-top: 0; }
         #dispatchMap { height: 440px; border-radius: 8px; border: 1px solid #e5e7eb; }
@@ -358,11 +391,16 @@
                         <input type="time" id="endTime" value="23:59">
                     </div>
                 </div>
-                <button class="btn btn-primary" id="searchBtn" onclick="searchSales()">Search</button>
+                <div class="view-toggle">
+                    <button id="viewSummaryBtn" class="active" onclick="setSalesView('summary')">Summary</button>
+                    <button id="viewTxnBtn"     onclick="setSalesView('transactions')">Transactions</button>
+                </div>
+                <button class="btn btn-primary" id="searchBtn" onclick="runSalesSearch()">Search</button>
             </div>
             <div id="status" style="display:none"></div>
         </div>
 
+        <!-- Summary view -->
         <div id="results-section" style="display:none">
             <div class="card">
                 <div class="summary">
@@ -380,6 +418,7 @@
                         <tr>
                             <th style="width:40px">#</th>
                             <th>SKU</th>
+                            <th style="width:90px;color:#9ca3af;font-weight:500">Code</th>
                             <th class="right" style="width:100px">Count</th>
                             <th class="right" style="width:90px">% of Total</th>
                             <th class="bar-cell"></th>
@@ -388,12 +427,33 @@
                     <tbody id="results-body"></tbody>
                     <tfoot>
                         <tr>
-                            <td colspan="2">Total</td>
+                            <td colspan="3">Total</td>
                             <td class="right" id="footer-total"></td>
                             <td class="right">100%</td>
                             <td></td>
                         </tr>
                     </tfoot>
+                </table>
+            </div>
+        </div>
+
+        <!-- Transaction log view -->
+        <div id="txn-section" style="display:none">
+            <div class="card">
+                <div id="txnCapNote" class="cap-note" style="display:none">
+                    ⚠️ Results capped at 2,000 rows. Narrow your date range to see all transactions.
+                </div>
+                <div id="txnCount" style="font-size:0.8rem;color:#6b7280;margin-bottom:12px"></div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:110px">Date</th>
+                            <th style="width:90px">Time</th>
+                            <th>Item Dispensed</th>
+                            <th>Machine</th>
+                        </tr>
+                    </thead>
+                    <tbody id="txn-body"></tbody>
                 </table>
             </div>
         </div>
@@ -721,6 +781,19 @@
     // SALES
     // ══════════════════════════════════════════
 
+    let _salesView = 'summary';   // 'summary' | 'transactions'
+
+    function setSalesView(v) {
+        _salesView = v;
+        document.getElementById('viewSummaryBtn').classList.toggle('active', v === 'summary');
+        document.getElementById('viewTxnBtn').classList.toggle('active',     v === 'transactions');
+    }
+
+    function runSalesSearch() {
+        if (_salesView === 'transactions') searchTransactions();
+        else                               searchSales();
+    }
+
     async function searchSales() {
         const start   = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
         const end     = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
@@ -735,6 +808,7 @@
         btn.disabled = true;
         setStatus('Querying database…', 'loading', 'status');
         document.getElementById('results-section').style.display = 'none';
+        document.getElementById('txn-section').style.display     = 'none';
 
         try {
             let url = `/api/dispenses?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
@@ -760,7 +834,7 @@
         const maxCount = results.length > 0 ? results[0].count : 1;
 
         if (results.length === 0) {
-            tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:#9ca3af;padding:32px">No dispense records found in this time range.</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:#9ca3af;padding:32px">No dispense records found in this time range.</td></tr>`;
         } else {
             tbody.innerHTML = results.map((r, i) => {
                 const pct    = total > 0 ? ((r.count / total) * 100).toFixed(1) : '0.0';
@@ -768,7 +842,8 @@
                 return `
                     <tr>
                         <td>${i + 1}</td>
-                        <td>${esc(r.sku)}</td>
+                        <td class="txn-item">${esc(r.sku)}</td>
+                        <td style="color:#9ca3af;font-size:0.8rem">${r.code}</td>
                         <td class="right">${r.count.toLocaleString()}</td>
                         <td class="right">${pct}%</td>
                         <td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:${barPct}%"></div></div></td>
@@ -776,6 +851,58 @@
             }).join('');
         }
         document.getElementById('results-section').style.display = 'block';
+    }
+
+    async function searchTransactions() {
+        const start   = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
+        const end     = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
+        const machine = document.getElementById('locationSelect').value;
+
+        if (!document.getElementById('startDate').value || !document.getElementById('endDate').value) {
+            setStatus('Please enter a start and end date.', 'error', 'status');
+            return;
+        }
+
+        const btn = document.getElementById('searchBtn');
+        btn.disabled = true;
+        setStatus('Querying database…', 'loading', 'status');
+        document.getElementById('results-section').style.display = 'none';
+        document.getElementById('txn-section').style.display     = 'none';
+
+        try {
+            let url = `/api/transactions?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'status'); return; }
+            setStatus('', '', 'status');
+            renderTransactionResults(data.results, data.capped, machine);
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'status');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function renderTransactionResults(results, capped, machineFilter) {
+        document.getElementById('txnCapNote').style.display = capped ? 'block' : 'none';
+        document.getElementById('txnCount').textContent = results.length
+            ? `${results.length.toLocaleString()} transaction${results.length !== 1 ? 's' : ''}${capped ? ' (capped)' : ''}`
+            : '';
+
+        const tbody = document.getElementById('txn-body');
+        if (results.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" style="text-align:center;color:#9ca3af;padding:32px">No transactions found in this time range.</td></tr>`;
+        } else {
+            tbody.innerHTML = results.map(r => `
+                <tr>
+                    <td class="txn-date">${esc(r.date)}</td>
+                    <td class="txn-time">${esc(r.time)}</td>
+                    <td class="txn-item">${esc(r.item)}</td>
+                    <td class="txn-mach">${esc(r.machine)}</td>
+                </tr>`).join('');
+        }
+        document.getElementById('txn-section').style.display = 'block';
     }
 
     // ══════════════════════════════════════════
@@ -932,7 +1059,7 @@
         tbody.innerHTML = locations.map(loc => `
             <tr id="row-${esc(loc.code)}">
                 <td id="name-${esc(loc.code)}">${esc(loc.name)}</td>
-                <td>${esc(loc.code)}</td>
+                <td id="code-${esc(loc.code)}">${esc(loc.code)}</td>
                 <td id="lat-${esc(loc.code)}">${loc.lat !== null ? loc.lat : ''}</td>
                 <td id="lon-${esc(loc.code)}">${loc.lon !== null ? loc.lon : ''}</td>
                 <td>
@@ -941,6 +1068,12 @@
                             onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}', '${loc.lat ?? ''}', '${loc.lon ?? ''}')">
                             Edit
                         </button>
+                        {% if role == 'admin' %}
+                        <button class="btn btn-danger btn-sm"
+                            onclick="deleteLocation('${esc(loc.code)}', '${esc(loc.name)}')">
+                            Delete
+                        </button>
+                        {% endif %}
                     </div>
                 </td>
             </tr>
@@ -948,13 +1081,15 @@
     }
 
     function startEdit(code, name, lat, lon) {
-        const row     = document.getElementById(`row-${code}`);
+        const row      = document.getElementById(`row-${code}`);
         const nameCell = document.getElementById(`name-${code}`);
+        const codeCell = document.getElementById(`code-${code}`);
         const latCell  = document.getElementById(`lat-${code}`);
         const lonCell  = document.getElementById(`lon-${code}`);
         const actCell  = row.querySelector('.action-cell');
 
         nameCell.innerHTML = `<input type="text" value="${esc(name)}" id="edit-name-${esc(code)}" style="width:100%;padding:5px 8px">`;
+        codeCell.innerHTML = `<input type="text" value="${esc(code)}" id="edit-code-${esc(code)}" style="width:100%;padding:5px 8px" placeholder="Machine code">`;
         latCell.innerHTML  = `<input type="text" value="${esc(lat)}"  id="edit-lat-${esc(code)}"  style="width:100%;padding:5px 8px" placeholder="e.g. 1.2847">`;
         lonCell.innerHTML  = `<input type="text" value="${esc(lon)}"  id="edit-lon-${esc(code)}"  style="width:100%;padding:5px 8px" placeholder="e.g. 103.8481">`;
         actCell.innerHTML  = `
@@ -964,15 +1099,16 @@
     }
 
     async function saveEdit(code) {
-        const name = document.getElementById(`edit-name-${code}`).value.trim();
-        const lat  = document.getElementById(`edit-lat-${code}`).value.trim();
-        const lon  = document.getElementById(`edit-lon-${code}`).value.trim();
+        const name     = document.getElementById(`edit-name-${code}`).value.trim();
+        const new_code = document.getElementById(`edit-code-${code}`).value.trim();
+        const lat      = document.getElementById(`edit-lat-${code}`).value.trim();
+        const lon      = document.getElementById(`edit-lon-${code}`).value.trim();
         if (!name) { setStatus('Location name cannot be empty.', 'error', 'adminStatus'); return; }
         try {
             const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, lat: lat || null, lon: lon || null }),
+                body: JSON.stringify({ name, new_code: new_code || null, lat: lat || null, lon: lon || null }),
             });
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
@@ -981,6 +1117,20 @@
             loadLocations();
         } catch (e) {
             setStatus('Failed to save.', 'error', 'adminStatus');
+        }
+    }
+
+    async function deleteLocation(code, name) {
+        if (!confirm(`Delete "${name}" (code: ${code})?\n\nThis cannot be undone and will remove the machine from all dashboards.`)) return;
+        try {
+            const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, { method: 'DELETE' });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
+            setStatus(`"${name}" deleted.`, 'success', 'adminStatus');
+            setTimeout(() => setStatus('', '', 'adminStatus'), 4000);
+            loadLocations();
+        } catch (e) {
+            setStatus('Failed to delete.', 'error', 'adminStatus');
         }
     }
 

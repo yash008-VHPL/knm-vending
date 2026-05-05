@@ -511,7 +511,11 @@ def get_dispenses():
             COUNT(*)            AS DispenseCount
         FROM [MasterData Table] mdt
         INNER JOIN (
-            SELECT ItemCode, MIN(EventName) AS EventName
+            SELECT ItemCode,
+                COALESCE(
+                    MIN(CASE WHEN EventName LIKE '%[a-zA-Z]%' THEN EventName END),
+                    MIN(EventName)
+                ) AS EventName
             FROM MasterCode
             GROUP BY ItemCode
         ) mc ON mdt.[Event Code] = mc.ItemCode
@@ -533,6 +537,81 @@ def get_dispenses():
         conn.close()
         results = [{"code": int(row[0]), "sku": row[1], "count": int(row[2])} for row in rows]
         return jsonify({"results": results, "total": sum(r["count"] for r in results)})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Transaction log ────────────────────────────────────────────────────────────
+
+@app.route("/api/transactions")
+@login_required
+def get_transactions():
+    """Individual vend events in reverse chronological order."""
+    start_str = request.args.get("start",   "").strip()
+    end_str   = request.args.get("end",     "").strip()
+    machine   = request.args.get("machine", "").strip()
+
+    if not start_str or not end_str:
+        return jsonify({"error": "Please provide both a start and end datetime."}), 400
+
+    try:
+        start_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+        end_dt   = datetime.strptime(end_str,   "%Y-%m-%d %H:%M")
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Expected YYYY-MM-DD HH:MM."}), 400
+
+    if start_dt >= end_dt:
+        return jsonify({"error": "Start time must be before end time."}), 400
+
+    start_ole = to_ole_date(start_dt)
+    end_ole   = to_ole_date(end_dt)
+
+    machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s" if machine else ""
+
+    query = f"""
+        SELECT TOP 2000
+            CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
+            mc.EventName                   AS ItemName,
+            ISNULL(ml.MachineName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
+        FROM [MasterData Table] mdt
+        INNER JOIN (
+            SELECT ItemCode,
+                COALESCE(
+                    MIN(CASE WHEN EventName LIKE '%[a-zA-Z]%' THEN EventName END),
+                    MIN(EventName)
+                ) AS EventName
+            FROM MasterCode
+            GROUP BY ItemCode
+        ) mc ON mdt.[Event Code] = mc.ItemCode
+        LEFT JOIN MachineLookup ml
+            ON CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
+        WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
+          AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
+          AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+          AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+          {machine_filter}
+        ORDER BY mdt.[Date Time] DESC
+    """
+
+    params = (machine,) if machine else ()
+
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        rows   = cursor.fetchall()
+        conn.close()
+        results = []
+        for row in rows:
+            dt = from_ole_date(row[0])
+            if dt:
+                results.append({
+                    "date":    dt.strftime("%Y-%m-%d"),
+                    "time":    dt.strftime("%H:%M:%S"),
+                    "item":    row[1],
+                    "machine": row[2],
+                })
+        return jsonify({"results": results, "capped": len(results) == 2000})
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
@@ -907,8 +986,9 @@ def add_location():
 @app.route("/api/admin/locations/<path:code>", methods=["PUT"])
 @dispatch_or_admin_required
 def update_location(code):
-    data = request.get_json()
-    name = (data.get("name") or "").strip()
+    data     = request.get_json()
+    name     = (data.get("name")     or "").strip()
+    new_code = (data.get("new_code") or "").strip()
     if not name:
         return jsonify({"error": "Location name is required."}), 400
     try:
@@ -917,12 +997,41 @@ def update_location(code):
     except (ValueError, TypeError):
         return jsonify({"error": "Latitude and Longitude must be numeric."}), 400
     try:
-        conn = get_connection()
+        conn   = get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s WHERE MachineCode=%s",
-            (name, lat, lon, code),
-        )
+        if new_code and new_code != code:
+            cursor.execute(
+                "SELECT COUNT(*) FROM MachineLookup WHERE MachineCode = %s", (new_code,)
+            )
+            if cursor.fetchone()[0]:
+                conn.close()
+                return jsonify({"error": f"Machine code {new_code} is already in use."}), 400
+            cursor.execute(
+                "UPDATE MachineLookup SET MachineCode=%s, MachineName=%s, Latitude=%s, Longitude=%s WHERE MachineCode=%s",
+                (new_code, name, lat, lon, code),
+            )
+        else:
+            cursor.execute(
+                "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s WHERE MachineCode=%s",
+                (name, lat, lon, code),
+            )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@app.route("/api/admin/locations/<path:code>", methods=["DELETE"])
+@admin_required
+def delete_location(code):
+    try:
+        conn   = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM MachineLookup WHERE MachineCode = %s", (code,))
+        if cursor.rowcount == 0:
+            conn.close()
+            return jsonify({"error": "Location not found."}), 404
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
