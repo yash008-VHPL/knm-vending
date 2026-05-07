@@ -162,6 +162,8 @@
         .btn-secondary:hover { background: #e5e7eb; }
         .btn-danger    { background: #dc2626; color: white; }
         .btn-danger:hover    { background: #b91c1c; }
+        .btn-success   { background: #16a34a; color: white; }
+        .btn-success:hover   { background: #15803d; }
         .btn-sm { padding: 5px 12px; font-size: 0.8rem; }
         .btn:disabled { background: #9ca3af !important; cursor: not-allowed; color: white; }
 
@@ -403,6 +405,9 @@
         <!-- Summary view -->
         <div id="results-section" style="display:none">
             <div class="card">
+                <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+                    <button class="btn btn-success btn-sm" onclick="exportCSV('summary')">⬇ Export CSV</button>
+                </div>
                 <div class="summary">
                     <div class="stat-box">
                         <div class="value" id="totalCount">0</div>
@@ -440,6 +445,9 @@
         <!-- Transaction log view -->
         <div id="txn-section" style="display:none">
             <div class="card">
+                <div style="display:flex;justify-content:flex-end;margin-bottom:12px">
+                    <button class="btn btn-success btn-sm" onclick="exportCSV('transactions')">⬇ Export CSV</button>
+                </div>
                 <div id="txnCapNote" class="cap-note" style="display:none">
                     ⚠️ Results capped at 2,000 rows. Narrow your date range to see all transactions.
                 </div>
@@ -1640,6 +1648,66 @@
         _editableRoutes[targetRi].stops.push(stop);
         renderMapLayers();
         renderRouteEditor();
+    }
+
+    // ── CSV Export ────────────────────────────────────────────────────────────
+    function csvEsc(val) {
+        const s = String(val ?? '');
+        return (s.includes(',') || s.includes('"') || s.includes('\n'))
+            ? `"${s.replace(/"/g, '""')}"` : s;
+    }
+
+    function exportCSV(view) {
+        const start    = document.getElementById('startDate').value;
+        const startTm  = document.getElementById('startTime').value;
+        const end      = document.getElementById('endDate').value;
+        const endTm    = document.getElementById('endTime').value;
+        const locSel   = document.getElementById('locationSelect');
+        const locLabel = locSel.options[locSel.selectedIndex]?.text || 'all';
+
+        let rows, filename;
+
+        if (view === 'summary') {
+            const total = parseInt(document.getElementById('totalCount').textContent.replace(/,/g,'')) || 0;
+            rows = [['#', 'SKU', 'Item Code', 'Count', '% of Total']];
+            document.querySelectorAll('#results-body tr').forEach((tr, i) => {
+                const tds = tr.querySelectorAll('td');
+                if (tds.length >= 3) {
+                    const rank  = tds[0].textContent.trim();
+                    const sku   = tds[1].textContent.trim();
+                    const code  = tds[2].textContent.trim();
+                    const count = tds[3].textContent.trim();
+                    const pct   = tds[4].textContent.trim();
+                    rows.push([rank, sku, code, count, pct]);
+                }
+            });
+            filename = `sales_summary_${locLabel}_${start}_to_${end}.csv`;
+        } else {
+            rows = [['Date', 'Time', 'Item Dispensed', 'Machine']];
+            document.querySelectorAll('#txn-body tr').forEach(tr => {
+                const tds = tr.querySelectorAll('td');
+                if (tds.length >= 4) {
+                    rows.push([
+                        tds[0].textContent.trim(),
+                        tds[1].textContent.trim(),
+                        tds[2].textContent.trim(),
+                        tds[3].textContent.trim(),
+                    ]);
+                }
+            });
+            filename = `transactions_${locLabel}_${start}${startTm.replace(':','')}_to_${end}${endTm.replace(':','')}.csv`;
+        }
+
+        const csv     = rows.map(r => r.map(csvEsc).join(',')).join('\r\n');
+        const blob    = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
+        const url     = URL.createObjectURL(blob);
+        const a       = document.createElement('a');
+        a.href        = url;
+        a.download    = filename.replace(/[^a-z0-9._\-]/gi, '_');
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
     }
 
     // ── Escape HTML ────────────────────────────────────────────────────────────
