@@ -354,25 +354,39 @@
 </header>
 
 <div class="tab-bar">
-    {% if role != 'customer_service' %}
-    <button class="tab-btn active" onclick="switchTab('sales', this)">Sales</button>
+    {# ── Sales / Messages / Topups / Heartbeat — admin, dispatch, sales, field_manager (heartbeat only for field_manager) ── #}
+    {% if role == 'admin' or role == 'dispatch' or role == 'sales' %}
+    <button class="tab-btn{% if role in ['admin','dispatch','sales'] %} active{% endif %}" onclick="switchTab('sales', this)">Sales</button>
     <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
+    {% endif %}
+    {% if role == 'admin' or role == 'dispatch' or role == 'sales' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('heartbeat', this)">💓 Heartbeat</button>
     {% endif %}
-    {% if role == 'admin' or role == 'dispatch' or role == 'customer_service' %}
+    {# ── Locations: admin, dispatch (full edit), field_manager + customer_service (read-only) ── #}
+    {% if role == 'admin' or role == 'dispatch' or role == 'field_manager' or role == 'customer_service' %}
     <button class="tab-btn{% if role == 'customer_service' %} active{% endif %}" onclick="switchTab('admin', this)">Locations</button>
     {% endif %}
     {% if role == 'admin' or role == 'dispatch' %}
     <button class="tab-btn"        onclick="switchTab('dispatch', this)">Dispatch</button>
     {% endif %}
+    {# ── Fault Report: everyone except pure operator (operators take WOs, don't file complaints) ── #}
+    {% if role != 'operator' %}
     <button class="tab-btn"        onclick="switchTab('fault_report', this); if(window.__frInit) window.__frInit();">Fault Report</button>
-    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <button class="tab-btn"        onclick="switchTab('tech_support', this); if(window.__tsInit) window.__tsInit();">Tech Support</button>
     {% endif %}
+    {# ── Tech Support: admin, field_manager, operator. Default for operator + field_manager. ── #}
+    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
+    <button class="tab-btn{% if role in ['operator','field_manager'] %} active{% endif %}" onclick="switchTab('tech_support', this); if(window.__tsInit) window.__tsInit();">Tech Support</button>
+    {% endif %}
+    {# ── Manage KB: admin, field_manager ── #}
     {% if role == 'admin' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('kb_admin', this); if(window.__kbInit) window.__kbInit();">Manage KB</button>
     {% endif %}
+    {# ── Machine History: admin, field_manager ── #}
+    {% if role == 'admin' or role == 'field_manager' %}
+    <button class="tab-btn"        onclick="switchTab('machine_history', this); if(window.__mhInit) window.__mhInit();">Machine History</button>
+    {% endif %}
+    {# ── Test Cleanup: admin only ── #}
     {% if role == 'admin' %}
     <button class="tab-btn" style="color:#b91c1c" onclick="switchTab('admin_delete', this); if(window.__adInit) window.__adInit();">🗑 Test Cleanup</button>
     {% endif %}
@@ -383,7 +397,7 @@
     <!-- ══════════════════════════════════════════
          TAB: Sales
     ══════════════════════════════════════════ -->
-    <div id="tab-sales" class="tab-pane{% if role != 'customer_service' %} active{% endif %}">
+    <div id="tab-sales" class="tab-pane{% if role in ['admin','dispatch','sales'] %} active{% endif %}">
 
         <div class="card">
             <div class="controls">
@@ -679,7 +693,7 @@
     </div><!-- /tab-dispatch -->
     {% endif %}
 
-    {% if role == 'admin' or role == 'dispatch' or role == 'customer_service' %}
+    {% if role == 'admin' or role == 'dispatch' or role == 'field_manager' or role == 'customer_service' %}
     <div id="tab-admin" class="tab-pane{% if role == 'customer_service' %} active{% endif %}">
     <div class="card">
         <div class="card-title">Location Management</div>
@@ -728,17 +742,24 @@
     <!-- ══════════════════════════════════════════
          TABS: Fault Report / Tech Support / Manage KB (V2)
     ══════════════════════════════════════════ -->
+    {% if role != 'operator' %}
     <div id="tab-fault_report" class="tab-pane">
         {% include "_fault_report_tab.html" %}
     </div>
+    {% endif %}
     {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <div id="tab-tech_support" class="tab-pane">
+    <div id="tab-tech_support" class="tab-pane{% if role in ['operator','field_manager'] %} active{% endif %}">
         {% include "_tech_support_tab.html" %}
     </div>
     {% endif %}
     {% if role == 'admin' or role == 'field_manager' %}
     <div id="tab-kb_admin" class="tab-pane">
         {% include "_kb_admin_tab.html" %}
+    </div>
+    {% endif %}
+    {% if role == 'admin' or role == 'field_manager' %}
+    <div id="tab-machine_history" class="tab-pane">
+        {% include "_machine_history_tab.html" %}
     </div>
     {% endif %}
     {% if role == 'admin' %}

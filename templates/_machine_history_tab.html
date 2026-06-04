@@ -1,0 +1,201 @@
+<!--
+  Machine History tab — admin / field_manager.
+  Pick a machine → see complaints, work orders, delivery orders, and all
+  activity in one chronological timeline. Backed by /api/wo/manager/equipment-log.
+  Namespace: .mh-*
+-->
+
+<style>
+    .mh-section { max-width: 1100px; margin: 24px auto; padding: 0 18px; }
+
+    .mh-toolbar {
+        display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: center;
+    }
+    .mh-toolbar input[type="search"] {
+        padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px;
+        font-size: 0.92rem; flex: 1; min-width: 220px;
+    }
+    .mh-machine-list {
+        background: white; border: 1px solid #e5e7eb; border-radius: 9px;
+        max-height: 320px; overflow-y: auto;
+    }
+    .mh-machine-row {
+        padding: 9px 14px; border-bottom: 1px solid #f3f4f6; cursor: pointer;
+        display: flex; justify-content: space-between; align-items: center;
+        font-size: 0.88rem;
+    }
+    .mh-machine-row:last-child { border-bottom: none; }
+    .mh-machine-row:hover { background: #f8faff; }
+    .mh-machine-row .code { font-family: ui-monospace, monospace; color: #6b7280; font-size: 0.78rem; }
+
+    .mh-detail {
+        background: white; border: 1px solid #e5e7eb; border-radius: 11px;
+        padding: 16px 18px; margin-top: 14px;
+    }
+    .mh-detail h3 { margin: 0 0 8px 0; font-size: 1.05rem; color: #111827; }
+    .mh-detail .sub { font-size: 0.84rem; color: #6b7280; font-family: ui-monospace, monospace; margin-bottom: 12px; }
+
+    .mh-stats {
+        display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+    }
+    .mh-stat {
+        background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 8px;
+        padding: 10px 14px; flex: 1; min-width: 140px;
+    }
+    .mh-stat .label { font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        color: #6b7280; letter-spacing: 0.05em; }
+    .mh-stat .value { font-size: 1.05rem; font-weight: 700; color: #111827; margin-top: 3px; }
+
+    .mh-events { margin-top: 8px; }
+    .mh-evt {
+        padding: 10px 12px; border-left: 3px solid #cbd5e1; margin-bottom: 8px;
+        background: #f9fafb; border-radius: 5px;
+    }
+    .mh-evt.complaint     { border-left-color: #b45309; }
+    .mh-evt.joborder      { border-left-color: #1a56db; }
+    .mh-evt.deliveryorder { border-left-color: #15803d; }
+    .mh-evt .head { display: flex; gap: 8px; align-items: center; font-size: 0.8rem; margin-bottom: 3px; }
+    .mh-evt .type {
+        font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.03em; padding: 2px 7px; border-radius: 4px;
+    }
+    .mh-evt.complaint     .type { background: #fef3c7; color: #b45309; }
+    .mh-evt.joborder      .type { background: #dbeafe; color: #1e40af; }
+    .mh-evt.deliveryorder .type { background: #dcfce7; color: #15803d; }
+    .mh-evt .display-id { font-family: ui-monospace, monospace; color: #6b7280; font-size: 0.76rem; }
+    .mh-evt .action { font-weight: 700; color: #111827; font-size: 0.84rem; }
+    .mh-evt .at { color: #6b7280; font-size: 0.74rem; margin-left: auto; }
+    .mh-evt .summary { font-size: 0.86rem; color: #374151; margin-top: 4px; line-height: 1.4; }
+    .mh-evt .by { font-size: 0.74rem; color: #6b7280; margin-top: 3px; }
+
+    .mh-empty { text-align: center; color: #9ca3af; padding: 30px 10px; font-size: 0.88rem; }
+    .mh-msg { padding: 10px 14px; border-radius: 6px; font-size: 0.84rem; margin-bottom: 12px; }
+    .mh-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .mh-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+</style>
+
+<div class="mh-section">
+    <div class="mh-toolbar">
+        <input type="search" id="mhSearch" placeholder="Search machine name or code…" oninput="window.__mhSearch()">
+    </div>
+    <div id="mhMsg"></div>
+    <div id="mhMachineList" class="mh-machine-list"></div>
+    <div id="mhDetail" style="display:none"></div>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = { machines: [], loaded: false, currentCode: null };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.json().then(function(d){
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
+    function showMsg(html, cls){
+        document.getElementById('mhMsg').innerHTML = html ? '<div class="mh-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+
+    window.__mhInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        loadMachines();
+    };
+
+    function loadMachines(){
+        showMsg('Loading machines…', 'loading');
+        api('/api/wo/manager/machines').then(function(arr){
+            state.machines = arr;
+            renderMachines();
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    }
+
+    function renderMachines(){
+        var q = (document.getElementById('mhSearch').value || '').toLowerCase();
+        var rows = state.machines.filter(function(m){
+            if(!q) return true;
+            return (m.name || '').toLowerCase().indexOf(q) >= 0
+                || (m.code || '').toLowerCase().indexOf(q) >= 0;
+        });
+        if(!rows.length){
+            document.getElementById('mhMachineList').innerHTML =
+                '<div class="mh-empty">No machines match.</div>';
+            return;
+        }
+        document.getElementById('mhMachineList').innerHTML = rows.map(function(m){
+            return ''
+              + '<div class="mh-machine-row" onclick="window.__mhPick(\'' + esc(m.code) + '\')">'
+              +   '<div>' + esc(m.name) + '</div>'
+              +   '<div class="code">' + esc(m.code) + '</div>'
+              + '</div>';
+        }).join('');
+    }
+
+    window.__mhSearch = function(){ renderMachines(); };
+
+    window.__mhPick = function(code){
+        state.currentCode = code;
+        showMsg('Loading history…', 'loading');
+        api('/api/wo/manager/equipment-log?machine_code=' + encodeURIComponent(code)).then(function(d){
+            renderDetail(d);
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    function renderDetail(d){
+        var m = d.machine || {};
+        var c = d.counts  || {};
+        var html = ''
+          + '<div class="mh-detail">'
+          +   '<h3>' + esc((m.names || []).join(' / ') || 'Unknown') + '</h3>'
+          +   '<div class="sub">' + esc(m.code || '') + '</div>'
+          +   '<div class="mh-stats">'
+          +     '<div class="mh-stat"><div class="label">Complaints</div><div class="value">' + (c.complaints || 0) + '</div></div>'
+          +     '<div class="mh-stat"><div class="label">Work orders</div><div class="value">' + (c.job_orders || 0) + '</div></div>'
+          +     '<div class="mh-stat"><div class="label">Deliveries</div><div class="value">' + (c.delivery_orders || 0) + '</div></div>'
+          +     '<div class="mh-stat"><div class="label">Last topup</div><div class="value" style="font-size:0.88rem">' + esc(fmtDT(m.last_topup)) + '</div></div>'
+          +     '<div class="mh-stat"><div class="label">Vends before</div><div class="value">' + (m.vends_before_last_topup != null ? m.vends_before_last_topup : '—') + '</div></div>'
+          +   '</div>'
+          +   '<div class="mh-events">' + renderEvents(d.events || []) + '</div>'
+          + '</div>';
+        document.getElementById('mhDetail').style.display = 'block';
+        document.getElementById('mhDetail').innerHTML = html;
+    }
+
+    function renderEvents(events){
+        if(!events.length){
+            return '<div class="mh-empty">No history yet for this machine.</div>';
+        }
+        return events.map(function(e){
+            var cls = e.type || '';
+            var disp = e.display_id ? ' <span class="display-id">' + esc(e.display_id) + '</span>' : '';
+            return ''
+              + '<div class="mh-evt ' + cls + '">'
+              +   '<div class="head">'
+              +     '<span class="type">' + esc(e.type || '') + '</span>'
+              +     '<span class="action">' + esc(e.action || '') + '</span>'
+              +     disp
+              +     '<span class="at">' + esc(fmtDT(e.at)) + '</span>'
+              +   '</div>'
+              +   (e.summary ? '<div class="summary">' + esc(e.summary) + '</div>' : '')
+              +   (e.by ? '<div class="by">by ' + esc(e.by) + (e.status ? ' · status: ' + esc(e.status) : '') + '</div>'
+                       : (e.status ? '<div class="by">status: ' + esc(e.status) + '</div>' : ''))
+              + '</div>';
+        }).join('');
+    }
+
+})();
+</script>
