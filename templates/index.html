@@ -385,6 +385,7 @@
     {# ── Machine History: admin, field_manager ── #}
     {% if role == 'admin' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('machine_history', this); if(window.__mhInit) window.__mhInit();">Machine History</button>
+    <button class="tab-btn"        onclick="switchTab('historic_locations', this); if(window.__hlInit) window.__hlInit();">Historic Locations</button>
     {% endif %}
     {# ── Test Cleanup: admin only ── #}
     {% if role == 'admin' %}
@@ -760,6 +761,9 @@
     {% if role == 'admin' or role == 'field_manager' %}
     <div id="tab-machine_history" class="tab-pane">
         {% include "_machine_history_tab.html" %}
+    </div>
+    <div id="tab-historic_locations" class="tab-pane">
+        {% include "_historic_locations_tab.html" %}
     </div>
     {% endif %}
     {% if role == 'admin' %}

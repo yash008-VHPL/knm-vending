@@ -31,7 +31,8 @@
     }
     .ts-badge.s0 { background: #fef3c7; color: #b45309; }   /* assigned */
     .ts-badge.s1 { background: #fee2e2; color: #b91c1c; }   /* needs_assistance */
-    .ts-badge.s2 { background: #dcfce7; color: #15803d; }   /* closed */
+    .ts-badge.s2 { background: #e0e7ff; color: #3730a3; }   /* pending_review */
+    .ts-badge.s3 { background: #dcfce7; color: #15803d; }   /* closed */
     .ts-badge.p0 { background: #f3f4f6; color: #6b7280; }
     .ts-badge.p1 { background: #e0e7ff; color: #3730a3; }
     .ts-badge.p2 { background: #fee2e2; color: #b91c1c; }
@@ -225,6 +226,7 @@
             <option value="all">All statuses</option>
             <option value="assigned">Assigned</option>
             <option value="needs_assistance">Needs assistance</option>
+            <option value="pending_review">Pending review</option>
             <option value="closed">Closed</option>
         </select>
         <select id="tsFilterScope" onchange="window.__tsRefresh()">
@@ -450,12 +452,17 @@
                : '')
           +   '<div class="ts-block"><div class="ts-block-title">Tickbox checklist</div>' + tasks + '</div>'
           +   '<div class="ts-block"><div class="ts-block-title">Photos</div><div class="ts-img-grid">' + imgs + '</div></div>'
-          +   (j.status_code !== 2 ? ''
+          +   ((j.status_code === 0 || j.status_code === 1) ? ''
               + '<div class="ts-actions-row">'
               +   '<button class="ts-btn-help"  onclick="window.__tsWOHelp(' + j.id + ')">⚠ Needs assistance</button>'
-              +   '<button class="ts-btn-close" onclick="window.__tsWOClose(' + j.id + ')">✓ Mark complete</button>'
+              +   '<button class="ts-btn-close" onclick="window.__tsWOClose(' + j.id + ')">✓ Submit for review</button>'
               + '</div>'
-              : '')
+              : (j.status_code === 2 && isManager() ? ''
+              + '<div class="ts-actions-row">'
+              +   '<button class="ts-btn-help"  onclick="window.__tsWOReject(' + j.id + ')">✗ Reject &amp; create new WO</button>'
+              +   '<button class="ts-btn-close" onclick="window.__tsWOAccept(' + j.id + ')">✓ Accept &amp; close complaint</button>'
+              + '</div>'
+              : ''))
           + '</div>';
 
         document.getElementById('tsList').style.display = 'none';
@@ -494,10 +501,29 @@
     };
 
     window.__tsWOClose = function(jobId){
-        if(!confirm("Mark this WO complete? This closes the linked complaint (if any) too.")) return;
+        if(!confirm("Submit this WO for manager review? You'll mark your work done; the manager decides whether the complaint is fully resolved or another WO is needed.")) return;
         postJSON('/api/wo/joborders/' + jobId + '/status', { status_code: 2 })
             .then(function(){ window.__tsRefresh(); })
-            .catch(function(e){ alert('Close failed: ' + e.message); });
+            .catch(function(e){ alert('Submit failed: ' + e.message); });
+    };
+
+    window.__tsWOAccept = function(jobId){
+        var notes = prompt("Optional notes for accepting this WO (closes the complaint):") || "";
+        postJSON('/api/wo/joborders/' + jobId + '/review', { decision: 'accept', notes: notes })
+            .then(function(){ window.__tsRefresh(); })
+            .catch(function(e){ alert('Accept failed: ' + e.message); });
+    };
+
+    window.__tsWOReject = function(jobId){
+        var notes = prompt("Reason for rejecting — describes what's still needed. A new WO will be created with the same complaint link:");
+        if(notes == null) return;
+        if(!notes.trim()){ alert('Reason required to reject.'); return; }
+        postJSON('/api/wo/joborders/' + jobId + '/review', { decision: 'reject', notes: notes.trim() })
+            .then(function(res){
+                alert('Rejected. New WO created: ' + (res.new_display_id || ('#' + res.new_wo_id)) + '. Edit it to set the revised diagnosis / proposed fix.');
+                window.__tsRefresh();
+            })
+            .catch(function(e){ alert('Reject failed: ' + e.message); });
     };
 
     window.__tsClosePrompt = function(){

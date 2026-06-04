@@ -52,8 +52,15 @@ MANAGER_ROLES  = {ROLE_FIELD_MANAGER, ROLE_ADMIN}
 # Stored as TINYINT in DB; expanded to strings in API responses.
 
 COMPLAINT_STATUS = {0: "fresh",    1: "assigned",         2: "closed"}
-JOBORDER_STATUS  = {0: "assigned", 1: "needs_assistance", 2: "closed"}
+JOBORDER_STATUS  = {
+    0: "assigned",
+    1: "needs_assistance",
+    2: "pending_review",   # operator submitted, awaiting manager review
+    3: "closed",           # manager accepted (work done) or superseded
+}
 PRIORITY         = {0: "low",      1: "normal",           2: "high"}
+MOVEMENT_STATUS  = {0: "scheduled", 1: "in_progress", 2: "completed"}
+MOVEMENT_TYPES   = ("deploy", "relocate", "retrieve")
 
 
 def _label(mapping: dict, code) -> str:
@@ -257,6 +264,28 @@ def init_workorders_db():
                 CONSTRAINT PK_WO_Counters PRIMARY KEY (Kind, YYMM)
             )
         """),
+        ("WO_MovementOrders", """
+            CREATE TABLE WO_MovementOrders (
+                MovementOrderID    INT IDENTITY(1,1) PRIMARY KEY,
+                MovementType       NVARCHAR(20)   NOT NULL,
+                MachineCode        NVARCHAR(50)   NOT NULL,
+                FromLocation       NVARCHAR(255)  NULL,
+                FromLat            FLOAT          NULL,
+                FromLon            FLOAT          NULL,
+                ToLocation         NVARCHAR(255)  NULL,
+                ToLat              FLOAT          NULL,
+                ToLon              FLOAT          NULL,
+                Notes              NVARCHAR(MAX)  NULL,
+                AssignedTo         NVARCHAR(255)  NULL,
+                StatusCode         TINYINT        NOT NULL DEFAULT 0,
+                DisplayID          NVARCHAR(30)   NULL,
+                ReasonForRetrieval NVARCHAR(255)  NULL,
+                CreatedBy          NVARCHAR(255)  NOT NULL,
+                CreatedAt          DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
+                CompletedBy        NVARCHAR(255)  NULL,
+                CompletedAt        DATETIME2      NULL
+            )
+        """),
     ]
     indexes = [
         "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WOImg_Parent') "
@@ -273,6 +302,10 @@ def init_workorders_db():
         "CREATE INDEX IX_WOKB_EventCode ON WO_KB_Entries (EventCode, UseCount DESC)",
         "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WOKBTB_KB') "
         "CREATE INDEX IX_WOKBTB_KB ON WO_KB_Tickboxes (KBID, SeqNum)",
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WOMVO_Machine') "
+        "CREATE INDEX IX_WOMVO_Machine ON WO_MovementOrders (MachineCode, CreatedAt DESC)",
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WOMVO_Assigned') "
+        "CREATE INDEX IX_WOMVO_Assigned ON WO_MovementOrders (AssignedTo, StatusCode)",
     ]
 
     conn = get_connection()
@@ -362,13 +395,13 @@ def _decode_data_url(data_url):
 
 def allocate_display_id(cursor, kind: str) -> str:
     """
-    kind: 'CMP' (complaints) or 'WkO' (work orders)
-    Returns: 'KNM-CMP-NNNN-YYMM' or 'KNM-WkO-NNNN-YYMM'.
+    kind: 'CMP' (complaints), 'WkO' (work orders), 'MVO' (movement orders)
+    Returns: 'KNM-{Kind}-NNNN-YYMM'.
 
     Uses WO_Counters with row-level locking to atomically allocate a new
     sequence number for the current YYMM. Caller must commit.
     """
-    if kind not in ("CMP", "WkO"):
+    if kind not in ("CMP", "WkO", "MVO"):
         raise ValueError(f"Unknown DisplayID kind: {kind!r}")
     now = datetime.utcnow()
     yymm = now.strftime("%y%m")
@@ -494,16 +527,96 @@ def api_bootstrap():
 @workorders_bp.route("/machines")
 @api_login_required
 def api_machines():
+    """Active machines only. Pass ?include_inactive=1 to include decommissioned."""
+    include_inactive = request.args.get("include_inactive") in ("1", "true", "yes")
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        sql = "SELECT MachineName, MachineCode, ISNULL(IsActive, 1) FROM MachineLookup"
+        if not include_inactive:
+            sql += " WHERE ISNULL(IsActive, 1) = 1"
+        sql += " ORDER BY MachineName"
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([{
+            "name": r[0], "code": str(r[1]), "is_active": bool(r[2]),
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/locations/historic")
+@require_roles(*MANAGER_ROLES)
+def api_locations_historic():
+    """Decommissioned machines with lifetime vend counts."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT MachineName, MachineCode FROM MachineLookup
-            ORDER BY MachineName
+            SELECT
+                ml.MachineName, ml.MachineCode, ml.Latitude, ml.Longitude,
+                ml.DecommissionedAt, ml.DecommissionReason,
+                (
+                    SELECT COUNT(*) FROM [MasterData Table] mdt
+                    WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
+                      AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+                      AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+                ) AS LifetimeVends
+            FROM MachineLookup ml
+            WHERE ISNULL(ml.IsActive, 1) = 0
+            ORDER BY ml.DecommissionedAt DESC
         """)
         rows = cursor.fetchall()
         conn.close()
-        return jsonify([{"name": r[0], "code": str(r[1])} for r in rows])
+        return jsonify([{
+            "name": r[0], "code": str(r[1]),
+            "lat": r[2], "lon": r[3],
+            "decommissioned_at": _iso(r[4]),
+            "decommission_reason": r[5],
+            "lifetime_vends": int(r[6] or 0),
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/locations/<path:code>/decommission", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_location_decommission(code):
+    data = request.get_json(silent=True) or {}
+    reason = (data.get("reason") or "").strip() or None
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE MachineLookup
+            SET IsActive = 0,
+                DecommissionedAt = SYSUTCDATETIME(),
+                DecommissionReason = %s
+            WHERE MachineCode = %s
+        """, (reason, code))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/locations/<path:code>/recommission", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_location_recommission(code):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE MachineLookup
+            SET IsActive = 1, DecommissionedAt = NULL, DecommissionReason = NULL
+            WHERE MachineCode = %s
+        """, (code,))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
@@ -1095,9 +1208,12 @@ def api_joborder_assign(jid):
 @require_roles(*OPERATOR_ROLES)
 def api_joborder_status(jid):
     """Operator updates status:
-        0 assigned, 1 needs_assistance, 2 closed.
+        0 assigned, 1 needs_assistance, 2 pending_review.
+    Status 3 (closed) is set ONLY by the manager via /review endpoint.
+
     For status=1: body MUST include 'block_reason' (stored in LastBlockReason).
-    For status=2: completion timestamp + completer email captured.
+    For status=2: operator marks work done, awaiting manager review.
+                  Does NOT close the complaint — manager decides at /review.
     """
     data = request.get_json(silent=True) or {}
     user = get_current_user()
@@ -1106,7 +1222,7 @@ def api_joborder_status(jid):
     except (TypeError, ValueError):
         return jsonify({"error": "status_code (0/1/2) required."}), 400
     if status_code not in (0, 1, 2):
-        return jsonify({"error": "status_code must be 0, 1, or 2."}), 400
+        return jsonify({"error": "Operator can only set 0, 1, or 2. Manager closes via /review."}), 400
 
     block_reason = (data.get("block_reason") or "").strip() or None
     if status_code == 1 and not block_reason:
@@ -1128,17 +1244,13 @@ def api_joborder_status(jid):
             return jsonify({"error": "Not assigned to you."}), 403
 
         if status_code == 2:
+            # Operator marks "done — pending review". No complaint close yet.
             cursor.execute("""
                 UPDATE WO_JobOrders
                 SET StatusCode=2, LastBlockReason=NULL,
                     CompletedBy=%s, CompletedAt=SYSUTCDATETIME()
                 WHERE JobOrderID=%s
             """, (user, jid))
-            # If linked complaint exists, mark it closed
-            cursor.execute("""
-                UPDATE WO_Complaints SET StatusCode=2
-                WHERE JobOrderID=%s
-            """, (jid,))
         else:
             cursor.execute("""
                 UPDATE WO_JobOrders
@@ -1153,6 +1265,101 @@ def api_joborder_status(jid):
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Manager review (the "review loop" for WO completion) ─────────────────────
+
+@workorders_bp.route("/joborders/<int:jid>/review", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_joborder_review(jid):
+    """Manager reviews an operator-submitted WO (StatusCode=2 pending_review).
+    Body: {decision: 'accept'|'reject', notes: str (optional)}
+
+    accept → WO StatusCode=3 (closed). If linked complaint, close it (StatusCode=2).
+    reject → WO StatusCode=3 (closed, superseded). Create a NEW WO inheriting the
+             complaint link + machine + assignment. Manager later edits the new WO
+             with revised diagnosis/proposed_fix.
+    """
+    data = request.get_json(silent=True) or {}
+    decision = (data.get("decision") or "").strip().lower()
+    notes    = (data.get("notes") or "").strip() or None
+    if decision not in ("accept", "reject"):
+        return jsonify({"error": "decision must be 'accept' or 'reject'."}), 400
+
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT JobOrderID, ComplaintID, MachineName, MachineCode,
+                   AssignedTo, PriorityCode, EventCode, StatusCode, DisplayID
+            FROM WO_JobOrders WHERE JobOrderID = %s
+        """, (jid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Job order not found."}), 404
+        if int(row[7]) != 2:
+            conn.close()
+            return jsonify({"error": "WO is not pending_review."}), 400
+
+        (_, complaint_id, machine_name, machine_code,
+         assigned, priority_code, event_code, _, old_display) = row
+
+        # Close the reviewed WO regardless of decision.
+        cursor.execute("UPDATE WO_JobOrders SET StatusCode = 3 WHERE JobOrderID = %s", (jid,))
+        _log_activity(cursor, "joborder", jid, "manager_review",
+                      f"{decision}" + (f" — {notes}" if notes else ""), user)
+
+        new_wo_id = None
+        new_display = None
+        if decision == "accept":
+            if complaint_id:
+                cursor.execute(
+                    "UPDATE WO_Complaints SET StatusCode = 2 WHERE ComplaintID = %s",
+                    (complaint_id,),
+                )
+                _log_activity(cursor, "complaint", complaint_id, "closed",
+                              f"Closed via accept of {old_display}", user)
+        else:
+            # reject: create a new WO inheriting the complaint linkage
+            new_display = allocate_display_id(cursor, "WkO")
+            cursor.execute("""
+                INSERT INTO WO_JobOrders
+                    (ComplaintID, MachineName, MachineCode,
+                     AssignedTo, PriorityCode, StatusCode,
+                     EventCode, Notes, DisplayID, CreatedBy)
+                OUTPUT INSERTED.JobOrderID
+                VALUES (%s, %s, %s,
+                        %s, %s, 0,
+                        %s, %s, %s, %s)
+            """, (complaint_id, machine_name, machine_code,
+                  assigned, priority_code,
+                  event_code,
+                  (f"Follow-up to {old_display}. " + (notes or "")).strip(),
+                  new_display, user))
+            new_wo_id = int(cursor.fetchone()[0])
+            _log_activity(cursor, "joborder", new_wo_id, "created",
+                          f"Created as follow-up to {old_display}", user)
+            if complaint_id:
+                cursor.execute("""
+                    UPDATE WO_Complaints
+                    SET JobOrderID = %s, StatusCode = 1
+                    WHERE ComplaintID = %s
+                """, (new_wo_id, complaint_id))
+                _log_activity(cursor, "complaint", complaint_id, "rerouted",
+                              f"Linked to follow-up {new_display}", user)
+
+        conn.commit()
+        conn.close()
+        return jsonify({
+            "ok": True,
+            "decision": decision,
+            "new_wo_id": new_wo_id,
+            "new_display_id": new_display,
+        })
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
@@ -1686,6 +1893,24 @@ def api_admin_delete_joborder(jid):
     return jsonify({"ok": True, "sp_deleted": len(sp_ids)})
 
 
+@workorders_bp.route("/admin/movementorder/<int:mid>", methods=["DELETE"])
+@require_roles(ROLE_ADMIN)
+def api_admin_delete_movementorder(mid):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM WO_Activity WHERE ParentType='movementorder' AND ParentID=%s",
+            (mid,),
+        )
+        cursor.execute("DELETE FROM WO_MovementOrders WHERE MovementOrderID=%s", (mid,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Delete failed: {str(e)}"}), 500
+    return jsonify({"ok": True})
+
+
 @workorders_bp.route("/admin/wipe-all", methods=["POST"])
 @require_roles(ROLE_ADMIN)
 def api_admin_wipe_all():
@@ -1706,6 +1931,7 @@ def api_admin_wipe_all():
         cursor.execute("UPDATE WO_Complaints SET JobOrderID=NULL")  # break FK first
         cursor.execute("DELETE FROM WO_JobOrders")
         cursor.execute("DELETE FROM WO_Complaints")
+        cursor.execute("DELETE FROM WO_MovementOrders")
         if include_kb:
             cursor.execute("DELETE FROM WO_KB_Tickboxes")
             cursor.execute("DELETE FROM WO_KB_Entries")
@@ -1855,6 +2081,255 @@ def _sync_topup(cursor, machine_code):
         WHERE MachineCode = %s
     """, (vends_since, machine_code))
     return f"Topup logged ({vends_since} vends since previous topup)."
+
+
+# ── Movement Orders (warehouse ↔ location ↔ location) ────────────────────────
+
+WAREHOUSE_LABEL = "WAREHOUSE"
+
+
+def _machine_location(cursor, machine_code):
+    """Return (name, lat, lon, is_active) for a machine, or (None,...) if not found."""
+    cursor.execute("""
+        SELECT MachineName, Latitude, Longitude, ISNULL(IsActive, 1)
+        FROM MachineLookup WHERE MachineCode = %s
+    """, (machine_code,))
+    r = cursor.fetchone()
+    if not r:
+        return (None, None, None, None)
+    return (r[0], r[1], r[2], int(r[3]))
+
+
+@workorders_bp.route("/movementorders", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_movement_create():
+    """Body:
+        movement_type: 'deploy' | 'relocate' | 'retrieve'
+        machine_code:  required
+        to_location:   name (NULL for retrieve — defaults to WAREHOUSE)
+        to_lat, to_lon: required for deploy + relocate
+        notes:         optional
+        assigned_to:   driver email
+        reason_for_retrieval: optional (retrieve only)
+    """
+    data = request.get_json(silent=True) or {}
+    mtype = (data.get("movement_type") or "").strip().lower()
+    if mtype not in MOVEMENT_TYPES:
+        return jsonify({"error": "movement_type must be deploy / relocate / retrieve."}), 400
+
+    machine_code = (data.get("machine_code") or "").strip()
+    if not machine_code:
+        return jsonify({"error": "machine_code required."}), 400
+
+    to_lat = data.get("to_lat"); to_lon = data.get("to_lon")
+    to_location = (data.get("to_location") or "").strip() or None
+    if mtype == "retrieve":
+        to_location = WAREHOUSE_LABEL
+        to_lat = None; to_lon = None
+    else:
+        try:
+            to_lat = float(to_lat) if to_lat not in (None, "", "null") else None
+            to_lon = float(to_lon) if to_lon not in (None, "", "null") else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "to_lat and to_lon must be numbers."}), 400
+        if to_lat is None or to_lon is None or not to_location:
+            return jsonify({"error": "to_location, to_lat, to_lon required for deploy / relocate."}), 400
+
+    user = get_current_user()
+    notes              = (data.get("notes") or "").strip() or None
+    assigned           = (data.get("assigned_to") or "").strip().lower() or None
+    reason             = (data.get("reason_for_retrieval") or "").strip() or None
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cur_name, cur_lat, cur_lon, cur_active = _machine_location(cursor, machine_code)
+
+        # Sanity:
+        if mtype == "deploy" and cur_active == 1:
+            conn.close()
+            return jsonify({"error": "Machine is currently active. Use relocate instead."}), 400
+        if mtype in ("relocate", "retrieve") and cur_active != 1:
+            conn.close()
+            return jsonify({"error": "Machine is not currently active. Use deploy."}), 400
+
+        from_loc = WAREHOUSE_LABEL if (mtype == "deploy" or cur_active != 1) else cur_name
+        display_id = allocate_display_id(cursor, "MVO")
+
+        cursor.execute("""
+            INSERT INTO WO_MovementOrders
+                (MovementType, MachineCode,
+                 FromLocation, FromLat, FromLon,
+                 ToLocation,   ToLat,   ToLon,
+                 Notes, AssignedTo, ReasonForRetrieval,
+                 DisplayID, CreatedBy)
+            OUTPUT INSERTED.MovementOrderID
+            VALUES (%s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s, %s,
+                    %s, %s)
+        """, (mtype, machine_code,
+              from_loc, cur_lat, cur_lon,
+              to_location, to_lat, to_lon,
+              notes, assigned, reason,
+              display_id, user))
+        new_id = int(cursor.fetchone()[0])
+        _log_activity(cursor, "movementorder", new_id, "created",
+                      f"{mtype} {machine_code}: {from_loc} → {to_location}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id, "display_id": display_id})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/movementorders")
+@api_login_required
+def api_movement_list():
+    """?scope=mine|all  ?status=scheduled|in_progress|completed|all  ?machine_code=…"""
+    scope         = (request.args.get("scope") or "mine").strip().lower()
+    status_filter = (request.args.get("status") or "all").strip().lower()
+    machine_code  = (request.args.get("machine_code") or "").strip() or None
+    user          = get_current_user()
+    if get_role(user) not in MANAGER_ROLES:
+        scope = "mine"
+
+    where, params = [], []
+    if scope == "mine":
+        where.append("AssignedTo = %s"); params.append(user)
+    rev = {v: k for k, v in MOVEMENT_STATUS.items()}
+    if status_filter in rev:
+        where.append("StatusCode = %s"); params.append(rev[status_filter])
+    if machine_code:
+        where.append("MachineCode = %s"); params.append(machine_code)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT TOP 200
+                MovementOrderID, DisplayID, MovementType, MachineCode,
+                FromLocation, FromLat, FromLon,
+                ToLocation,   ToLat,   ToLon,
+                StatusCode, AssignedTo, CreatedBy, CreatedAt,
+                CompletedBy, CompletedAt, Notes, ReasonForRetrieval
+            FROM WO_MovementOrders {where_sql}
+            ORDER BY CreatedAt DESC, MovementOrderID DESC
+        """, tuple(params))
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([{
+            "id": r[0], "display_id": r[1],
+            "movement_type": r[2], "machine_code": r[3],
+            "from_location": r[4], "from_lat": r[5], "from_lon": r[6],
+            "to_location":   r[7], "to_lat":   r[8], "to_lon":   r[9],
+            "status_code":   int(r[10]),
+            "status_label":  _label(MOVEMENT_STATUS, r[10]),
+            "assigned_to": r[11], "created_by": r[12], "created_at": _iso(r[13]),
+            "completed_by": r[14], "completed_at": _iso(r[15]),
+            "notes": r[16], "reason_for_retrieval": r[17],
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/movementorders/<int:mid>/complete", methods=["POST"])
+@require_roles(*OPERATOR_ROLES)
+def api_movement_complete(mid):
+    """Mark the movement as completed AND apply the location/active-flag change
+    to MachineLookup atomically."""
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT MovementType, MachineCode, ToLocation, ToLat, ToLon,
+                   AssignedTo, StatusCode, DisplayID, ReasonForRetrieval
+            FROM WO_MovementOrders WHERE MovementOrderID = %s
+        """, (mid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Movement order not found."}), 404
+        (mtype, machine_code, to_loc, to_lat, to_lon,
+         assigned, status_code, display, reason) = row
+        if int(status_code) == 2:
+            conn.close()
+            return jsonify({"error": "Already completed."}), 400
+        if get_role(user) not in MANAGER_ROLES and (assigned or "").lower() != user.lower():
+            conn.close()
+            return jsonify({"error": "Not assigned to you."}), 403
+
+        # Apply MachineLookup change
+        if mtype == "deploy":
+            cursor.execute("""
+                UPDATE MachineLookup
+                SET MachineName = %s, Latitude = %s, Longitude = %s,
+                    IsActive = 1, DecommissionedAt = NULL, DecommissionReason = NULL
+                WHERE MachineCode = %s
+            """, (to_loc, to_lat, to_lon, machine_code))
+        elif mtype == "relocate":
+            cursor.execute("""
+                UPDATE MachineLookup
+                SET MachineName = %s, Latitude = %s, Longitude = %s
+                WHERE MachineCode = %s
+            """, (to_loc, to_lat, to_lon, machine_code))
+        elif mtype == "retrieve":
+            cursor.execute("""
+                UPDATE MachineLookup
+                SET IsActive = 0,
+                    DecommissionedAt = SYSUTCDATETIME(),
+                    DecommissionReason = %s
+                WHERE MachineCode = %s
+            """, (reason, machine_code))
+
+        cursor.execute("""
+            UPDATE WO_MovementOrders
+            SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
+            WHERE MovementOrderID = %s
+        """, (user, mid))
+        _log_activity(cursor, "movementorder", mid, "completed",
+                      f"{mtype} applied to {machine_code}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/movementorders/<int:mid>/status", methods=["POST"])
+@require_roles(*OPERATOR_ROLES)
+def api_movement_status(mid):
+    """Driver marks in_progress (1). Status 2 = complete is via /complete."""
+    data = request.get_json(silent=True) or {}
+    try:
+        sc = int(data.get("status_code"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "status_code required."}), 400
+    if sc not in (0, 1):
+        return jsonify({"error": "Use 0 or 1 here; use /complete to finish."}), 400
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT AssignedTo, StatusCode FROM WO_MovementOrders WHERE MovementOrderID=%s", (mid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Not found."}), 404
+        if get_role(user) not in MANAGER_ROLES and (row[0] or "").lower() != user.lower():
+            conn.close()
+            return jsonify({"error": "Not assigned to you."}), 403
+        cursor.execute("UPDATE WO_MovementOrders SET StatusCode=%s WHERE MovementOrderID=%s", (sc, mid))
+        _log_activity(cursor, "movementorder", mid, "status",
+                      _label(MOVEMENT_STATUS, sc), user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
 # ── Delivery Orders ───────────────────────────────────────────────────────────
@@ -2340,6 +2815,32 @@ def api_equipment_log():
                     "status": "completed",
                 })
 
+        # Movement orders
+        cursor.execute("""
+            SELECT MovementOrderID, DisplayID, MovementType,
+                   FromLocation, ToLocation, AssignedTo,
+                   StatusCode, CreatedBy, CreatedAt, CompletedBy, CompletedAt
+            FROM WO_MovementOrders WHERE MachineCode = %s
+        """, (code,))
+        movement_ids = []
+        for r in cursor.fetchall():
+            movement_ids.append(r[0])
+            events.append({
+                "at": _iso(r[8]), "type": "movementorder", "id": r[0],
+                "display_id": r[1],
+                "action": "created", "by": r[7],
+                "summary": f"{r[2]}: {r[3] or '?'} → {r[4] or '?'} (driver: {r[5] or 'unassigned'})",
+                "status": _label(MOVEMENT_STATUS, r[6]),
+            })
+            if r[10]:
+                events.append({
+                    "at": _iso(r[10]), "type": "movementorder", "id": r[0],
+                    "display_id": r[1],
+                    "action": "completed", "by": r[9],
+                    "summary": f"{r[2]} applied",
+                    "status": "completed",
+                })
+
         def _activity_in(parent_type, ids):
             if not ids:
                 return
@@ -2360,6 +2861,7 @@ def api_equipment_log():
         _activity_in("complaint",     complaint_ids)
         _activity_in("joborder",      job_ids)
         _activity_in("deliveryorder", delivery_ids)
+        _activity_in("movementorder", movement_ids)
         conn.close()
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
@@ -2378,6 +2880,7 @@ def api_equipment_log():
             "complaints":      len(complaint_ids),
             "job_orders":      len(job_ids),
             "delivery_orders": len(delivery_ids),
+            "movement_orders": len(movement_ids),
         },
         "events": events[:300],
     })

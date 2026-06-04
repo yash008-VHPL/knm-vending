@@ -1,0 +1,144 @@
+<!--
+  Historic Locations tab — admin / field_manager.
+  Lists decommissioned machines + lifetime vend counts.
+  Decommission action: marks a machine as IsActive=0 (use Movement Order
+  for the actual physical retrieval — this is just for manual flagging).
+  Namespace: .hl-*
+-->
+
+<style>
+    .hl-section { max-width: 1100px; margin: 24px auto; padding: 0 18px; }
+
+    .hl-toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+    .hl-toolbar input[type="search"] {
+        padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-size: 0.88rem; flex: 1; min-width: 200px;
+    }
+
+    .hl-table {
+        width: 100%; border-collapse: collapse; background: white;
+        border: 1px solid #e5e7eb; border-radius: 9px; overflow: hidden; font-size: 0.86rem;
+    }
+    .hl-table th {
+        background: #f9fafb; padding: 9px 12px; text-align: left;
+        font-size: 0.68rem; font-weight: 700; text-transform: uppercase; color: #6b7280; letter-spacing: 0.05em;
+    }
+    .hl-table td { padding: 9px 12px; border-top: 1px solid #f3f4f6; vertical-align: middle; }
+    .hl-table .code { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; }
+    .hl-empty { text-align: center; color: #9ca3af; padding: 30px 10px; font-size: 0.88rem; }
+    .hl-msg { padding: 9px 13px; border-radius: 6px; font-size: 0.84rem; margin-bottom: 10px; }
+    .hl-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .hl-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .hl-msg.ok      { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+    .hl-btn-recom {
+        background: #1a56db; color: white; border: none; padding: 6px 12px;
+        border-radius: 5px; font-size: 0.78rem; font-weight: 600; cursor: pointer;
+    }
+</style>
+
+<div class="hl-section">
+    <div class="hl-toolbar">
+        <input type="search" id="hlSearch" placeholder="Search by name / code…" oninput="window.__hlFilter()">
+    </div>
+    <div id="hlMsg"></div>
+    <table class="hl-table">
+        <thead>
+            <tr>
+                <th>Name</th>
+                <th>Code</th>
+                <th>Decommissioned</th>
+                <th>Reason</th>
+                <th style="text-align:right">Lifetime vends</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="hlTableBody">
+            <tr><td colspan="6" class="hl-empty">Loading…</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = { rows: [], loaded: false };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.json().then(function(d){
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        });
+    }
+    function postJSON(url, body){
+        return api(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {}),
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleDateString(); } catch(e){ return s; } }
+    function showMsg(html, cls){
+        document.getElementById('hlMsg').innerHTML = html ? '<div class="hl-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+
+    window.__hlInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        load();
+    };
+
+    function load(){
+        showMsg('Loading…', 'loading');
+        api('/api/wo/locations/historic').then(function(rows){
+            state.rows = rows;
+            render();
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    }
+
+    function render(){
+        var q = (document.getElementById('hlSearch').value || '').toLowerCase();
+        var rows = state.rows.filter(function(r){
+            if(!q) return true;
+            return (r.name || '').toLowerCase().indexOf(q) >= 0
+                || (r.code || '').toLowerCase().indexOf(q) >= 0;
+        });
+        var tbody = document.getElementById('hlTableBody');
+        if(!rows.length){
+            tbody.innerHTML = '<tr><td colspan="6" class="hl-empty">No decommissioned machines yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = rows.map(function(r){
+            return ''
+              + '<tr>'
+              +   '<td>' + esc(r.name) + '</td>'
+              +   '<td class="code">' + esc(r.code) + '</td>'
+              +   '<td>' + esc(fmtDT(r.decommissioned_at)) + '</td>'
+              +   '<td>' + esc(r.decommission_reason || '—') + '</td>'
+              +   '<td style="text-align:right">' + (r.lifetime_vends || 0).toLocaleString() + '</td>'
+              +   '<td><button class="hl-btn-recom" onclick="window.__hlRecom(\'' + esc(r.code) + '\', \'' + esc(r.name) + '\')">Recommission</button></td>'
+              + '</tr>';
+        }).join('');
+    }
+
+    window.__hlFilter = render;
+
+    window.__hlRecom = function(code, name){
+        if(!confirm('Recommission ' + name + '? It will reappear in the active Locations list.')) return;
+        postJSON('/api/wo/locations/' + encodeURIComponent(code) + '/recommission', {}).then(function(){
+            showMsg('Recommissioned ' + name + '.', 'ok');
+            load();
+        }).catch(function(e){ showMsg('Failed: ' + esc(e.message), 'error'); });
+    };
+
+})();
+</script>
