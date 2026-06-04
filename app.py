@@ -464,6 +464,7 @@ def get_locations():
         cursor.execute("""
             SELECT MachineName, MachineCode, Latitude, Longitude
             FROM MachineLookup
+            WHERE ISNULL(IsActive, 1) = 1
             ORDER BY MachineName
         """)
         rows = cursor.fetchall()
@@ -711,6 +712,7 @@ def get_topups():
                       )
                 ) AS VendsSince
             FROM MachineLookup ml
+            WHERE ISNULL(ml.IsActive, 1) = 1
             ORDER BY ml.MachineName
         """)
         rows = cursor.fetchall()
@@ -1144,6 +1146,7 @@ def get_heartbeat():
                 END) AS LastErrorEvent
             FROM MachineLookup ml
             LEFT JOIN [MasterData Table] md ON ml.MachineCode = md.[Machine Code]
+            WHERE ISNULL(ml.IsActive, 1) = 1
             GROUP BY ml.MachineName, ml.MachineCode
             ORDER BY ml.MachineName
         """)

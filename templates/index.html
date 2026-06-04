@@ -382,6 +382,10 @@
     {% if role == 'admin' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('kb_admin', this); if(window.__kbInit) window.__kbInit();">Manage KB</button>
     {% endif %}
+    {# ── Movements: admin, field_manager, operator ── #}
+    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
+    <button class="tab-btn"        onclick="switchTab('movements', this); if(window.__mvInit) window.__mvInit();">Movements</button>
+    {% endif %}
     {# ── Machine History: admin, field_manager ── #}
     {% if role == 'admin' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('machine_history', this); if(window.__mhInit) window.__mhInit();">Machine History</button>
@@ -756,6 +760,11 @@
     {% if role == 'admin' or role == 'field_manager' %}
     <div id="tab-kb_admin" class="tab-pane">
         {% include "_kb_admin_tab.html" %}
+    </div>
+    {% endif %}
+    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
+    <div id="tab-movements" class="tab-pane">
+        {% include "_movements_tab.html" %}
     </div>
     {% endif %}
     {% if role == 'admin' or role == 'field_manager' %}

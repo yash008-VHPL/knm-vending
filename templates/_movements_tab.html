@@ -1,0 +1,336 @@
+<!--
+  Movements tab — admin / field_manager / operator.
+  Manager: create + list all + assign. Driver (operator): their assigned, complete.
+  Movement types: deploy (warehouse→location), relocate (location→location),
+                  retrieve (location→warehouse).
+  Completion updates MachineLookup atomically (lat/lon + IsActive).
+  Namespace: .mv-*
+-->
+
+<style>
+    .mv-section { max-width: 1000px; margin: 24px auto; padding: 0 18px; }
+
+    .mv-toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
+    .mv-toolbar select, .mv-toolbar input[type="search"] {
+        padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-size: 0.88rem;
+    }
+    .mv-toolbar input[type="search"] { flex: 1; min-width: 180px; }
+
+    .mv-card {
+        background: white; border: 1px solid #e5e7eb; border-radius: 9px;
+        padding: 12px 16px; margin-bottom: 9px;
+    }
+    .mv-card .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    .mv-card .id { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; }
+    .mv-card .head { font-weight: 700; color: #111827; font-size: 0.95rem; margin-top: 4px; }
+    .mv-card .arrow {
+        font-size: 0.82rem; color: #374151; margin-top: 4px;
+        white-space: pre-wrap; line-height: 1.4;
+    }
+    .mv-card .sub { font-size: 0.76rem; color: #6b7280; margin-top: 4px; }
+
+    .mv-badge {
+        font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.04em; padding: 3px 9px; border-radius: 20px; white-space: nowrap;
+    }
+    .mv-badge.type-deploy   { background: #dcfce7; color: #15803d; }
+    .mv-badge.type-relocate { background: #dbeafe; color: #1e40af; }
+    .mv-badge.type-retrieve { background: #fee2e2; color: #b91c1c; }
+    .mv-badge.s0 { background: #fef3c7; color: #b45309; }
+    .mv-badge.s1 { background: #e0e7ff; color: #3730a3; }
+    .mv-badge.s2 { background: #dcfce7; color: #15803d; }
+
+    .mv-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    .mv-actions button {
+        padding: 6px 12px; border-radius: 5px; border: none;
+        font-size: 0.8rem; font-weight: 700; cursor: pointer;
+    }
+    .mv-btn-go    { background: #1a56db; color: white; }
+    .mv-btn-done  { background: #15803d; color: white; }
+    .mv-btn-edit  { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db !important; }
+
+    .mv-empty { text-align: center; color: #9ca3af; padding: 30px 10px; font-size: 0.88rem; }
+    .mv-msg { padding: 9px 13px; border-radius: 6px; font-size: 0.84rem; margin-bottom: 10px; }
+    .mv-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .mv-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .mv-msg.ok      { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+
+    /* Create modal */
+    .mv-overlay {
+        display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.55);
+        z-index: 100; padding: 20px 12px; overflow-y: auto;
+    }
+    .mv-overlay.open { display: flex; align-items: flex-start; justify-content: center; }
+    .mv-modal {
+        background: white; border-radius: 11px; width: 100%; max-width: 580px;
+        box-shadow: 0 14px 44px rgba(0,0,0,0.3); margin: auto; padding: 18px;
+    }
+    .mv-modal h3 { margin: 0 0 12px 0; font-size: 1rem; }
+    .mv-form .fld { display: block; margin-bottom: 11px; }
+    .mv-form label {
+        display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        color: #6b7280; letter-spacing: 0.05em; margin-bottom: 5px;
+    }
+    .mv-form select, .mv-form input[type="text"], .mv-form input[type="number"], .mv-form textarea {
+        width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-family: inherit; font-size: 0.88rem;
+    }
+    .mv-form .row2 { display: flex; gap: 10px; }
+    .mv-form .row2 > .fld { flex: 1; }
+    .mv-actionbar { display: flex; gap: 7px; justify-content: flex-end; margin-top: 10px; }
+    .mv-actionbar button { padding: 8px 14px; border-radius: 6px; border: none; font-weight: 700; cursor: pointer; }
+    .mv-actionbar .cancel { background: #f3f4f6; color: #374151; }
+    .mv-actionbar .save   { background: #1a56db; color: white; }
+</style>
+
+<div class="mv-section">
+    <div class="mv-toolbar">
+        <button class="btn btn-primary" id="mvCreateBtn" onclick="window.__mvOpenCreate()" style="display:none">+ New Movement Order</button>
+        <select id="mvFilterStatus" onchange="window.__mvRefresh()">
+            <option value="all">All statuses</option>
+            <option value="scheduled">Scheduled</option>
+            <option value="in_progress">In progress</option>
+            <option value="completed">Completed</option>
+        </select>
+        <select id="mvFilterScope" onchange="window.__mvRefresh()">
+            <option value="mine">Mine</option>
+            <option value="all">All (manager)</option>
+        </select>
+        <input type="search" id="mvSearch" placeholder="Search machine code…" oninput="window.__mvRender()">
+    </div>
+    <div id="mvMsg"></div>
+    <div id="mvList"></div>
+</div>
+
+<!-- Create modal -->
+<div id="mvOverlay" class="mv-overlay" onclick="if(event.target===this)window.__mvCloseCreate()">
+    <div class="mv-modal">
+        <h3>New Movement Order</h3>
+        <div class="mv-form">
+            <div class="fld">
+                <label>Movement type *</label>
+                <select id="mvfType" onchange="window.__mvTypeChange()">
+                    <option value="deploy">Deploy — warehouse → location (activates a machine)</option>
+                    <option value="relocate">Relocate — location → location (move active machine)</option>
+                    <option value="retrieve">Retrieve — location → warehouse (decommission)</option>
+                </select>
+            </div>
+            <div class="fld">
+                <label>Machine *</label>
+                <select id="mvfMachine"></select>
+            </div>
+            <div id="mvfDestBlock">
+                <div class="fld">
+                    <label>Destination location name *</label>
+                    <input type="text" id="mvfToLoc" placeholder="e.g. Marina Bay Tower 2">
+                </div>
+                <div class="row2">
+                    <div class="fld"><label>Destination latitude *</label><input type="number" step="0.000001" id="mvfToLat" placeholder="1.2847"></div>
+                    <div class="fld"><label>Destination longitude *</label><input type="number" step="0.000001" id="mvfToLon" placeholder="103.8481"></div>
+                </div>
+            </div>
+            <div id="mvfReasonBlock" style="display:none">
+                <div class="fld">
+                    <label>Reason for retrieval</label>
+                    <input type="text" id="mvfReason" placeholder="e.g. lease ended, contract terminated, low performance">
+                </div>
+            </div>
+            <div class="fld">
+                <label>Assigned to (driver email)</label>
+                <input type="text" id="mvfAssigned" placeholder="driver@kopinearme.com">
+            </div>
+            <div class="fld">
+                <label>Notes</label>
+                <textarea id="mvfNotes" rows="2" placeholder="Any special instructions"></textarea>
+            </div>
+            <div class="mv-actionbar">
+                <button class="cancel" onclick="window.__mvCloseCreate()">Cancel</button>
+                <button class="save"   onclick="window.__mvSubmit()">Create</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = { bootstrap: null, rows: [], machines: [], loaded: false };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.json().then(function(d){
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        });
+    }
+    function postJSON(url, body){
+        return api(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {}),
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
+    function showMsg(html, cls){
+        document.getElementById('mvMsg').innerHTML = html ? '<div class="mv-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+    function isManager(){
+        var r = state.bootstrap && state.bootstrap.role;
+        return r === 'admin' || r === 'field_manager';
+    }
+
+    window.__mvInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        api('/api/wo/bootstrap').then(function(b){
+            state.bootstrap = b;
+            if(isManager()){
+                document.getElementById('mvCreateBtn').style.display = 'inline-block';
+            }
+            return api('/api/wo/machines?include_inactive=1');
+        }).then(function(arr){
+            state.machines = arr;
+            window.__mvRefresh();
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    window.__mvRefresh = function(){
+        var qs = [
+            'scope='  + encodeURIComponent(document.getElementById('mvFilterScope').value),
+            'status=' + encodeURIComponent(document.getElementById('mvFilterStatus').value),
+        ].join('&');
+        showMsg('Loading…', 'loading');
+        api('/api/wo/movementorders?' + qs).then(function(rows){
+            state.rows = rows;
+            window.__mvRender();
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    window.__mvRender = function(){
+        var q = (document.getElementById('mvSearch').value || '').toLowerCase();
+        var rows = (state.rows || []).filter(function(r){
+            if(!q) return true;
+            return (r.machine_code || '').toLowerCase().indexOf(q) >= 0
+                || (r.to_location  || '').toLowerCase().indexOf(q) >= 0
+                || (r.from_location|| '').toLowerCase().indexOf(q) >= 0;
+        });
+        if(!rows.length){
+            document.getElementById('mvList').innerHTML = '<div class="mv-empty">No movement orders.</div>';
+            return;
+        }
+        document.getElementById('mvList').innerHTML = rows.map(function(m){
+            var canAct = !isManager() ? ((state.bootstrap && state.bootstrap.email || '').toLowerCase() === (m.assigned_to || '').toLowerCase()) : true;
+            var actions = '';
+            if(m.status_code === 0 && canAct){
+                actions += '<button class="mv-btn-go"   onclick="window.__mvStart(' + m.id + ')">Start</button>';
+            }
+            if((m.status_code === 0 || m.status_code === 1) && canAct){
+                actions += '<button class="mv-btn-done" onclick="window.__mvComplete(' + m.id + ')">Complete &amp; apply</button>';
+            }
+            return ''
+              + '<div class="mv-card">'
+              +   '<div class="row">'
+              +     '<div style="flex:1">'
+              +       '<div class="id">' + esc(m.display_id || '#' + m.id) + '</div>'
+              +       '<div class="head">' + esc(m.machine_code) + '</div>'
+              +       '<div class="arrow">' + esc(m.from_location || '?') + '  →  ' + esc(m.to_location || '?') + '</div>'
+              +       '<div class="sub">Driver: ' + esc(m.assigned_to || '(unassigned)') + ' · created ' + fmtDT(m.created_at)
+              +         (m.completed_at ? ' · completed ' + fmtDT(m.completed_at) : '')
+              +         (m.notes ? ' · ' + esc(m.notes) : '')
+              +       '</div>'
+              +     '</div>'
+              +     '<div style="display:flex;flex-direction:column;gap:5px;align-items:flex-end">'
+              +       '<span class="mv-badge type-' + esc(m.movement_type) + '">' + esc(m.movement_type) + '</span>'
+              +       '<span class="mv-badge s' + m.status_code + '">' + esc(m.status_label) + '</span>'
+              +     '</div>'
+              +   '</div>'
+              +   (actions ? '<div class="mv-actions">' + actions + '</div>' : '')
+              + '</div>';
+        }).join('');
+    };
+
+    window.__mvStart = function(id){
+        postJSON('/api/wo/movementorders/' + id + '/status', { status_code: 1 })
+            .then(window.__mvRefresh)
+            .catch(function(e){ showMsg('Start failed: ' + esc(e.message), 'error'); });
+    };
+
+    window.__mvComplete = function(id){
+        if(!confirm("Complete this movement? The machine location / active flag will be updated in MachineLookup atomically.")) return;
+        postJSON('/api/wo/movementorders/' + id + '/complete', {})
+            .then(function(){
+                showMsg('Movement complete and MachineLookup updated.', 'ok');
+                window.__mvRefresh();
+            })
+            .catch(function(e){ showMsg('Complete failed: ' + esc(e.message), 'error'); });
+    };
+
+    // ── Create ──
+    window.__mvOpenCreate = function(){
+        var sel = document.getElementById('mvfMachine');
+        sel.innerHTML = '<option value="">— Select machine —</option>' +
+            state.machines.map(function(m){
+                var label = m.name + ' (' + m.code + ')' + (m.is_active ? '' : ' [inactive]');
+                return '<option value="' + esc(m.code) + '">' + esc(label) + '</option>';
+            }).join('');
+        document.getElementById('mvfType').value = 'deploy';
+        document.getElementById('mvfToLoc').value = '';
+        document.getElementById('mvfToLat').value = '';
+        document.getElementById('mvfToLon').value = '';
+        document.getElementById('mvfReason').value = '';
+        document.getElementById('mvfAssigned').value = '';
+        document.getElementById('mvfNotes').value = '';
+        window.__mvTypeChange();
+        document.getElementById('mvOverlay').classList.add('open');
+    };
+
+    window.__mvCloseCreate = function(){
+        document.getElementById('mvOverlay').classList.remove('open');
+    };
+
+    window.__mvTypeChange = function(){
+        var t = document.getElementById('mvfType').value;
+        document.getElementById('mvfDestBlock').style.display   = (t === 'retrieve' ? 'none' : 'block');
+        document.getElementById('mvfReasonBlock').style.display = (t === 'retrieve' ? 'block' : 'none');
+    };
+
+    window.__mvSubmit = function(){
+        var t = document.getElementById('mvfType').value;
+        var code = document.getElementById('mvfMachine').value;
+        if(!code){ alert('Pick a machine.'); return; }
+        var body = {
+            movement_type: t,
+            machine_code:  code,
+            assigned_to:   document.getElementById('mvfAssigned').value.trim() || null,
+            notes:         document.getElementById('mvfNotes').value.trim()    || null,
+        };
+        if(t === 'retrieve'){
+            body.reason_for_retrieval = document.getElementById('mvfReason').value.trim() || null;
+        } else {
+            body.to_location = document.getElementById('mvfToLoc').value.trim() || null;
+            body.to_lat      = document.getElementById('mvfToLat').value || null;
+            body.to_lon      = document.getElementById('mvfToLon').value || null;
+            if(!body.to_location || !body.to_lat || !body.to_lon){
+                alert('Destination name, latitude and longitude are required for deploy / relocate.');
+                return;
+            }
+        }
+        postJSON('/api/wo/movementorders', body).then(function(){
+            window.__mvCloseCreate();
+            showMsg('Movement order created.', 'ok');
+            window.__mvRefresh();
+        }).catch(function(e){ alert('Create failed: ' + e.message); });
+    };
+
+})();
+</script>
