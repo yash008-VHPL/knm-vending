@@ -20,3 +20,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# NETS portal credentials — never commit
+config_nets.py

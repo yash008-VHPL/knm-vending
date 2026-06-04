@@ -1268,5 +1268,14 @@ def heartbeat_analysis():
     })
 
 
+# ── Work orders module (additive — all logic lives in workorders.py) ──────────
+from workorders import workorders_bp, init_workorders_db
+app.register_blueprint(workorders_bp, url_prefix="/api/wo")
+try:
+    init_workorders_db()
+except Exception as e:
+    print(f"[startup] init_workorders_db failed: {e}")
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

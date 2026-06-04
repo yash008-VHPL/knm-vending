@@ -1,0 +1,311 @@
+<!--
+  Manage Knowledge Base tab — manager/admin only.
+  Edit KB entries that auto-populate Diagnosis / Proposed Fix / Tickboxes
+  when a manager creates a new WO with the same EventCode.
+  Namespace: .kb-*
+-->
+
+<style>
+    .kb-section { max-width: 1000px; margin: 24px auto; padding: 0 18px; }
+
+    .kb-toolbar { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
+    .kb-toolbar input[type="search"], .kb-toolbar input[type="number"], .kb-toolbar select {
+        padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-size: 0.88rem; font-family: inherit;
+    }
+    .kb-toolbar input[type="search"] { flex: 1; min-width: 180px; }
+
+    .kb-row {
+        background: white; border: 1px solid #e5e7eb; border-radius: 9px;
+        padding: 12px 16px; margin-bottom: 9px;
+    }
+    .kb-row .head { display: flex; justify-content: space-between; align-items: center; gap: 12px; cursor: pointer; }
+    .kb-row .title { font-weight: 700; color: #111827; font-size: 0.95rem; }
+    .kb-row .sub { font-size: 0.78rem; color: #6b7280; margin-top: 3px; }
+    .kb-row .body { display: none; padding-top: 12px; border-top: 1px solid #f3f4f6; margin-top: 10px; }
+    .kb-row.open .body { display: block; }
+    .kb-row .chev { color: #9ca3af; font-size: 0.85rem; transition: transform .15s; }
+    .kb-row.open .chev { transform: rotate(180deg); }
+
+    .kb-evbadge {
+        font-family: ui-monospace, monospace; font-size: 0.78rem; padding: 2px 8px;
+        border-radius: 5px; background: #f3f4f6; color: #374151;
+    }
+    .kb-evbadge.cmp { background: #fef3c7; color: #b45309; }
+    .kb-evbadge.wko { background: #dbeafe; color: #1e40af; }
+    .kb-use { font-size: 0.78rem; color: #6b7280; }
+
+    .kb-form .fld { display: block; margin-bottom: 11px; }
+    .kb-form .fld > label {
+        display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        color: #6b7280; letter-spacing: 0.05em; margin-bottom: 5px;
+    }
+    .kb-form textarea {
+        width: 100%; min-height: 70px; padding: 9px 11px; border: 1px solid #d1d5db;
+        border-radius: 6px; font-family: inherit; font-size: 0.88rem; resize: vertical;
+    }
+    .kb-form input[type="text"], .kb-form input[type="number"] {
+        width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-family: inherit; font-size: 0.88rem;
+    }
+    .kb-form .row2 { display: flex; gap: 10px; flex-wrap: wrap; }
+    .kb-form .row2 > .fld { flex: 1; min-width: 130px; }
+
+    .kb-tb-list { margin-top: 5px; }
+    .kb-tb-item { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
+    .kb-tb-item input { flex: 1; }
+    .kb-tb-item button {
+        background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca; border-radius: 5px;
+        padding: 5px 10px; font-size: 0.78rem; font-weight: 700; cursor: pointer;
+    }
+    .kb-tb-add {
+        background: none; border: 1px dashed #cbd5e1; color: #475569;
+        padding: 7px 12px; border-radius: 6px; font-size: 0.82rem; cursor: pointer;
+        font-weight: 600; margin-top: 4px;
+    }
+    .kb-tb-add:hover { border-color: #1a56db; color: #1a56db; }
+
+    .kb-actionbar { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; margin-top: 12px; }
+
+    .kb-empty { text-align: center; color: #9ca3af; padding: 40px 10px; font-size: 0.88rem; }
+    .kb-msg { padding: 10px 14px; border-radius: 6px; font-size: 0.84rem; margin-bottom: 12px; }
+    .kb-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .kb-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+
+    .kb-newbox {
+        background: #f0f9ff; border: 1px dashed #38bdf8; border-radius: 9px;
+        padding: 14px 16px; margin-bottom: 14px;
+    }
+    .kb-newbox.collapsed .kb-form { display: none; }
+    .kb-newbox.collapsed { background: #f8fafc; border-style: solid; border-color: #e5e7eb; }
+    .kb-newbox h3 { margin: 0 0 8px 0; font-size: 0.95rem; color: #0c4a6e; cursor: pointer; }
+</style>
+
+<div class="kb-section">
+    <div class="kb-newbox collapsed" id="kbNewBox">
+        <h3 onclick="window.__kbToggleNew()">+ New KB Entry</h3>
+        <div class="kb-form">
+            <div class="row2">
+                <div class="fld"><label>Title *</label><input type="text" id="kbNewTitle" placeholder="e.g. Coin jam — 50¢ slot"></div>
+                <div class="fld"><label>Event code (6xxxxx or 8xxxxx)</label><input type="number" id="kbNewEventCode" placeholder="e.g. 800123"></div>
+            </div>
+            <div class="fld"><label>Diagnosis</label><textarea id="kbNewDiagnosis" placeholder="Standard description of what's wrong"></textarea></div>
+            <div class="fld"><label>Suggested fix</label><textarea id="kbNewFix" placeholder="High-level fix approach"></textarea></div>
+            <div class="fld">
+                <label>Tickboxes (one step per box)</label>
+                <div class="kb-tb-list" id="kbNewTickboxes"></div>
+                <button class="kb-tb-add" onclick="window.__kbAddTickbox('kbNewTickboxes')">+ Add step</button>
+            </div>
+            <div class="kb-actionbar">
+                <button class="btn btn-secondary" onclick="window.__kbToggleNew()">Cancel</button>
+                <button class="btn btn-primary"   onclick="window.__kbCreate()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="kb-toolbar">
+        <input type="search" id="kbSearch" placeholder="Search title / diagnosis…" oninput="renderKB()">
+        <input type="number" id="kbFilterCode" placeholder="Filter by event code" oninput="renderKB()">
+        <select id="kbFilterKind" onchange="renderKB()">
+            <option value="all">All kinds</option>
+            <option value="cmp">Complaints (6xxxxx)</option>
+            <option value="wko">Work orders (8xxxxx)</option>
+        </select>
+    </div>
+    <div id="kbMsg"></div>
+    <div id="kbList"></div>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = {
+        rows: [],
+        loaded: false,
+    };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.json().then(function(d){
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        });
+    }
+    function postJSON(url, body, method){
+        return api(url, {
+            method: method || 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {}),
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function showMsg(html, cls){
+        document.getElementById('kbMsg').innerHTML = html ? '<div class="kb-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+
+    window.__kbInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        loadAll();
+    };
+
+    function loadAll(){
+        showMsg('Loading…', 'loading');
+        api('/api/wo/kb').then(function(rows){
+            state.rows = rows;
+            renderKB();
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    }
+
+    function renderKB(){
+        var search   = (document.getElementById('kbSearch').value || '').toLowerCase();
+        var codeFilt = document.getElementById('kbFilterCode').value;
+        var kindFilt = document.getElementById('kbFilterKind').value;
+
+        var rows = state.rows.filter(function(r){
+            if(codeFilt && String(r.event_code || '') !== String(codeFilt)) return false;
+            if(kindFilt === 'cmp' && !(r.event_code >= 600000 && r.event_code <= 699999)) return false;
+            if(kindFilt === 'wko' && !(r.event_code >= 800000 && r.event_code <= 899999)) return false;
+            if(search){
+                var hay = ((r.title||'') + ' ' + (r.diagnosis||'') + ' ' + (r.suggested_fix||'')).toLowerCase();
+                if(hay.indexOf(search) < 0) return false;
+            }
+            return true;
+        });
+
+        if(!rows.length){
+            document.getElementById('kbList').innerHTML = '<div class="kb-empty">No KB entries match. Add one above.</div>';
+            return;
+        }
+
+        document.getElementById('kbList').innerHTML = rows.map(function(r){
+            var evKind = (r.event_code >= 600000 && r.event_code <= 699999) ? 'cmp'
+                       : (r.event_code >= 800000 && r.event_code <= 899999) ? 'wko' : '';
+            var evBadge = r.event_code != null
+                ? '<span class="kb-evbadge ' + evKind + '">' + esc(r.event_code) + '</span>'
+                : '<span class="kb-evbadge">(no code)</span>';
+            return ''
+              + '<div class="kb-row" id="kbRow' + r.id + '">'
+              +   '<div class="head" onclick="window.__kbToggleRow(' + r.id + ')">'
+              +     '<div>'
+              +       '<div class="title">' + esc(r.title) + '</div>'
+              +       '<div class="sub">' + evBadge + ' · <span class="kb-use">used ' + r.use_count + 'x</span></div>'
+              +     '</div>'
+              +     '<div class="chev">▼</div>'
+              +   '</div>'
+              +   '<div class="body">' + renderEditForm(r) + '</div>'
+              + '</div>';
+        }).join('');
+    }
+    window.__kbToggleRow = function(id){
+        var el = document.getElementById('kbRow' + id);
+        if(el) el.classList.toggle('open');
+    };
+
+    function renderEditForm(r){
+        var tbId = 'kbTB' + r.id;
+        var tbsHtml = (r.tickboxes || []).map(function(t){
+            return tickboxHtml(t.label);
+        }).join('');
+        return ''
+          + '<div class="kb-form" data-kb-id="' + r.id + '">'
+          +   '<div class="row2">'
+          +     '<div class="fld"><label>Title</label><input type="text" id="kbT' + r.id + '" value="' + esc(r.title || '') + '"></div>'
+          +     '<div class="fld"><label>Event code</label><input type="number" id="kbE' + r.id + '" value="' + esc(r.event_code || '') + '"></div>'
+          +   '</div>'
+          +   '<div class="fld"><label>Diagnosis</label><textarea id="kbD' + r.id + '">' + esc(r.diagnosis || '') + '</textarea></div>'
+          +   '<div class="fld"><label>Suggested fix</label><textarea id="kbF' + r.id + '">' + esc(r.suggested_fix || '') + '</textarea></div>'
+          +   '<div class="fld">'
+          +     '<label>Tickboxes</label>'
+          +     '<div class="kb-tb-list" id="' + tbId + '">' + tbsHtml + '</div>'
+          +     '<button class="kb-tb-add" onclick="window.__kbAddTickbox(\'' + tbId + '\')">+ Add step</button>'
+          +   '</div>'
+          +   '<div class="kb-actionbar">'
+          +     '<button class="btn btn-secondary" onclick="window.__kbDelete(' + r.id + ')">Delete</button>'
+          +     '<button class="btn btn-primary"   onclick="window.__kbSave(' + r.id + ')">Save</button>'
+          +   '</div>'
+          + '</div>';
+    }
+
+    function tickboxHtml(label){
+        return ''
+          + '<div class="kb-tb-item">'
+          +   '<input type="text" value="' + esc(label || '') + '">'
+          +   '<button onclick="this.parentNode.remove()">Remove</button>'
+          + '</div>';
+    }
+
+    window.__kbAddTickbox = function(containerId){
+        var c = document.getElementById(containerId);
+        if(!c) return;
+        var tmp = document.createElement('div');
+        tmp.innerHTML = tickboxHtml('');
+        c.appendChild(tmp.firstChild);
+    };
+
+    function collectTickboxes(containerId){
+        var c = document.getElementById(containerId);
+        if(!c) return [];
+        return Array.prototype.map.call(c.querySelectorAll('input'), function(i){ return i.value.trim(); })
+            .filter(function(x){ return !!x; });
+    }
+
+    // ── New entry ──
+    window.__kbToggleNew = function(){
+        var box = document.getElementById('kbNewBox');
+        box.classList.toggle('collapsed');
+        if(!box.classList.contains('collapsed')){
+            document.getElementById('kbNewTitle').value = '';
+            document.getElementById('kbNewEventCode').value = '';
+            document.getElementById('kbNewDiagnosis').value = '';
+            document.getElementById('kbNewFix').value = '';
+            document.getElementById('kbNewTickboxes').innerHTML = '';
+        }
+    };
+
+    window.__kbCreate = function(){
+        var title = document.getElementById('kbNewTitle').value.trim();
+        if(!title){ alert('Title required.'); return; }
+        var body = {
+            title:         title,
+            event_code:    document.getElementById('kbNewEventCode').value || null,
+            diagnosis:     document.getElementById('kbNewDiagnosis').value.trim() || null,
+            suggested_fix: document.getElementById('kbNewFix').value.trim() || null,
+            tickboxes:     collectTickboxes('kbNewTickboxes'),
+        };
+        postJSON('/api/wo/kb', body).then(function(){
+            window.__kbToggleNew();
+            loadAll();
+        }).catch(function(e){ alert('Create failed: ' + e.message); });
+    };
+
+    window.__kbSave = function(id){
+        var body = {
+            title:         document.getElementById('kbT' + id).value.trim(),
+            event_code:    document.getElementById('kbE' + id).value || null,
+            diagnosis:     document.getElementById('kbD' + id).value.trim() || null,
+            suggested_fix: document.getElementById('kbF' + id).value.trim() || null,
+            tickboxes:     collectTickboxes('kbTB' + id),
+        };
+        postJSON('/api/wo/kb/' + id, body, 'PATCH').then(function(){
+            loadAll();
+        }).catch(function(e){ alert('Save failed: ' + e.message); });
+    };
+
+    window.__kbDelete = function(id){
+        if(!confirm('Delete this KB entry? Its tickboxes go with it. Existing WOs are unaffected.')) return;
+        api('/api/wo/kb/' + id, { method: 'DELETE' }).then(function(){
+            loadAll();
+        }).catch(function(e){ alert('Delete failed: ' + e.message); });
+    };
+
+})();
+</script>

@@ -1,0 +1,372 @@
+<!--
+  Fault Report tab — included from index.html.
+  Namespaced with .fr-* classes + IIFE so it does not collide with the
+  existing _workorders_tab.html (.wo-*) or other tabs.
+  All endpoints under /api/wo/* (Blueprint reused; see workorders.py).
+-->
+
+<style>
+    .fr-section { max-width: 1000px; margin: 24px auto; padding: 0 18px; }
+
+    .fr-toolbar {
+        display: flex; gap: 10px; align-items: center;
+        margin-bottom: 14px; flex-wrap: wrap;
+    }
+    .fr-toolbar select, .fr-toolbar input[type="search"] {
+        padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-size: 0.88rem;
+    }
+    .fr-toolbar input[type="search"] { flex: 1; min-width: 160px; }
+
+    .fr-row {
+        background: white; border: 1px solid #e5e7eb; border-radius: 9px;
+        padding: 12px 15px; margin-bottom: 8px; cursor: pointer;
+        display: flex; justify-content: space-between; gap: 12px; align-items: center;
+        transition: box-shadow .12s, border-color .12s;
+    }
+    .fr-row:hover { box-shadow: 0 3px 9px rgba(0,0,0,0.08); border-color: #c7d2fe; }
+    .fr-row .id { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; }
+    .fr-row .title { font-weight: 600; color: #111827; font-size: 0.92rem; margin-top: 3px; }
+    .fr-row .sub { font-size: 0.76rem; color: #6b7280; margin-top: 3px; }
+    .fr-row .right { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+
+    .fr-badge {
+        font-size: 0.66rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.03em; padding: 2px 9px; border-radius: 20px; white-space: nowrap;
+    }
+    .fr-badge.s0 { background: #fef3c7; color: #b45309; }
+    .fr-badge.s1 { background: #dbeafe; color: #1e40af; }
+    .fr-badge.s2 { background: #dcfce7; color: #15803d; }
+    .fr-badge.u0 { background: #f3f4f6; color: #6b7280; }
+    .fr-badge.u1 { background: #e0e7ff; color: #3730a3; }
+    .fr-badge.u2 { background: #fee2e2; color: #b91c1c; }
+
+    .fr-empty { text-align: center; color: #9ca3af; padding: 40px 10px; font-size: 0.88rem; }
+    .fr-msg { padding: 10px 14px; border-radius: 6px; font-size: 0.84rem; margin-bottom: 12px; }
+    .fr-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .fr-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+
+    /* Form */
+    .fr-form .fld { display: block; margin-bottom: 12px; }
+    .fr-form .fld > label {
+        display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        color: #6b7280; letter-spacing: 0.05em; margin-bottom: 5px;
+    }
+    .fr-form textarea {
+        width: 100%; min-height: 80px; padding: 9px 11px; border: 1px solid #d1d5db;
+        border-radius: 6px; font-family: inherit; font-size: 0.9rem; resize: vertical;
+    }
+    .fr-form select, .fr-form input[type="text"], .fr-form input[type="number"],
+    .fr-form input[type="datetime-local"] {
+        width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-family: inherit; font-size: 0.9rem;
+    }
+    .fr-form textarea[readonly], .fr-form input[readonly] { background: #f9fafb; color: #4b5563; }
+    .fr-form .row2 { display: flex; gap: 10px; flex-wrap: wrap; }
+    .fr-form .row2 > .fld { flex: 1; min-width: 130px; }
+
+    /* Modal */
+    .fr-overlay {
+        display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.55);
+        z-index: 100; padding: 24px 12px; overflow-y: auto;
+    }
+    .fr-overlay.open { display: flex; align-items: flex-start; justify-content: center; }
+    .fr-modal {
+        background: #f9fafb; border-radius: 11px; width: 100%; max-width: 660px;
+        box-shadow: 0 14px 44px rgba(0,0,0,0.3); overflow: hidden; margin: auto;
+    }
+    .fr-mhead {
+        background: #1a56db; color: white; padding: 13px 18px;
+        display: flex; justify-content: space-between; align-items: flex-start; gap: 12px;
+    }
+    .fr-mhead h2 { font-size: 1rem; font-weight: 700; margin: 0; }
+    .fr-mhead .sub { font-size: 0.76rem; opacity: 0.82; margin-top: 3px; font-family: ui-monospace, monospace; }
+    .fr-close-x {
+        background: rgba(255,255,255,0.18); color: white; border: none;
+        width: 26px; height: 26px; border-radius: 5px; font-size: 1.1rem; cursor: pointer; line-height: 1;
+    }
+    .fr-mbody { padding: 16px 18px; max-height: calc(100vh - 160px); overflow-y: auto; }
+    .fr-actionbar { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; margin-top: 6px; }
+
+    /* Photos */
+    .fr-img-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px; }
+    .fr-thumb { position: relative; width: 86px; height: 86px; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb; }
+    .fr-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }
+    .fr-add-photo {
+        width: 86px; height: 86px; border: 2px dashed #cbd5e1; border-radius: 6px;
+        background: #f8fafc; color: #64748b; font-size: 0.7rem; font-weight: 600;
+        cursor: pointer; display: flex; flex-direction: column; align-items: center;
+        justify-content: center; gap: 2px;
+    }
+    .fr-add-photo:hover { border-color: #1a56db; color: #1a56db; background: #eff6ff; }
+    .fr-add-photo .plus { font-size: 1.2rem; line-height: 1; }
+</style>
+
+<div class="fr-section">
+    <div class="fr-toolbar">
+        <button class="btn btn-primary" onclick="window.__frOpenCreate()">+ New Fault Report</button>
+        <select id="frFilterStatus" onchange="window.__frRefresh()">
+            <option value="all">All statuses</option>
+            <option value="fresh">Fresh</option>
+            <option value="assigned">Assigned</option>
+            <option value="closed">Closed</option>
+        </select>
+        <select id="frFilterScope" onchange="window.__frRefresh()">
+            <option value="mine">My submissions</option>
+            <option value="all">All (manager)</option>
+        </select>
+        <input type="search" id="frSearch" placeholder="Search description…" oninput="window.__frRefresh()">
+    </div>
+    <div id="frMsg"></div>
+    <div id="frList"></div>
+</div>
+
+<!-- Modal -->
+<div id="frOverlay" class="fr-overlay" onclick="if(event.target===this)window.__frCloseModal()">
+    <div class="fr-modal">
+        <div class="fr-mhead">
+            <div>
+                <h2 id="frModalTitle">New Fault Report</h2>
+                <div class="sub" id="frModalSub"></div>
+            </div>
+            <button class="fr-close-x" onclick="window.__frCloseModal()">&times;</button>
+        </div>
+        <div class="fr-mbody" id="frModalBody"></div>
+    </div>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = {
+        bootstrap: null,
+        machines: [],
+        rows: [],
+        loaded: false,
+    };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.json().then(function(d){
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        });
+    }
+    function postJSON(url, body, method){
+        return api(url, {
+            method: method || 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {}),
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
+    function showMsg(html, cls){
+        document.getElementById('frMsg').innerHTML = html ? '<div class="fr-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+
+    function ensureBootstrap(){
+        if(state.bootstrap) return Promise.resolve(state.bootstrap);
+        return api('/api/wo/bootstrap').then(function(d){ state.bootstrap = d; return d; });
+    }
+    function ensureMachines(){
+        if(state.machines.length) return Promise.resolve(state.machines);
+        return api('/api/wo/machines').then(function(arr){ state.machines = arr; return arr; });
+    }
+
+    window.__frInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        Promise.all([ensureBootstrap(), ensureMachines()])
+            .then(window.__frRefresh)
+            .catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    window.__frRefresh = function(){
+        var qs = [];
+        qs.push('scope=' + encodeURIComponent(document.getElementById('frFilterScope').value));
+        qs.push('status=' + encodeURIComponent(document.getElementById('frFilterStatus').value));
+        showMsg('Loading…', 'loading');
+        api('/api/wo/complaints?' + qs.join('&')).then(function(rows){
+            state.rows = rows;
+            renderList();
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    function renderList(){
+        var search = (document.getElementById('frSearch').value || '').toLowerCase();
+        var rows = state.rows.filter(function(r){
+            if(!search) return true;
+            return (r.description || '').toLowerCase().indexOf(search) >= 0
+                || (r.machine_name || '').toLowerCase().indexOf(search) >= 0
+                || (r.display_id || '').toLowerCase().indexOf(search) >= 0;
+        });
+        var html = '';
+        if(!rows.length){ html = '<div class="fr-empty">No fault reports.</div>'; }
+        else {
+            html = rows.map(function(r){
+                return ''
+                  + '<div class="fr-row" onclick="window.__frOpenDetail(' + r.id + ')">'
+                  +   '<div>'
+                  +     '<div class="id">' + esc(r.display_id || '#' + r.id) + '</div>'
+                  +     '<div class="title">' + esc((r.description || '').slice(0, 110)) + (r.description && r.description.length > 110 ? '…' : '') + '</div>'
+                  +     '<div class="sub">' + esc(r.machine_name || '(no machine)') + ' · '
+                  +       esc(r.submitter) + ' · ' + fmtDT(r.submitted_at)
+                  +       (r.image_count ? ' · 📎 ' + r.image_count : '')
+                  +     '</div>'
+                  +   '</div>'
+                  +   '<div class="right">'
+                  +     '<span class="fr-badge s' + r.status_code + '">' + esc(r.status_label) + '</span>'
+                  +     '<span class="fr-badge u' + r.perceived_urgency_code + '">' + esc(r.perceived_urgency_label) + '</span>'
+                  +   '</div>'
+                  + '</div>';
+            }).join('');
+        }
+        document.getElementById('frList').innerHTML = html;
+    }
+
+    // ── Modal open/close ──
+    function openModal(title, sub, bodyHtml){
+        document.getElementById('frModalTitle').textContent = title;
+        document.getElementById('frModalSub').textContent = sub || '';
+        document.getElementById('frModalBody').innerHTML = bodyHtml;
+        document.getElementById('frOverlay').classList.add('open');
+    }
+    window.__frCloseModal = function(){
+        document.getElementById('frOverlay').classList.remove('open');
+        window.__frPendingPhotos = [];
+    };
+
+    // ── Create form ──
+    window.__frOpenCreate = function(){
+        var machineOpts = '<option value="">— Select machine —</option>' +
+            state.machines.map(function(m){
+                return '<option value="' + esc(m.code) + '" data-name="' + esc(m.name) + '">' + esc(m.name) + ' (' + esc(m.code) + ')</option>';
+            }).join('');
+        var now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        var nowIso = now.toISOString().slice(0,16);
+
+        var body = ''
+          + '<div class="fr-form">'
+          +   '<div class="fld"><label>Machine *</label><select id="frfMachine">' + machineOpts + '</select></div>'
+          +   '<div class="row2">'
+          +     '<div class="fld"><label>First reported at *</label><input type="datetime-local" id="frfFirstReported" value="' + nowIso + '"></div>'
+          +     '<div class="fld"><label>Reported by</label><input type="text" id="frfReportedBy" placeholder="Customer name / contact"></div>'
+          +   '</div>'
+          +   '<div class="fld"><label>Verbatim report *</label><textarea id="frfDesc" placeholder="What did the customer say? Exact symptoms…"></textarea></div>'
+          +   '<div class="row2">'
+          +     '<div class="fld"><label>Perceived urgency</label><select id="frfUrgency"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>'
+          +     '<div class="fld"><label>Event code (6xxxxx — optional)</label><input type="number" id="frfEventCode" min="600000" max="699999" placeholder="6xxxxx"></div>'
+          +   '</div>'
+          +   '<div class="fld"><label>Impact description (optional)</label><textarea id="frfImpactDesc" placeholder="Lost dispenses, refund needed, etc."></textarea></div>'
+          +   '<div class="fld"><label>Impact amount (SGD, optional)</label><input type="number" step="0.01" id="frfImpactAmt" placeholder="0.00"></div>'
+          +   '<div class="fld"><label>Photos</label><div id="frfPhotos" class="fr-img-grid"></div></div>'
+          +   '<div class="fr-actionbar">'
+          +     '<button class="btn btn-secondary" onclick="window.__frCloseModal()">Cancel</button>'
+          +     '<button class="btn btn-primary" onclick="window.__frSubmit()">Submit</button>'
+          +   '</div>'
+          + '</div>';
+        openModal('New Fault Report', '', body);
+        window.__frPendingPhotos = [];
+        renderPendingPhotos();
+    };
+
+    function renderPendingPhotos(){
+        var html = (window.__frPendingPhotos || []).map(function(p, i){
+            return '<div class="fr-thumb"><img src="' + p + '"><button class="del" onclick="window.__frRemovePending(' + i + ')">&times;</button></div>';
+        }).join('');
+        html += '<div class="fr-add-photo" onclick="document.getElementById(\'frfPhotoInput\').click()"><span class="plus">+</span><span>Add photo</span></div>';
+        html += '<input type="file" id="frfPhotoInput" accept="image/*" capture="environment" style="display:none" onchange="window.__frPhotoPicked(event)">';
+        document.getElementById('frfPhotos').innerHTML = html;
+    }
+    window.__frRemovePending = function(i){
+        window.__frPendingPhotos.splice(i, 1);
+        renderPendingPhotos();
+    };
+    window.__frPhotoPicked = function(ev){
+        var f = ev.target.files[0]; if(!f) return;
+        var reader = new FileReader();
+        reader.onload = function(e){
+            window.__frPendingPhotos = window.__frPendingPhotos || [];
+            window.__frPendingPhotos.push(e.target.result);
+            renderPendingPhotos();
+        };
+        reader.readAsDataURL(f);
+    };
+
+    window.__frSubmit = function(){
+        var mSel = document.getElementById('frfMachine');
+        var mCode = mSel.value;
+        var mName = mSel.options[mSel.selectedIndex] ? mSel.options[mSel.selectedIndex].dataset.name : '';
+        var desc  = document.getElementById('frfDesc').value.trim();
+        if(!mCode){ alert('Pick a machine.'); return; }
+        if(!desc){ alert('Description required.'); return; }
+
+        var body = {
+            machine_code:      mCode,
+            machine_name:      mName,
+            description:       desc,
+            first_reported_at: document.getElementById('frfFirstReported').value || null,
+            reported_by:       document.getElementById('frfReportedBy').value.trim() || null,
+            perceived_urgency: parseInt(document.getElementById('frfUrgency').value, 10),
+            event_code:        document.getElementById('frfEventCode').value || null,
+            impact_description: document.getElementById('frfImpactDesc').value.trim() || null,
+            impact_amount:     document.getElementById('frfImpactAmt').value || null,
+            images:            window.__frPendingPhotos || [],
+        };
+        postJSON('/api/wo/complaints', body).then(function(res){
+            window.__frCloseModal();
+            window.__frRefresh();
+        }).catch(function(e){ alert('Submit failed: ' + e.message); });
+    };
+
+    // ── Detail (read-only) ──
+    window.__frOpenDetail = function(id){
+        api('/api/wo/complaints/' + id).then(function(d){
+            var imgs = (d.images || []).map(function(im){
+                return '<div class="fr-thumb"><img src="/api/wo/images/' + im.id + '"></div>';
+            }).join('') || '<div class="fr-empty" style="padding:8px">No photos.</div>';
+
+            var body = ''
+              + '<div class="fr-form">'
+              +   '<div class="row2">'
+              +     '<div class="fld"><label>Status</label><div><span class="fr-badge s' + d.status_code + '">' + esc(d.status_label) + '</span></div></div>'
+              +     '<div class="fld"><label>Urgency</label><div><span class="fr-badge u' + d.perceived_urgency_code + '">' + esc(d.perceived_urgency_label) + '</span></div></div>'
+              +     '<div class="fld"><label>Linked WO</label><div>' + (d.job_order_id ? '#' + d.job_order_id : '—') + '</div></div>'
+              +   '</div>'
+              +   '<div class="fld"><label>Machine</label><input type="text" readonly value="' + esc((d.machine_name||'') + ' (' + (d.machine_code||'') + ')') + '"></div>'
+              +   '<div class="row2">'
+              +     '<div class="fld"><label>First reported</label><input type="text" readonly value="' + esc(fmtDT(d.first_reported_at)) + '"></div>'
+              +     '<div class="fld"><label>Reported by</label><input type="text" readonly value="' + esc(d.reported_by || '—') + '"></div>'
+              +   '</div>'
+              +   '<div class="fld"><label>Description</label><textarea readonly>' + esc(d.description || '') + '</textarea></div>'
+              +   '<div class="row2">'
+              +     '<div class="fld"><label>Event code</label><input type="text" readonly value="' + esc(d.event_code || '—') + '"></div>'
+              +     '<div class="fld"><label>Impact amount</label><input type="text" readonly value="' + esc(d.impact_amount==null?'—':('S$ ' + d.impact_amount.toFixed(2))) + '"></div>'
+              +   '</div>'
+              +   (d.impact_description ? '<div class="fld"><label>Impact description</label><textarea readonly>' + esc(d.impact_description) + '</textarea></div>' : '')
+              +   '<div class="fld"><label>Photos</label><div class="fr-img-grid">' + imgs + '</div></div>'
+              +   '<div class="fld"><label>Activity</label>'
+              +     '<div style="font-size:0.82rem;color:#374151">'
+              +     (d.activity || []).map(function(a){
+                      return '<div style="padding:4px 0;border-bottom:1px solid #f3f4f6">'
+                          + '<b>' + esc(a.action) + '</b> by ' + esc(a.by) + ' · ' + esc(fmtDT(a.at))
+                          + (a.detail ? '<br><span style="color:#6b7280">' + esc(a.detail) + '</span>' : '')
+                          + '</div>';
+                    }).join('') || '<span style="color:#9ca3af">No activity yet.</span>'
+              +     '</div></div>'
+              + '</div>';
+            openModal('Fault Report', d.display_id || ('#' + d.id), body);
+        }).catch(function(e){ alert('Load failed: ' + e.message); });
+    };
+
+})();
+</script>

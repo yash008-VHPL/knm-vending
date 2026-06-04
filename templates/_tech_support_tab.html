@@ -1,0 +1,651 @@
+<!--
+  Tech Support tab — mobile-first. Field workers see their assigned WOs,
+  walk through tickbox checklists, mark blocks with photo + note, or close.
+  Managers see all WOs + can edit diagnosis / proposed fix / assignment.
+  Namespace: .ts-*
+-->
+
+<style>
+    .ts-section { max-width: 760px; margin: 14px auto; padding: 0 12px; }
+
+    .ts-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+    .ts-toolbar select, .ts-toolbar input[type="search"] {
+        padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px;
+        font-size: 0.92rem; flex: 1; min-width: 140px;
+    }
+
+    .ts-card {
+        background: white; border: 1px solid #e5e7eb; border-radius: 11px;
+        padding: 14px 16px; margin-bottom: 10px;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .ts-card .id { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; }
+    .ts-card .machine { font-weight: 700; color: #111827; font-size: 1rem; margin-top: 3px; }
+    .ts-card .sub { font-size: 0.82rem; color: #6b7280; margin-top: 3px; }
+    .ts-card .row { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+    .ts-card .progress { font-size: 0.82rem; color: #1a56db; font-weight: 600; }
+
+    .ts-badge {
+        display: inline-block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        letter-spacing: 0.03em; padding: 3px 10px; border-radius: 20px; white-space: nowrap;
+    }
+    .ts-badge.s0 { background: #fef3c7; color: #b45309; }   /* assigned */
+    .ts-badge.s1 { background: #fee2e2; color: #b91c1c; }   /* needs_assistance */
+    .ts-badge.s2 { background: #dcfce7; color: #15803d; }   /* closed */
+    .ts-badge.p0 { background: #f3f4f6; color: #6b7280; }
+    .ts-badge.p1 { background: #e0e7ff; color: #3730a3; }
+    .ts-badge.p2 { background: #fee2e2; color: #b91c1c; }
+
+    .ts-open-btn {
+        width: 100%; padding: 11px 14px; border: none; border-radius: 8px;
+        background: #1a56db; color: white; font-weight: 700; font-size: 0.95rem;
+        cursor: pointer; margin-top: 10px;
+    }
+    .ts-open-btn:hover { background: #1e40af; }
+
+    .ts-empty { text-align: center; color: #9ca3af; padding: 40px 10px; font-size: 0.9rem; }
+    .ts-msg { padding: 10px 14px; border-radius: 7px; font-size: 0.88rem; margin-bottom: 12px; }
+    .ts-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .ts-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+
+    /* Detail view */
+    .ts-detail { background: white; border: 1px solid #e5e7eb; border-radius: 11px; padding: 16px; margin-bottom: 12px; }
+    .ts-detail h3 { font-size: 1rem; margin: 0 0 4px 0; color: #111827; }
+    .ts-detail .id { font-family: ui-monospace, monospace; font-size: 0.8rem; color: #6b7280; margin-bottom: 10px; }
+    .ts-detail .back {
+        background: none; border: none; color: #1a56db; font-weight: 600;
+        font-size: 0.88rem; cursor: pointer; padding: 0; margin-bottom: 10px;
+    }
+    .ts-block {
+        margin-top: 14px; padding: 12px; border: 1px solid #e5e7eb; border-radius: 8px;
+        background: #f9fafb;
+    }
+    .ts-block-title {
+        font-size: 0.7rem; font-weight: 700; text-transform: uppercase; color: #6b7280;
+        letter-spacing: 0.05em; margin-bottom: 6px;
+    }
+    .ts-block-content { font-size: 0.92rem; color: #111827; white-space: pre-wrap; }
+    .ts-block-empty { color: #9ca3af; font-size: 0.85rem; }
+
+    /* Tasks (tickboxes) */
+    .ts-task {
+        display: flex; gap: 11px; align-items: flex-start;
+        padding: 11px 0; border-bottom: 1px solid #f3f4f6;
+    }
+    .ts-task:last-child { border-bottom: none; }
+    .ts-task input[type="checkbox"] {
+        width: 22px; height: 22px; margin-top: 1px; cursor: pointer; flex-shrink: 0;
+    }
+    .ts-task .lbl { flex: 1; font-size: 0.95rem; color: #111827; line-height: 1.35; }
+    .ts-task.done .lbl { text-decoration: line-through; color: #6b7280; }
+    .ts-task .meta { font-size: 0.72rem; color: #9ca3af; margin-top: 3px; }
+    .ts-task .block-note {
+        margin-top: 5px; padding: 7px 9px; background: #fef3c7; color: #92400e;
+        border-radius: 5px; font-size: 0.82rem;
+    }
+    .ts-task-actions { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+    .ts-task-actions button {
+        font-size: 0.78rem; padding: 5px 10px; border-radius: 5px; border: 1px solid #d1d5db;
+        background: white; cursor: pointer; font-weight: 600;
+    }
+    .ts-task-actions button.warn { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
+
+    .ts-actions-row {
+        display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px;
+        padding-top: 12px; border-top: 1px solid #e5e7eb;
+    }
+    .ts-actions-row button {
+        flex: 1; min-width: 130px; padding: 11px 12px; border-radius: 8px; border: none;
+        font-weight: 700; font-size: 0.9rem; cursor: pointer;
+    }
+    .ts-btn-close { background: #15803d; color: white; }
+    .ts-btn-close:hover { background: #166534; }
+    .ts-btn-help  { background: #b91c1c; color: white; }
+    .ts-btn-help:hover  { background: #991b1b; }
+
+    /* Photo grid */
+    .ts-img-grid { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
+    .ts-thumb { width: 72px; height: 72px; border-radius: 6px; overflow: hidden; border: 1px solid #e5e7eb; }
+    .ts-thumb img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; }
+
+    /* Block-reason prompt */
+    .ts-prompt {
+        display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.6);
+        z-index: 110; padding: 20px; align-items: center; justify-content: center;
+    }
+    .ts-prompt.open { display: flex; }
+    .ts-prompt-box {
+        background: white; border-radius: 11px; padding: 18px; max-width: 460px; width: 100%;
+    }
+    .ts-prompt-box h3 { margin: 0 0 8px 0; font-size: 1rem; }
+    .ts-prompt-box textarea {
+        width: 100%; min-height: 80px; padding: 9px 11px; border: 1px solid #d1d5db;
+        border-radius: 6px; font-family: inherit; font-size: 0.9rem;
+    }
+    .ts-prompt-actions { display: flex; gap: 8px; margin-top: 10px; justify-content: flex-end; }
+    .ts-prompt-actions button { padding: 8px 14px; border-radius: 6px; border: none; font-weight: 700; cursor: pointer; }
+    .ts-prompt-actions .cancel { background: #f3f4f6; color: #374151; }
+    .ts-prompt-actions .ok { background: #1a56db; color: white; }
+
+    @media (max-width: 480px) {
+        .ts-section { padding: 0 8px; margin-top: 8px; }
+        .ts-card, .ts-detail { padding: 12px; }
+    }
+
+    /* Triage panel (manager only) */
+    .ts-triage {
+        background: #fef3c7; border: 1px solid #fde68a; border-radius: 11px;
+        padding: 12px 14px; margin-bottom: 14px;
+    }
+    .ts-triage h3 {
+        margin: 0; font-size: 0.9rem; color: #92400e; cursor: pointer;
+        display: flex; justify-content: space-between; align-items: center;
+    }
+    .ts-triage h3 .count {
+        background: #b45309; color: white; font-size: 0.72rem; padding: 2px 8px;
+        border-radius: 10px; font-weight: 700;
+    }
+    .ts-triage.collapsed .triage-body { display: none; }
+    .ts-triage .triage-body { margin-top: 10px; }
+    .ts-triage-row {
+        background: white; border: 1px solid #fde68a; border-radius: 8px;
+        padding: 10px 12px; margin-bottom: 6px;
+    }
+    .ts-triage-row .id { font-family: ui-monospace, monospace; font-size: 0.74rem; color: #92400e; }
+    .ts-triage-row .desc { font-size: 0.88rem; color: #111827; margin-top: 3px; }
+    .ts-triage-row .sub { font-size: 0.74rem; color: #92400e; margin-top: 3px; }
+    .ts-triage-row .right { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
+    .ts-triage-row .triage-btn {
+        padding: 6px 12px; border-radius: 5px; border: none; background: #b45309; color: white;
+        font-size: 0.8rem; font-weight: 700; cursor: pointer;
+    }
+
+    /* Create-WO modal (reuses .ts-prompt-box pattern, bigger) */
+    .ts-wo-modal {
+        display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.6);
+        z-index: 115; padding: 20px; align-items: flex-start; justify-content: center;
+        overflow-y: auto;
+    }
+    .ts-wo-modal.open { display: flex; }
+    .ts-wo-modal .box {
+        background: white; border-radius: 11px; padding: 18px; max-width: 620px; width: 100%;
+        margin: auto;
+    }
+    .ts-wo-modal h3 { margin: 0 0 4px 0; font-size: 1rem; }
+    .ts-wo-modal .src {
+        font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; margin-bottom: 12px;
+    }
+    .ts-wo-form .fld { display: block; margin-bottom: 10px; }
+    .ts-wo-form .fld > label {
+        display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        color: #6b7280; letter-spacing: 0.05em; margin-bottom: 4px;
+    }
+    .ts-wo-form input[type="text"], .ts-wo-form input[type="number"],
+    .ts-wo-form textarea, .ts-wo-form select {
+        width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-family: inherit; font-size: 0.88rem;
+    }
+    .ts-wo-form input[readonly], .ts-wo-form textarea[readonly] { background: #f9fafb; color: #4b5563; }
+    .ts-wo-form .row2 { display: flex; gap: 10px; }
+    .ts-wo-form .row2 > .fld { flex: 1; }
+    .ts-wo-kb {
+        background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 7px;
+        padding: 8px 10px; margin-bottom: 10px;
+    }
+    .ts-wo-kb-empty { color: #6b7280; font-size: 0.82rem; }
+    .ts-wo-kb-item {
+        padding: 7px; background: white; border-radius: 5px; margin-bottom: 5px; cursor: pointer;
+        border: 1px solid transparent;
+    }
+    .ts-wo-kb-item:hover { border-color: #1a56db; }
+    .ts-wo-kb-item .ttl { font-weight: 700; font-size: 0.86rem; color: #1e40af; }
+    .ts-wo-kb-item .meta { font-size: 0.74rem; color: #6b7280; }
+    .ts-wo-tickbox {
+        display: flex; gap: 6px; align-items: center; margin-bottom: 4px;
+    }
+    .ts-wo-tickbox input { flex: 1; }
+    .ts-wo-tickbox button { background: #fee2e2; color: #b91c1c; border: 1px solid #fecaca;
+        border-radius: 5px; padding: 4px 8px; font-size: 0.74rem; font-weight: 700; cursor: pointer; }
+    .ts-wo-add-tb { background: none; border: 1px dashed #cbd5e1; color: #475569;
+        padding: 5px 10px; border-radius: 6px; font-size: 0.78rem; font-weight: 600; cursor: pointer; margin-top: 4px; }
+</style>
+
+<div class="ts-section">
+    <!-- Manager triage panel (hidden for operators) -->
+    <div id="tsTriage" class="ts-triage collapsed" style="display:none">
+        <h3 onclick="window.__tsToggleTriage()">
+            <span>⚠ Open Complaints — Triage</span>
+            <span class="count" id="tsTriageCount">0</span>
+        </h3>
+        <div class="triage-body" id="tsTriageList"></div>
+    </div>
+
+    <div class="ts-toolbar">
+        <select id="tsFilterStatus" onchange="window.__tsRefresh()">
+            <option value="all">All statuses</option>
+            <option value="assigned">Assigned</option>
+            <option value="needs_assistance">Needs assistance</option>
+            <option value="closed">Closed</option>
+        </select>
+        <select id="tsFilterScope" onchange="window.__tsRefresh()">
+            <option value="mine">My WOs</option>
+            <option value="all">All (manager)</option>
+        </select>
+    </div>
+    <div id="tsMsg"></div>
+    <div id="tsList"></div>
+    <div id="tsDetail" style="display:none"></div>
+</div>
+
+<!-- Create-WO from complaint (manager) -->
+<div id="tsWOModal" class="ts-wo-modal" onclick="if(event.target===this)window.__tsCloseWOModal()">
+    <div class="box">
+        <h3>Create Work Order</h3>
+        <div class="src" id="tsWOModalSrc"></div>
+        <div class="ts-wo-form" id="tsWOFormBody"></div>
+    </div>
+</div>
+
+<!-- Prompt overlay for block reason -->
+<div id="tsPrompt" class="ts-prompt" onclick="if(event.target===this)window.__tsClosePrompt()">
+    <div class="ts-prompt-box">
+        <h3 id="tsPromptTitle"></h3>
+        <textarea id="tsPromptText" placeholder="Describe what's blocking you, what you tried…"></textarea>
+        <div class="ts-prompt-actions">
+            <button class="cancel" onclick="window.__tsClosePrompt()">Cancel</button>
+            <button class="ok" onclick="window.__tsPromptOk()">Submit</button>
+        </div>
+    </div>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = {
+        bootstrap: null,
+        rows: [],
+        currentJob: null,
+        pendingAction: null,  // {kind:'task_block'|'wo_help', payload:{...}}
+        loaded: false,
+    };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.json().then(function(d){
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        });
+    }
+    function postJSON(url, body, method){
+        return api(url, {
+            method: method || 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {}),
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
+    function showMsg(html, cls){
+        document.getElementById('tsMsg').innerHTML = html ? '<div class="ts-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+
+    function ensureBootstrap(){
+        if(state.bootstrap) return Promise.resolve(state.bootstrap);
+        return api('/api/wo/bootstrap').then(function(d){ state.bootstrap = d; return d; });
+    }
+
+    function isManager(){
+        var r = state.bootstrap && state.bootstrap.role;
+        return r === 'admin' || r === 'field_manager';
+    }
+
+    window.__tsInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        ensureBootstrap().then(function(){
+            if(isManager()){
+                document.getElementById('tsTriage').style.display = 'block';
+                loadTriage();
+            }
+            window.__tsRefresh();
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    function loadTriage(){
+        api('/api/wo/complaints?scope=all&status=fresh').then(function(rows){
+            state.triage = rows;
+            renderTriage();
+        }).catch(function(e){ /* silent: don't block tab */ console.warn(e); });
+    }
+
+    function renderTriage(){
+        var rows = state.triage || [];
+        document.getElementById('tsTriageCount').textContent = rows.length;
+        if(!rows.length){
+            document.getElementById('tsTriageList').innerHTML =
+                '<div style="color:#92400e;font-size:0.84rem;padding:8px 4px">No fresh complaints. ✓</div>';
+            return;
+        }
+        document.getElementById('tsTriageList').innerHTML = rows.map(function(c){
+            return ''
+              + '<div class="ts-triage-row">'
+              +   '<div class="id">' + esc(c.display_id || '#' + c.id) + '</div>'
+              +   '<div class="desc">' + esc((c.description || '').slice(0, 140)) + '</div>'
+              +   '<div class="sub">' + esc(c.machine_name || '(no machine)') + ' · '
+              +     esc(c.perceived_urgency_label) + ' urgency · ' + esc(c.submitter) + '</div>'
+              +   '<div class="right">'
+              +     '<button class="triage-btn" onclick="window.__tsOpenCreateWO(' + c.id + ')">Create WO</button>'
+              +   '</div>'
+              + '</div>';
+        }).join('');
+    }
+    window.__tsToggleTriage = function(){
+        document.getElementById('tsTriage').classList.toggle('collapsed');
+    };
+
+    window.__tsRefresh = function(){
+        var qs = [];
+        qs.push('scope='  + encodeURIComponent(document.getElementById('tsFilterScope').value));
+        qs.push('status=' + encodeURIComponent(document.getElementById('tsFilterStatus').value));
+        showMsg('Loading…', 'loading');
+        api('/api/wo/joborders?' + qs.join('&')).then(function(rows){
+            state.rows = rows;
+            document.getElementById('tsDetail').style.display = 'none';
+            document.getElementById('tsList').style.display = 'block';
+            renderList();
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    function renderList(){
+        var html = '';
+        if(!state.rows.length){
+            html = '<div class="ts-empty">No work orders.</div>';
+        } else {
+            html = state.rows.map(function(j){
+                var pct = j.task_count ? Math.round(100 * j.tasks_done / j.task_count) : 0;
+                return ''
+                  + '<div class="ts-card">'
+                  +   '<div class="row">'
+                  +     '<div>'
+                  +       '<div class="id">' + esc(j.display_id || '#' + j.id) + '</div>'
+                  +       '<div class="machine">' + esc(j.machine_name || '?') + '</div>'
+                  +       '<div class="sub">Assigned to ' + esc(j.assigned_to || '(none)') + ' · ' + fmtDT(j.created_at) + '</div>'
+                  +     '</div>'
+                  +     '<div style="display:flex;flex-direction:column;gap:5px;align-items:flex-end">'
+                  +       '<span class="ts-badge s' + j.status_code + '">' + esc(j.status_label) + '</span>'
+                  +       '<span class="ts-badge p' + j.priority_code + '">' + esc(j.priority_label) + '</span>'
+                  +     '</div>'
+                  +   '</div>'
+                  +   (j.task_count
+                       ? '<div class="progress" style="margin-top:8px">Tasks: ' + j.tasks_done + '/' + j.task_count + ' (' + pct + '%)</div>'
+                       : '')
+                  +   '<button class="ts-open-btn" onclick="window.__tsOpenJob(' + j.id + ')">Open</button>'
+                  + '</div>';
+            }).join('');
+        }
+        document.getElementById('tsList').innerHTML = html;
+    }
+
+    window.__tsOpenJob = function(id){
+        showMsg('Loading…', 'loading');
+        api('/api/wo/joborders/' + id).then(function(j){
+            state.currentJob = j;
+            renderDetail(j);
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    function renderDetail(j){
+        var imgs = (j.images || []).map(function(im){
+            return '<div class="ts-thumb"><img src="/api/wo/images/' + im.id + '"></div>';
+        }).join('') || '<div class="ts-block-empty">No photos yet.</div>';
+
+        var tasks = (j.tasks || []).map(function(t){
+            var blockNote = t.blocked_note ? '<div class="block-note">⚠ ' + esc(t.blocked_note) + '</div>' : '';
+            var actions = '';
+            if(!t.done){
+                actions = '<div class="ts-task-actions">'
+                       + '<button class="warn" onclick="window.__tsTaskBlock(' + t.id + ')">Can\'t complete</button>'
+                       + '</div>';
+            }
+            return ''
+              + '<div class="ts-task' + (t.done ? ' done' : '') + '">'
+              +   '<input type="checkbox"' + (t.done ? ' checked' : '') + ' onchange="window.__tsTaskToggle(' + t.id + ', this.checked)">'
+              +   '<div style="flex:1">'
+              +     '<div class="lbl">' + esc(t.label) + '</div>'
+              +     (t.done && t.completed_by ? '<div class="meta">✓ ' + esc(t.completed_by) + ' · ' + esc(fmtDT(t.completed_at)) + '</div>' : '')
+              +     blockNote
+              +     actions
+              +   '</div>'
+              + '</div>';
+        }).join('') || '<div class="ts-block-empty">No tickboxes for this WO.</div>';
+
+        var html = ''
+          + '<div class="ts-detail">'
+          +   '<button class="back" onclick="window.__tsRefresh()">← Back to list</button>'
+          +   '<h3>' + esc(j.machine_name || '?') + '</h3>'
+          +   '<div class="id">' + esc(j.display_id || '#' + j.id) + ' · '
+          +     '<span class="ts-badge s' + j.status_code + '">' + esc(j.status_label) + '</span> · '
+          +     '<span class="ts-badge p' + j.priority_code + '">' + esc(j.priority_label) + '</span>'
+          +   '</div>'
+          +   (j.last_block_reason
+               ? '<div class="ts-block" style="border-color:#fecaca;background:#fef2f2"><div class="ts-block-title" style="color:#b91c1c">⚠ Currently blocked</div><div class="ts-block-content">' + esc(j.last_block_reason) + '</div></div>'
+               : '')
+          +   (j.diagnosis
+               ? '<div class="ts-block"><div class="ts-block-title">Diagnosis</div><div class="ts-block-content">' + esc(j.diagnosis) + '</div></div>'
+               : '')
+          +   (j.proposed_fix
+               ? '<div class="ts-block"><div class="ts-block-title">Proposed fix</div><div class="ts-block-content">' + esc(j.proposed_fix) + '</div></div>'
+               : '')
+          +   (j.notes
+               ? '<div class="ts-block"><div class="ts-block-title">Notes</div><div class="ts-block-content">' + esc(j.notes) + '</div></div>'
+               : '')
+          +   '<div class="ts-block"><div class="ts-block-title">Tickbox checklist</div>' + tasks + '</div>'
+          +   '<div class="ts-block"><div class="ts-block-title">Photos</div><div class="ts-img-grid">' + imgs + '</div></div>'
+          +   (j.status_code !== 2 ? ''
+              + '<div class="ts-actions-row">'
+              +   '<button class="ts-btn-help"  onclick="window.__tsWOHelp(' + j.id + ')">⚠ Needs assistance</button>'
+              +   '<button class="ts-btn-close" onclick="window.__tsWOClose(' + j.id + ')">✓ Mark complete</button>'
+              + '</div>'
+              : '')
+          + '</div>';
+
+        document.getElementById('tsList').style.display = 'none';
+        var dv = document.getElementById('tsDetail');
+        dv.style.display = 'block';
+        dv.innerHTML = html;
+    }
+
+    // ── Task toggle ──
+    window.__tsTaskToggle = function(taskId, done){
+        if(done){
+            // Optional: prompt for completion photo? Skip for now; worker
+            // can take photo at WO close. Keeps the tap-and-go flow fast.
+            postJSON('/api/wo/tasks/' + taskId, { done: true }, 'PATCH')
+                .then(function(){ window.__tsOpenJob(state.currentJob.id); })
+                .catch(function(e){ alert('Update failed: ' + e.message); });
+        } else {
+            postJSON('/api/wo/tasks/' + taskId, { done: false }, 'PATCH')
+                .then(function(){ window.__tsOpenJob(state.currentJob.id); })
+                .catch(function(e){ alert('Update failed: ' + e.message); });
+        }
+    };
+
+    window.__tsTaskBlock = function(taskId){
+        state.pendingAction = { kind: 'task_block', taskId: taskId };
+        document.getElementById('tsPromptTitle').textContent = "Why can't you complete this step?";
+        document.getElementById('tsPromptText').value = '';
+        document.getElementById('tsPrompt').classList.add('open');
+    };
+
+    window.__tsWOHelp = function(jobId){
+        state.pendingAction = { kind: 'wo_help', jobId: jobId };
+        document.getElementById('tsPromptTitle').textContent = "Describe what assistance you need";
+        document.getElementById('tsPromptText').value = '';
+        document.getElementById('tsPrompt').classList.add('open');
+    };
+
+    window.__tsWOClose = function(jobId){
+        if(!confirm("Mark this WO complete? This closes the linked complaint (if any) too.")) return;
+        postJSON('/api/wo/joborders/' + jobId + '/status', { status_code: 2 })
+            .then(function(){ window.__tsRefresh(); })
+            .catch(function(e){ alert('Close failed: ' + e.message); });
+    };
+
+    window.__tsClosePrompt = function(){
+        document.getElementById('tsPrompt').classList.remove('open');
+        state.pendingAction = null;
+    };
+
+    // ── Create WO from complaint (manager) ──
+    window.__tsOpenCreateWO = function(complaintId){
+        api('/api/wo/complaints/' + complaintId).then(function(c){
+            state.draftComplaint = c;
+            renderCreateWOForm(c);
+            document.getElementById('tsWOModal').classList.add('open');
+        }).catch(function(e){ alert('Load failed: ' + e.message); });
+    };
+
+    function renderCreateWOForm(c){
+        document.getElementById('tsWOModalSrc').textContent =
+            'From ' + (c.display_id || ('complaint #' + c.id)) + ' · ' + (c.machine_name || '?');
+
+        var body = ''
+          + '<div class="fld"><label>Original report</label><textarea readonly>' + esc(c.description || '') + '</textarea></div>'
+          + '<div class="row2">'
+          +   '<div class="fld"><label>Machine</label><input type="text" readonly value="' + esc((c.machine_name||'') + ' (' + (c.machine_code||'') + ')') + '"></div>'
+          +   '<div class="fld"><label>Customer urgency</label><input type="text" readonly value="' + esc(c.perceived_urgency_label) + '"></div>'
+          + '</div>'
+          + '<div class="row2">'
+          +   '<div class="fld"><label>Event code (8xxxxx — optional)</label><input type="number" id="tsWOEventCode" min="800000" max="899999" placeholder="8xxxxx" onchange="window.__tsKBLookup()"></div>'
+          +   '<div class="fld"><label>Priority</label><select id="tsWOPriority"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>'
+          + '</div>'
+          + '<div class="ts-wo-kb" id="tsWOKBPanel" style="display:none">'
+          +   '<div style="font-size:0.74rem;font-weight:700;text-transform:uppercase;color:#1e40af;letter-spacing:0.05em;margin-bottom:6px">KB Suggestions (tap one to pre-fill)</div>'
+          +   '<div id="tsWOKBList"></div>'
+          + '</div>'
+          + '<div class="fld"><label>Diagnosis</label><textarea id="tsWODiag" placeholder="What you think is wrong"></textarea></div>'
+          + '<div class="fld"><label>Proposed fix</label><textarea id="tsWOFix" placeholder="What the operator should do"></textarea></div>'
+          + '<div class="fld"><label>Notes (internal)</label><textarea id="tsWONotes" placeholder="Anything else"></textarea></div>'
+          + '<div class="fld"><label>Assigned to (email)</label><input type="text" id="tsWOAssigned" placeholder="operator@kopinearme.com"></div>'
+          + '<div class="fld">'
+          +   '<label>Tickbox checklist (operator works through these)</label>'
+          +   '<div id="tsWOTickboxes"></div>'
+          +   '<button class="ts-wo-add-tb" onclick="window.__tsWOAddTickbox()">+ Add step</button>'
+          + '</div>'
+          + '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">'
+          +   '<button class="cancel" style="padding:8px 14px;border-radius:6px;border:none;background:#f3f4f6;color:#374151;font-weight:700;cursor:pointer" onclick="window.__tsCloseWOModal()">Cancel</button>'
+          +   '<button class="ok" style="padding:8px 14px;border-radius:6px;border:none;background:#1a56db;color:white;font-weight:700;cursor:pointer" onclick="window.__tsSubmitWO()">Create WO</button>'
+          + '</div>';
+        document.getElementById('tsWOFormBody').innerHTML = body;
+    }
+
+    window.__tsCloseWOModal = function(){
+        document.getElementById('tsWOModal').classList.remove('open');
+        state.draftComplaint = null;
+    };
+
+    window.__tsKBLookup = function(){
+        var ev = document.getElementById('tsWOEventCode').value;
+        if(!ev){
+            document.getElementById('tsWOKBPanel').style.display = 'none';
+            return;
+        }
+        api('/api/wo/kb/suggest?event_code=' + encodeURIComponent(ev)).then(function(arr){
+            var panel = document.getElementById('tsWOKBPanel');
+            var list  = document.getElementById('tsWOKBList');
+            if(!arr.length){
+                list.innerHTML = '<div class="ts-wo-kb-empty">No KB entries for this code.</div>';
+            } else {
+                state.kbSuggestions = arr;
+                list.innerHTML = arr.map(function(k, i){
+                    return ''
+                      + '<div class="ts-wo-kb-item" onclick="window.__tsKBApply(' + i + ')">'
+                      +   '<div class="ttl">' + esc(k.title) + '</div>'
+                      +   '<div class="meta">used ' + k.use_count + 'x · ' + (k.tickboxes||[]).length + ' tickboxes</div>'
+                      + '</div>';
+                }).join('');
+            }
+            panel.style.display = 'block';
+        }).catch(function(e){ console.warn(e); });
+    };
+
+    window.__tsKBApply = function(idx){
+        var k = (state.kbSuggestions || [])[idx];
+        if(!k) return;
+        if(k.diagnosis)     document.getElementById('tsWODiag').value = k.diagnosis;
+        if(k.suggested_fix) document.getElementById('tsWOFix').value  = k.suggested_fix;
+        var c = document.getElementById('tsWOTickboxes');
+        c.innerHTML = '';
+        (k.tickboxes || []).forEach(function(t){
+            addTickboxRow(t.label || '');
+        });
+        // Mark KB use (best-effort, ignore errors)
+        postJSON('/api/wo/kb/' + k.id + '/use', {}).catch(function(){});
+    };
+
+    function addTickboxRow(initial){
+        var row = document.createElement('div');
+        row.className = 'ts-wo-tickbox';
+        row.innerHTML = '<input type="text" value="' + esc(initial || '') + '" placeholder="Step description">'
+                      + '<button onclick="this.parentNode.remove()">×</button>';
+        document.getElementById('tsWOTickboxes').appendChild(row);
+    }
+    window.__tsWOAddTickbox = function(){ addTickboxRow(''); };
+
+    window.__tsSubmitWO = function(){
+        var c = state.draftComplaint;
+        if(!c){ alert('No complaint loaded.'); return; }
+        var tickboxes = Array.prototype.map.call(
+            document.querySelectorAll('#tsWOTickboxes input'),
+            function(i){ return i.value.trim(); }
+        ).filter(function(x){ return !!x; });
+
+        var body = {
+            complaint_id:  c.id,
+            machine_name:  c.machine_name,
+            machine_code:  c.machine_code,
+            diagnosis:     document.getElementById('tsWODiag').value.trim()  || null,
+            proposed_fix:  document.getElementById('tsWOFix').value.trim()   || null,
+            notes:         document.getElementById('tsWONotes').value.trim() || null,
+            assigned_to:   document.getElementById('tsWOAssigned').value.trim() || null,
+            priority:      parseInt(document.getElementById('tsWOPriority').value, 10),
+            event_code:    document.getElementById('tsWOEventCode').value || null,
+            tasks:         tickboxes,
+        };
+        postJSON('/api/wo/joborders', body).then(function(res){
+            window.__tsCloseWOModal();
+            loadTriage();
+            window.__tsRefresh();
+        }).catch(function(e){ alert('Create WO failed: ' + e.message); });
+    };
+
+    window.__tsPromptOk = function(){
+        var note = document.getElementById('tsPromptText').value.trim();
+        if(!note){ alert('Please describe the issue.'); return; }
+        var pa = state.pendingAction;
+        document.getElementById('tsPrompt').classList.remove('open');
+        if(!pa) return;
+        if(pa.kind === 'task_block'){
+            postJSON('/api/wo/tasks/' + pa.taskId, { blocked_note: note }, 'PATCH')
+                .then(function(){ window.__tsOpenJob(state.currentJob.id); })
+                .catch(function(e){ alert('Save failed: ' + e.message); });
+        } else if(pa.kind === 'wo_help'){
+            postJSON('/api/wo/joborders/' + pa.jobId + '/status',
+                { status_code: 1, block_reason: note })
+                .then(function(){ window.__tsRefresh(); })
+                .catch(function(e){ alert('Save failed: ' + e.message); });
+        }
+        state.pendingAction = null;
+    };
+
+})();
+</script>
