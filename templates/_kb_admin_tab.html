@@ -89,10 +89,14 @@
                 <div class="fld"><label>Title *</label><input type="text" id="kbNewTitle" placeholder="e.g. Coin jam — 50¢ slot"></div>
                 <div class="fld"><label>Event code (6xxxxx or 8xxxxx)</label><input type="number" id="kbNewEventCode" placeholder="e.g. 800123"></div>
             </div>
-            <div class="fld"><label>Diagnosis</label><textarea id="kbNewDiagnosis" placeholder="Standard description of what's wrong"></textarea></div>
-            <div class="fld"><label>Suggested fix</label><textarea id="kbNewFix" placeholder="High-level fix approach"></textarea></div>
+            <div class="fld"><label>1. Symptom observed</label><textarea id="kbNewSymptom" placeholder="What does the customer / operator see or report?"></textarea></div>
+            <div class="fld"><label>2. Confirmation of conclusion from symptom</label><textarea id="kbNewDiagConf" placeholder="How does the operator verify this matches?"></textarea></div>
+            <div class="fld"><label>3. Root cause</label><textarea id="kbNewRoot" placeholder="Typical underlying cause"></textarea></div>
+            <div class="fld"><label>4. Corrective action</label><textarea id="kbNewCorr" placeholder="What to do to fix this specific occurrence"></textarea></div>
+            <div class="fld"><label>5. Preventive action</label><textarea id="kbNewPrev" placeholder="What to do to prevent recurrence"></textarea></div>
+            <div class="fld"><label>6. Verification of completion</label><textarea id="kbNewVerif" placeholder="How to confirm the fix worked"></textarea></div>
             <div class="fld">
-                <label>Tickboxes (one step per box)</label>
+                <label>Tickboxes (operator's step-by-step checklist)</label>
                 <div class="kb-tb-list" id="kbNewTickboxes"></div>
                 <button class="kb-tb-add" onclick="window.__kbAddTickbox('kbNewTickboxes')">+ Add step</button>
             </div>
@@ -104,7 +108,7 @@
     </div>
 
     <div class="kb-toolbar">
-        <input type="search" id="kbSearch" placeholder="Search title / diagnosis…" oninput="renderKB()">
+        <input type="search" id="kbSearch" placeholder="Search title / symptom / cause / action…" oninput="renderKB()">
         <input type="number" id="kbFilterCode" placeholder="Filter by event code" oninput="renderKB()">
         <select id="kbFilterKind" onchange="renderKB()">
             <option value="all">All kinds</option>
@@ -175,7 +179,11 @@
             if(kindFilt === 'cmp' && !(r.event_code >= 600000 && r.event_code <= 699999)) return false;
             if(kindFilt === 'wko' && !(r.event_code >= 800000 && r.event_code <= 899999)) return false;
             if(search){
-                var hay = ((r.title||'') + ' ' + (r.diagnosis||'') + ' ' + (r.suggested_fix||'')).toLowerCase();
+                var hay = [
+                    r.title, r.symptom, r.diagnostic_confirmation,
+                    r.root_cause, r.corrective_action,
+                    r.preventive_action, r.verification_of_completion
+                ].filter(Boolean).join(' ').toLowerCase();
                 if(hay.indexOf(search) < 0) return false;
             }
             return true;
@@ -221,8 +229,12 @@
           +     '<div class="fld"><label>Title</label><input type="text" id="kbT' + r.id + '" value="' + esc(r.title || '') + '"></div>'
           +     '<div class="fld"><label>Event code</label><input type="number" id="kbE' + r.id + '" value="' + esc(r.event_code || '') + '"></div>'
           +   '</div>'
-          +   '<div class="fld"><label>Diagnosis</label><textarea id="kbD' + r.id + '">' + esc(r.diagnosis || '') + '</textarea></div>'
-          +   '<div class="fld"><label>Suggested fix</label><textarea id="kbF' + r.id + '">' + esc(r.suggested_fix || '') + '</textarea></div>'
+          +   '<div class="fld"><label>1. Symptom observed</label><textarea id="kbSym' + r.id + '">' + esc(r.symptom || '') + '</textarea></div>'
+          +   '<div class="fld"><label>2. Confirmation of conclusion from symptom</label><textarea id="kbDC' + r.id + '">' + esc(r.diagnostic_confirmation || '') + '</textarea></div>'
+          +   '<div class="fld"><label>3. Root cause</label><textarea id="kbRC' + r.id + '">' + esc(r.root_cause || '') + '</textarea></div>'
+          +   '<div class="fld"><label>4. Corrective action</label><textarea id="kbCA' + r.id + '">' + esc(r.corrective_action || '') + '</textarea></div>'
+          +   '<div class="fld"><label>5. Preventive action</label><textarea id="kbPA' + r.id + '">' + esc(r.preventive_action || '') + '</textarea></div>'
+          +   '<div class="fld"><label>6. Verification of completion</label><textarea id="kbVoC' + r.id + '">' + esc(r.verification_of_completion || '') + '</textarea></div>'
           +   '<div class="fld">'
           +     '<label>Tickboxes</label>'
           +     '<div class="kb-tb-list" id="' + tbId + '">' + tbsHtml + '</div>'
@@ -275,11 +287,15 @@
         var title = document.getElementById('kbNewTitle').value.trim();
         if(!title){ alert('Title required.'); return; }
         var body = {
-            title:         title,
-            event_code:    document.getElementById('kbNewEventCode').value || null,
-            diagnosis:     document.getElementById('kbNewDiagnosis').value.trim() || null,
-            suggested_fix: document.getElementById('kbNewFix').value.trim() || null,
-            tickboxes:     collectTickboxes('kbNewTickboxes'),
+            title:      title,
+            event_code: document.getElementById('kbNewEventCode').value || null,
+            symptom:                    document.getElementById('kbNewSymptom').value.trim()  || null,
+            diagnostic_confirmation:    document.getElementById('kbNewDiagConf').value.trim() || null,
+            root_cause:                 document.getElementById('kbNewRoot').value.trim()    || null,
+            corrective_action:          document.getElementById('kbNewCorr').value.trim()    || null,
+            preventive_action:          document.getElementById('kbNewPrev').value.trim()    || null,
+            verification_of_completion: document.getElementById('kbNewVerif').value.trim()   || null,
+            tickboxes:  collectTickboxes('kbNewTickboxes'),
         };
         postJSON('/api/wo/kb', body).then(function(){
             window.__kbToggleNew();
@@ -289,11 +305,15 @@
 
     window.__kbSave = function(id){
         var body = {
-            title:         document.getElementById('kbT' + id).value.trim(),
-            event_code:    document.getElementById('kbE' + id).value || null,
-            diagnosis:     document.getElementById('kbD' + id).value.trim() || null,
-            suggested_fix: document.getElementById('kbF' + id).value.trim() || null,
-            tickboxes:     collectTickboxes('kbTB' + id),
+            title:      document.getElementById('kbT' + id).value.trim(),
+            event_code: document.getElementById('kbE' + id).value || null,
+            symptom:                    document.getElementById('kbSym' + id).value.trim() || null,
+            diagnostic_confirmation:    document.getElementById('kbDC'  + id).value.trim() || null,
+            root_cause:                 document.getElementById('kbRC'  + id).value.trim() || null,
+            corrective_action:          document.getElementById('kbCA'  + id).value.trim() || null,
+            preventive_action:          document.getElementById('kbPA'  + id).value.trim() || null,
+            verification_of_completion: document.getElementById('kbVoC' + id).value.trim() || null,
+            tickboxes:  collectTickboxes('kbTB' + id),
         };
         postJSON('/api/wo/kb/' + id, body, 'PATCH').then(function(){
             loadAll();

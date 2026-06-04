@@ -121,6 +121,7 @@ def init_workorders_db():
                 Source            NVARCHAR(20)   NOT NULL DEFAULT 'self',
                 ImpactDescription NVARCHAR(MAX)  NULL,
                 ImpactAmount      DECIMAL(18,2)  NULL,
+                ImpactSeverity    TINYINT        NULL,
                 MachineName       NVARCHAR(255)  NULL,
                 MachineCode       NVARCHAR(50)   NULL,
                 Status            NVARCHAR(20)   NOT NULL DEFAULT 'open',
@@ -227,6 +228,12 @@ def init_workorders_db():
                 Title         NVARCHAR(255)   NOT NULL,
                 Diagnosis     NVARCHAR(MAX)   NULL,
                 SuggestedFix  NVARCHAR(MAX)   NULL,
+                Symptom                   NVARCHAR(MAX) NULL,
+                DiagnosticConfirmation    NVARCHAR(MAX) NULL,
+                RootCause                 NVARCHAR(MAX) NULL,
+                CorrectiveAction          NVARCHAR(MAX) NULL,
+                PreventiveAction          NVARCHAR(MAX) NULL,
+                VerificationOfCompletion  NVARCHAR(MAX) NULL,
                 UseCount      INT             NOT NULL DEFAULT 0,
                 CreatedBy     NVARCHAR(255)   NOT NULL,
                 CreatedAt     DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME(),
@@ -516,7 +523,7 @@ def api_complaint_create():
         event_code         (optional int 600000–699999)
         perceived_urgency  (0=low, 1=normal, 2=high; default 1)
         impact_description (optional)
-        impact_amount      (optional decimal)
+        impact_severity    (optional int 1-5; 1=minimal, 5=critical)
         source             ('self' | 'customer_chat'; default 'self')
         images             (optional list of data: URLs)
     """
@@ -530,12 +537,16 @@ def api_complaint_create():
         source = "self"
 
     impact_desc = (data.get("impact_description") or "").strip() or None
-    impact_amt = None
-    if data.get("impact_amount") not in (None, "", "null"):
+    impact_severity = data.get("impact_severity")
+    if impact_severity in (None, "", "null"):
+        impact_severity = None
+    else:
         try:
-            impact_amt = float(data["impact_amount"])
+            impact_severity = int(impact_severity)
+            if not (1 <= impact_severity <= 5):
+                return jsonify({"error": "Impact severity must be 1-5."}), 400
         except (TypeError, ValueError):
-            return jsonify({"error": "Impact amount must be a number."}), 400
+            return jsonify({"error": "Impact severity must be an integer 1-5."}), 400
 
     machine_name = (data.get("machine_name") or "").strip() or None
     machine_code = (data.get("machine_code") or "").strip() or None
@@ -589,7 +600,7 @@ def api_complaint_create():
 
         cursor.execute("""
             INSERT INTO WO_Complaints
-                (Description, Source, ImpactDescription, ImpactAmount,
+                (Description, Source, ImpactDescription, ImpactSeverity,
                  MachineName, MachineCode, SubmitterEmail,
                  FirstReportedAt, ReportedBy, EventCode, PerceivedUrgency,
                  StatusCode, DisplayID)
@@ -597,7 +608,7 @@ def api_complaint_create():
             VALUES (%s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
                     0, %s)
-        """, (desc, source, impact_desc, impact_amt,
+        """, (desc, source, impact_desc, impact_severity,
               machine_name, machine_code, user,
               first_reported_at, reported_by, event_code, urgency,
               display_id))
@@ -652,7 +663,7 @@ def api_complaint_list():
     sql = f"""
         SELECT TOP 200
             ComplaintID, DisplayID, Description, Source,
-            ImpactDescription, ImpactAmount,
+            ImpactDescription, ImpactSeverity,
             MachineName, MachineCode,
             StatusCode, JobOrderID,
             SubmitterEmail, SubmittedAt,
@@ -672,7 +683,7 @@ def api_complaint_list():
         return jsonify([{
             "id": r[0], "display_id": r[1], "description": r[2], "source": r[3],
             "impact_description": r[4],
-            "impact_amount": float(r[5]) if r[5] is not None else None,
+            "impact_severity": int(r[5]) if r[5] is not None else None,
             "machine_name": r[6], "machine_code": r[7],
             "status_code":  int(r[8]),
             "status_label": _label(COMPLAINT_STATUS, r[8]),
@@ -697,7 +708,7 @@ def api_complaint_detail(cid):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT ComplaintID, DisplayID, Description, Source,
-                   ImpactDescription, ImpactAmount,
+                   ImpactDescription, ImpactSeverity,
                    MachineName, MachineCode,
                    StatusCode, JobOrderID,
                    SubmitterEmail, SubmittedAt,
@@ -716,7 +727,7 @@ def api_complaint_detail(cid):
     return jsonify({
         "id": row[0], "display_id": row[1], "description": row[2], "source": row[3],
         "impact_description": row[4],
-        "impact_amount": float(row[5]) if row[5] is not None else None,
+        "impact_severity": int(row[5]) if row[5] is not None else None,
         "machine_name": row[6], "machine_code": row[7],
         "status_code":  int(row[8]),
         "status_label": _label(COMPLAINT_STATUS, row[8]),
@@ -1334,8 +1345,10 @@ def api_kb_list():
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT KBID, EventCode, Title, Diagnosis, SuggestedFix, UseCount,
-                   CreatedBy, CreatedAt, UpdatedBy, UpdatedAt
+            SELECT KBID, EventCode, Title, UseCount,
+                   CreatedBy, CreatedAt, UpdatedBy, UpdatedAt,
+                   Symptom, DiagnosticConfirmation, RootCause,
+                   CorrectiveAction, PreventiveAction, VerificationOfCompletion
             FROM WO_KB_Entries {where_sql}
             ORDER BY UseCount DESC, KBID DESC
         """, tuple(params))
@@ -1354,10 +1367,16 @@ def api_kb_list():
         return jsonify([{
             "id": r[0],
             "event_code": int(r[1]) if r[1] is not None else None,
-            "title": r[2], "diagnosis": r[3], "suggested_fix": r[4],
-            "use_count": int(r[5]),
-            "created_by": r[6], "created_at": _iso(r[7]),
-            "updated_by": r[8], "updated_at": _iso(r[9]),
+            "title": r[2],
+            "use_count": int(r[3]),
+            "created_by": r[4], "created_at": _iso(r[5]),
+            "updated_by": r[6], "updated_at": _iso(r[7]),
+            "symptom":                    r[8],
+            "diagnostic_confirmation":    r[9],
+            "root_cause":                 r[10],
+            "corrective_action":          r[11],
+            "preventive_action":          r[12],
+            "verification_of_completion": r[13],
             "tickboxes": by_kb.get(int(r[0]), []),
         } for r in rows])
     except Exception as e:
@@ -1381,19 +1400,29 @@ def api_kb_create():
             return jsonify({"error": "EventCode must be an integer."}), 400
     else:
         ev = None
-    diagnosis     = (data.get("diagnosis") or "").strip() or None
-    suggested_fix = (data.get("suggested_fix") or "").strip() or None
-    tickboxes     = data.get("tickboxes") or []
+    car = {
+        "symptom":                    (data.get("symptom") or "").strip() or None,
+        "diagnostic_confirmation":    (data.get("diagnostic_confirmation") or "").strip() or None,
+        "root_cause":                 (data.get("root_cause") or "").strip() or None,
+        "corrective_action":          (data.get("corrective_action") or "").strip() or None,
+        "preventive_action":          (data.get("preventive_action") or "").strip() or None,
+        "verification_of_completion": (data.get("verification_of_completion") or "").strip() or None,
+    }
+    tickboxes = data.get("tickboxes") or []
     user = get_current_user()
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO WO_KB_Entries
-                (EventCode, Title, Diagnosis, SuggestedFix, CreatedBy)
+                (EventCode, Title, CreatedBy,
+                 Symptom, DiagnosticConfirmation, RootCause,
+                 CorrectiveAction, PreventiveAction, VerificationOfCompletion)
             OUTPUT INSERTED.KBID
-            VALUES (%s, %s, %s, %s, %s)
-        """, (ev, title[:255], diagnosis, suggested_fix, user))
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (ev, title[:255], user,
+              car["symptom"], car["diagnostic_confirmation"], car["root_cause"],
+              car["corrective_action"], car["preventive_action"], car["verification_of_completion"]))
         new_id = int(cursor.fetchone()[0])
         for i, lbl in enumerate(tickboxes):
             lbl = str(lbl).strip()
@@ -1417,10 +1446,18 @@ def api_kb_update(kid):
     sets, params = [], []
     if "title" in data:
         sets.append("Title = %s"); params.append(str(data["title"])[:255])
-    if "diagnosis" in data:
-        sets.append("Diagnosis = %s"); params.append(data["diagnosis"] or None)
-    if "suggested_fix" in data:
-        sets.append("SuggestedFix = %s"); params.append(data["suggested_fix"] or None)
+    _car_map = {
+        "symptom":                    "Symptom",
+        "diagnostic_confirmation":    "DiagnosticConfirmation",
+        "root_cause":                 "RootCause",
+        "corrective_action":          "CorrectiveAction",
+        "preventive_action":          "PreventiveAction",
+        "verification_of_completion": "VerificationOfCompletion",
+    }
+    for k, col in _car_map.items():
+        if k in data:
+            sets.append(f"{col} = %s")
+            params.append((data[k] or "").strip() or None)
     if "event_code" in data:
         ev = data["event_code"]
         if ev in (None, "", "null"):
@@ -1494,7 +1531,9 @@ def api_kb_suggest():
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT KBID, EventCode, Title, Diagnosis, SuggestedFix, UseCount
+            SELECT KBID, EventCode, Title, UseCount,
+                   Symptom, DiagnosticConfirmation, RootCause,
+                   CorrectiveAction, PreventiveAction, VerificationOfCompletion
             FROM WO_KB_Entries WHERE EventCode = %s
             ORDER BY UseCount DESC, KBID DESC
         """, (ev,))
@@ -1509,8 +1548,14 @@ def api_kb_suggest():
             tbs = [{"seq": x[0], "label": x[1]} for x in cursor.fetchall()]
             out.append({
                 "id": kb_id, "event_code": int(r[1]) if r[1] is not None else None,
-                "title": r[2], "diagnosis": r[3], "suggested_fix": r[4],
-                "use_count": int(r[5]), "tickboxes": tbs,
+                "title": r[2], "use_count": int(r[3]),
+                "symptom":                    r[4],
+                "diagnostic_confirmation":    r[5],
+                "root_cause":                 r[6],
+                "corrective_action":          r[7],
+                "preventive_action":          r[8],
+                "verification_of_completion": r[9],
+                "tickboxes": tbs,
             })
         conn.close()
         return jsonify(out)
@@ -2092,7 +2137,7 @@ def api_equipment_log():
 
         cursor.execute("""
             SELECT ComplaintID, DisplayID, Description, Source,
-                   ImpactDescription, ImpactAmount,
+                   ImpactDescription, ImpactSeverity,
                    StatusCode, SubmitterEmail, SubmittedAt, JobOrderID
             FROM WO_Complaints WHERE MachineCode = %s
         """, (code,))
@@ -2101,7 +2146,7 @@ def api_equipment_log():
             complaint_ids.append(r[0])
             summary = (r[2] or "")[:120]
             if r[5] is not None:
-                summary += f" (impact ${float(r[5]):.2f})"
+                summary += f" (severity {int(r[5])}/5)"
             events.append({
                 "at": _iso(r[8]), "type": "complaint", "id": r[0],
                 "display_id": r[1],

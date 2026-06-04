@@ -354,12 +354,16 @@
 </header>
 
 <div class="tab-bar">
+    {% if role != 'customer_service' %}
     <button class="tab-btn active" onclick="switchTab('sales', this)">Sales</button>
     <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
     <button class="tab-btn"        onclick="switchTab('heartbeat', this)">💓 Heartbeat</button>
+    {% endif %}
+    {% if role == 'admin' or role == 'dispatch' or role == 'customer_service' %}
+    <button class="tab-btn{% if role == 'customer_service' %} active{% endif %}" onclick="switchTab('admin', this)">Locations</button>
+    {% endif %}
     {% if role == 'admin' or role == 'dispatch' %}
-    <button class="tab-btn"        onclick="switchTab('admin', this)">Locations</button>
     <button class="tab-btn"        onclick="switchTab('dispatch', this)">Dispatch</button>
     {% endif %}
     <button class="tab-btn"        onclick="switchTab('fault_report', this); if(window.__frInit) window.__frInit();">Fault Report</button>
@@ -376,7 +380,7 @@
     <!-- ══════════════════════════════════════════
          TAB: Sales
     ══════════════════════════════════════════ -->
-    <div id="tab-sales" class="tab-pane active">
+    <div id="tab-sales" class="tab-pane{% if role != 'customer_service' %} active{% endif %}">
 
         <div class="card">
             <div class="controls">
@@ -672,8 +676,8 @@
     </div><!-- /tab-dispatch -->
     {% endif %}
 
-    {% if role == 'admin' or role == 'dispatch' %}
-    <div id="tab-admin" class="tab-pane">
+    {% if role == 'admin' or role == 'dispatch' or role == 'customer_service' %}
+    <div id="tab-admin" class="tab-pane{% if role == 'customer_service' %} active{% endif %}">
     <div class="card">
         <div class="card-title">Location Management</div>
         <div id="adminStatus" style="display:none"></div>
@@ -804,7 +808,7 @@
                 });
             }
 
-            if (USER_ROLE === 'admin' || USER_ROLE === 'dispatch') renderAdminTable(data);
+            if (USER_ROLE === 'admin' || USER_ROLE === 'dispatch' || USER_ROLE === 'customer_service') renderAdminTable(data);
         } catch (e) { /* silently ignore */ }
     }
     loadLocations();
@@ -1096,10 +1100,12 @@
                 <td id="lon-${esc(loc.code)}">${loc.lon !== null ? loc.lon : ''}</td>
                 <td>
                     <div class="action-cell">
+                        {% if role == 'admin' or role == 'dispatch' %}
                         <button class="btn btn-secondary btn-sm"
                             onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}', '${loc.lat ?? ''}', '${loc.lon ?? ''}')">
                             Edit
                         </button>
+                        {% endif %}
                         {% if role == 'admin' %}
                         <button class="btn btn-danger btn-sm"
                             onclick="deleteLocation('${esc(loc.code)}', '${esc(loc.name)}')">

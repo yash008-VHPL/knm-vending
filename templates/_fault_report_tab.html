@@ -262,12 +262,19 @@
           +     '<div class="fld"><label>Reported by</label><input type="text" id="frfReportedBy" placeholder="Customer name / contact"></div>'
           +   '</div>'
           +   '<div class="fld"><label>Verbatim report *</label><textarea id="frfDesc" placeholder="What did the customer say? Exact symptoms…"></textarea></div>'
+          +   '<div class="fld"><label>Perceived urgency</label><select id="frfUrgency"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>'
           +   '<div class="row2">'
-          +     '<div class="fld"><label>Perceived urgency</label><select id="frfUrgency"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>'
-          +     '<div class="fld"><label>Event code (6xxxxx — optional)</label><input type="number" id="frfEventCode" min="600000" max="699999" placeholder="6xxxxx"></div>'
+          +     '<div class="fld"><label>Impact severity (optional)</label>'
+          +       '<select id="frfImpactSeverity">'
+          +         '<option value="">—</option>'
+          +         '<option value="1">1 — Minimal</option>'
+          +         '<option value="2">2 — Minor</option>'
+          +         '<option value="3">3 — Moderate</option>'
+          +         '<option value="4">4 — Significant</option>'
+          +         '<option value="5">5 — Critical</option>'
+          +       '</select></div>'
           +   '</div>'
-          +   '<div class="fld"><label>Impact description (optional)</label><textarea id="frfImpactDesc" placeholder="Lost dispenses, refund needed, etc."></textarea></div>'
-          +   '<div class="fld"><label>Impact amount (SGD, optional)</label><input type="number" step="0.01" id="frfImpactAmt" placeholder="0.00"></div>'
+          +   '<div class="fld"><label>Impact description (optional)</label><textarea id="frfImpactDesc" placeholder="What happened — lost dispenses, customer walked away, safety concern, etc."></textarea></div>'
           +   '<div class="fld"><label>Photos</label><div id="frfPhotos" class="fr-img-grid"></div></div>'
           +   '<div class="fr-actionbar">'
           +     '<button class="btn btn-secondary" onclick="window.__frCloseModal()">Cancel</button>'
@@ -317,9 +324,8 @@
             first_reported_at: document.getElementById('frfFirstReported').value || null,
             reported_by:       document.getElementById('frfReportedBy').value.trim() || null,
             perceived_urgency: parseInt(document.getElementById('frfUrgency').value, 10),
-            event_code:        document.getElementById('frfEventCode').value || null,
             impact_description: document.getElementById('frfImpactDesc').value.trim() || null,
-            impact_amount:     document.getElementById('frfImpactAmt').value || null,
+            impact_severity:   document.getElementById('frfImpactSeverity').value || null,
             images:            window.__frPendingPhotos || [],
         };
         postJSON('/api/wo/complaints', body).then(function(res){
@@ -350,7 +356,7 @@
               +   '<div class="fld"><label>Description</label><textarea readonly>' + esc(d.description || '') + '</textarea></div>'
               +   '<div class="row2">'
               +     '<div class="fld"><label>Event code</label><input type="text" readonly value="' + esc(d.event_code || '—') + '"></div>'
-              +     '<div class="fld"><label>Impact amount</label><input type="text" readonly value="' + esc(d.impact_amount==null?'—':('S$ ' + d.impact_amount.toFixed(2))) + '"></div>'
+              +     '<div class="fld"><label>Impact severity</label><input type="text" readonly value="' + esc(d.impact_severity==null?'—':(d.impact_severity + ' / 5')) + '"></div>'
               +   '</div>'
               +   (d.impact_description ? '<div class="fld"><label>Impact description</label><textarea readonly>' + esc(d.impact_description) + '</textarea></div>' : '')
               +   '<div class="fld"><label>Photos</label><div class="fr-img-grid">' + imgs + '</div></div>'

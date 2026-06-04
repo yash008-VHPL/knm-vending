@@ -581,13 +581,33 @@
     window.__tsKBApply = function(idx){
         var k = (state.kbSuggestions || [])[idx];
         if(!k) return;
-        if(k.diagnosis)     document.getElementById('tsWODiag').value = k.diagnosis;
-        if(k.suggested_fix) document.getElementById('tsWOFix').value  = k.suggested_fix;
+
+        // CAR → WO field mapping:
+        //   Symptom + PreventiveAction + Notes      → WO.Notes (composed)
+        //   DiagnosticConfirmation + RootCause       → WO.Diagnosis
+        //   CorrectiveAction                         → WO.ProposedFix
+        //   VerificationOfCompletion → appended as final tickbox
+        var diag = [];
+        if(k.diagnostic_confirmation) diag.push("Diagnostic confirmation: " + k.diagnostic_confirmation);
+        if(k.root_cause)              diag.push("Likely root cause: "       + k.root_cause);
+        if(diag.length) document.getElementById('tsWODiag').value = diag.join("\n\n");
+
+        if(k.corrective_action) document.getElementById('tsWOFix').value = k.corrective_action;
+
+        var notes = [];
+        if(k.symptom)            notes.push("Symptom: "    + k.symptom);
+        if(k.preventive_action)  notes.push("Preventive: " + k.preventive_action);
+        if(notes.length) document.getElementById('tsWONotes').value = notes.join("\n\n");
+
         var c = document.getElementById('tsWOTickboxes');
         c.innerHTML = '';
         (k.tickboxes || []).forEach(function(t){
             addTickboxRow(t.label || '');
         });
+        if(k.verification_of_completion){
+            addTickboxRow("Verify: " + k.verification_of_completion);
+        }
+
         // Mark KB use (best-effort, ignore errors)
         postJSON('/api/wo/kb/' + k.id + '/use', {}).catch(function(){});
     };
