@@ -363,7 +363,9 @@
     <button class="tab-btn"        onclick="switchTab('dispatch', this)">Dispatch</button>
     {% endif %}
     <button class="tab-btn"        onclick="switchTab('fault_report', this); if(window.__frInit) window.__frInit();">Fault Report</button>
+    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
     <button class="tab-btn"        onclick="switchTab('tech_support', this); if(window.__tsInit) window.__tsInit();">Tech Support</button>
+    {% endif %}
     {% if role == 'admin' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('kb_admin', this); if(window.__kbInit) window.__kbInit();">Manage KB</button>
     {% endif %}
@@ -722,9 +724,11 @@
     <div id="tab-fault_report" class="tab-pane">
         {% include "_fault_report_tab.html" %}
     </div>
+    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
     <div id="tab-tech_support" class="tab-pane">
         {% include "_tech_support_tab.html" %}
     </div>
+    {% endif %}
     {% if role == 'admin' or role == 'field_manager' %}
     <div id="tab-kb_admin" class="tab-pane">
         {% include "_kb_admin_tab.html" %}
