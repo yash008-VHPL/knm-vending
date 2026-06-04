@@ -1,0 +1,245 @@
+<!--
+  Test cleanup tab — admin only. Provides cascade-delete for complaints,
+  work orders, KB entries, plus a "Wipe all" button for full data nuke.
+  TEMPORARY: remove this tab after stress-test phase.
+  Namespace: .ad-*
+-->
+
+<style>
+    .ad-section { max-width: 1000px; margin: 24px auto; padding: 0 18px; }
+    .ad-warn {
+        background: #fef2f2; border: 1px solid #fecaca; color: #991b1b;
+        padding: 12px 16px; border-radius: 8px; margin-bottom: 14px;
+        font-size: 0.88rem;
+    }
+    .ad-tabs {
+        display: flex; gap: 4px; border-bottom: 1px solid #e5e7eb; margin-bottom: 14px;
+        flex-wrap: wrap;
+    }
+    .ad-tab {
+        background: none; border: none; padding: 9px 14px;
+        font-weight: 600; color: #6b7280; cursor: pointer;
+        border-bottom: 3px solid transparent; font-size: 0.88rem; margin-bottom: -1px;
+    }
+    .ad-tab:hover { color: #b91c1c; }
+    .ad-tab.active { color: #b91c1c; border-bottom-color: #b91c1c; }
+    .ad-card {
+        background: white; border: 1px solid #e5e7eb; border-radius: 9px;
+        padding: 12px 16px; margin-bottom: 8px;
+        display: flex; justify-content: space-between; gap: 12px; align-items: center;
+    }
+    .ad-card .id   { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; }
+    .ad-card .title { font-weight: 600; color: #111827; font-size: 0.92rem; margin-top: 3px; }
+    .ad-card .sub  { font-size: 0.76rem; color: #6b7280; margin-top: 3px; }
+    .ad-btn-del {
+        background: #b91c1c; color: white; border: none; padding: 7px 14px;
+        border-radius: 6px; font-weight: 700; cursor: pointer; font-size: 0.82rem;
+    }
+    .ad-btn-del:hover { background: #991b1b; }
+    .ad-empty { text-align: center; color: #9ca3af; padding: 30px 10px; font-size: 0.88rem; }
+    .ad-msg { padding: 9px 13px; border-radius: 6px; font-size: 0.84rem; margin-bottom: 10px; }
+    .ad-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .ad-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .ad-msg.ok      { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+    .ad-nuke-box {
+        background: #7f1d1d; color: white; padding: 18px 20px; border-radius: 10px;
+        text-align: center;
+    }
+    .ad-nuke-box h3 { margin: 0 0 6px 0; font-size: 1.05rem; }
+    .ad-nuke-box p  { margin: 0 0 12px 0; font-size: 0.88rem; opacity: 0.9; }
+    .ad-btn-nuke {
+        background: white; color: #7f1d1d; border: 2px solid #fecaca;
+        padding: 11px 24px; border-radius: 8px; font-weight: 700;
+        cursor: pointer; font-size: 0.95rem;
+    }
+    .ad-btn-nuke:hover { background: #fef2f2; }
+</style>
+
+<div class="ad-section">
+    <div class="ad-warn">
+        ⚠ <strong>Test data cleanup.</strong> Deleting cascades: complaint → its WO → tasks → images.
+        SharePoint files (ComplaintUploads / WorkOrderUploads) also removed.
+        Admin only. Remove this tab after stress testing.
+    </div>
+
+    <div class="ad-tabs">
+        <button class="ad-tab active" id="adTabCompl" onclick="window.__adSwitch('compl')">Complaints</button>
+        <button class="ad-tab"        id="adTabWO"   onclick="window.__adSwitch('wo')">Work Orders</button>
+        <button class="ad-tab"        id="adTabKB"   onclick="window.__adSwitch('kb')">KB Entries</button>
+        <button class="ad-tab"        id="adTabNuke" onclick="window.__adSwitch('nuke')">Wipe All</button>
+    </div>
+
+    <div id="adMsg"></div>
+    <div id="adContent"></div>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = { currentTab: 'compl', loaded: false };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.json().then(function(d){
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        });
+    }
+    function postJSON(url, body, method){
+        return api(url, {
+            method: method || 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {}),
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
+    function showMsg(html, cls){
+        document.getElementById('adMsg').innerHTML = html ? '<div class="ad-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+
+    window.__adInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        window.__adSwitch('compl');
+    };
+
+    window.__adSwitch = function(tab){
+        document.querySelectorAll('.ad-tab').forEach(function(b){ b.classList.remove('active'); });
+        var btnMap = { compl:'adTabCompl', wo:'adTabWO', kb:'adTabKB', nuke:'adTabNuke' };
+        document.getElementById(btnMap[tab]).classList.add('active');
+        state.currentTab = tab;
+        if(tab === 'compl')      loadComplaints();
+        else if(tab === 'wo')    loadWOs();
+        else if(tab === 'kb')    loadKBs();
+        else if(tab === 'nuke')  renderNuke();
+    };
+
+    // ── Complaints ──
+    function loadComplaints(){
+        showMsg('Loading…', 'loading');
+        api('/api/wo/complaints?scope=all&status=all').then(function(rows){
+            showMsg('', '');
+            if(!rows.length){
+                document.getElementById('adContent').innerHTML = '<div class="ad-empty">No complaints in DB.</div>';
+                return;
+            }
+            document.getElementById('adContent').innerHTML = rows.map(function(c){
+                return ''
+                  + '<div class="ad-card">'
+                  +   '<div>'
+                  +     '<div class="id">' + esc(c.display_id || '#' + c.id) + '</div>'
+                  +     '<div class="title">' + esc((c.description || '').slice(0, 90)) + '</div>'
+                  +     '<div class="sub">' + esc(c.machine_name || '?') + ' · ' + esc(c.submitter) + ' · ' + fmtDT(c.submitted_at)
+                  +       (c.job_order_id ? ' · linked WO #' + c.job_order_id : '') + '</div>'
+                  +   '</div>'
+                  +   '<button class="ad-btn-del" onclick="window.__adDelCompl(' + c.id + ', \'' + esc(c.display_id || ('#' + c.id)) + '\')">Delete</button>'
+                  + '</div>';
+            }).join('');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    }
+
+    window.__adDelCompl = function(id, label){
+        if(!confirm('Delete ' + label + ' and ALL linked data (WO if any, tasks, images on disk + SP)?')) return;
+        api('/api/wo/admin/complaint/' + id, { method: 'DELETE' }).then(function(res){
+            showMsg('Deleted ' + label + ' — ' + (res.sp_deleted || 0) + ' SP file(s) removed.', 'ok');
+            loadComplaints();
+        }).catch(function(e){ showMsg('Delete failed: ' + esc(e.message), 'error'); });
+    };
+
+    // ── Work Orders ──
+    function loadWOs(){
+        showMsg('Loading…', 'loading');
+        api('/api/wo/joborders?scope=all&status=all').then(function(rows){
+            showMsg('', '');
+            if(!rows.length){
+                document.getElementById('adContent').innerHTML = '<div class="ad-empty">No work orders in DB.</div>';
+                return;
+            }
+            document.getElementById('adContent').innerHTML = rows.map(function(j){
+                return ''
+                  + '<div class="ad-card">'
+                  +   '<div>'
+                  +     '<div class="id">' + esc(j.display_id || '#' + j.id) + '</div>'
+                  +     '<div class="title">' + esc(j.machine_name || '?') + '</div>'
+                  +     '<div class="sub">' + esc(j.assigned_to || '(unassigned)') + ' · ' + esc(j.status_label) + ' · ' + fmtDT(j.created_at)
+                  +       (j.complaint_id ? ' · from complaint #' + j.complaint_id : '') + '</div>'
+                  +   '</div>'
+                  +   '<button class="ad-btn-del" onclick="window.__adDelWO(' + j.id + ', \'' + esc(j.display_id || ('#' + j.id)) + '\')">Delete</button>'
+                  + '</div>';
+            }).join('');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    }
+
+    window.__adDelWO = function(id, label){
+        if(!confirm('Delete WO ' + label + ' (tasks + images + activity)? The linked complaint (if any) reverts to "fresh".')) return;
+        api('/api/wo/admin/joborder/' + id, { method: 'DELETE' }).then(function(res){
+            showMsg('Deleted ' + label + ' — ' + (res.sp_deleted || 0) + ' SP file(s) removed.', 'ok');
+            loadWOs();
+        }).catch(function(e){ showMsg('Delete failed: ' + esc(e.message), 'error'); });
+    };
+
+    // ── KB Entries ──
+    function loadKBs(){
+        showMsg('Loading…', 'loading');
+        api('/api/wo/kb').then(function(rows){
+            showMsg('', '');
+            if(!rows.length){
+                document.getElementById('adContent').innerHTML = '<div class="ad-empty">No KB entries.</div>';
+                return;
+            }
+            document.getElementById('adContent').innerHTML = rows.map(function(k){
+                return ''
+                  + '<div class="ad-card">'
+                  +   '<div>'
+                  +     '<div class="title">' + esc(k.title || '(untitled)') + '</div>'
+                  +     '<div class="sub">' + (k.event_code ? 'event ' + k.event_code : 'no event code') + ' · used ' + k.use_count + 'x · ' + (k.tickboxes || []).length + ' tickboxes</div>'
+                  +   '</div>'
+                  +   '<button class="ad-btn-del" onclick="window.__adDelKB(' + k.id + ', \'' + esc(k.title || ('KB#' + k.id)) + '\')">Delete</button>'
+                  + '</div>';
+            }).join('');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    }
+
+    window.__adDelKB = function(id, label){
+        if(!confirm('Delete KB entry "' + label + '" (and its tickboxes)?')) return;
+        api('/api/wo/kb/' + id, { method: 'DELETE' }).then(function(){
+            showMsg('Deleted "' + label + '".', 'ok');
+            loadKBs();
+        }).catch(function(e){ showMsg('Delete failed: ' + esc(e.message), 'error'); });
+    };
+
+    // ── Wipe All ──
+    function renderNuke(){
+        document.getElementById('adContent').innerHTML = ''
+          + '<div class="ad-nuke-box">'
+          +   '<h3>⚠ Wipe ALL fault report + work order data</h3>'
+          +   '<p>Deletes every complaint, WO, task, image, and activity row. SharePoint files removed too.<br>'
+          +     '<strong>Per-month counters reset</strong> so the next ticket starts at NNNN=0001.<br>'
+          +     'Knowledge Base is preserved by default (use the checkbox below to include it).</p>'
+          +   '<div style="margin-bottom:10px;font-size:0.88rem">'
+          +     '<label><input type="checkbox" id="adNukeKB"> Also delete all KB entries</label>'
+          +   '</div>'
+          +   '<button class="ad-btn-nuke" onclick="window.__adNuke()">I understand — Wipe Everything</button>'
+          + '</div>';
+    }
+
+    window.__adNuke = function(){
+        var txt = prompt('Type WIPE (uppercase) to confirm full data wipe:');
+        if(txt !== 'WIPE'){ alert('Aborted.'); return; }
+        var includeKB = !!document.getElementById('adNukeKB').checked;
+        showMsg('Wiping…', 'loading');
+        postJSON('/api/wo/admin/wipe-all', { include_kb: includeKB, reset_counters: true }).then(function(res){
+            showMsg('Wipe complete — ' + (res.sp_deleted || 0) + ' SP file(s) removed.', 'ok');
+        }).catch(function(e){ showMsg('Wipe failed: ' + esc(e.message), 'error'); });
+    };
+
+})();
+</script>

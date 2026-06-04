@@ -1581,6 +1581,144 @@ def api_kb_use(kid):
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+# ── Admin: test-data cleanup (admin only, remove after stress test) ───────────
+
+def _cascade_delete_joborder(cursor, jid):
+    """Delete a WO and everything attached. Returns list of SP item IDs to remove."""
+    sp_ids = []
+    # WO-direct images
+    cursor.execute(
+        "SELECT SPItemID FROM WO_Images WHERE ParentType='joborder' AND ParentID=%s",
+        (jid,),
+    )
+    sp_ids.extend([r[0] for r in cursor.fetchall() if r[0]])
+    cursor.execute(
+        "DELETE FROM WO_Images WHERE ParentType='joborder' AND ParentID=%s",
+        (jid,),
+    )
+    # Task images
+    cursor.execute("""
+        SELECT i.SPItemID FROM WO_Images i
+        INNER JOIN WO_JobOrderTasks t ON t.TaskID = i.ParentID
+        WHERE i.ParentType='task' AND t.JobOrderID = %s
+    """, (jid,))
+    sp_ids.extend([r[0] for r in cursor.fetchall() if r[0]])
+    cursor.execute("""
+        DELETE FROM WO_Images WHERE ParentType='task' AND ParentID IN
+            (SELECT TaskID FROM WO_JobOrderTasks WHERE JobOrderID = %s)
+    """, (jid,))
+    # Tasks, activity, complaint unlink, the WO
+    cursor.execute("DELETE FROM WO_JobOrderTasks WHERE JobOrderID=%s", (jid,))
+    cursor.execute(
+        "DELETE FROM WO_Activity WHERE ParentType='joborder' AND ParentID=%s",
+        (jid,),
+    )
+    cursor.execute(
+        "UPDATE WO_Complaints SET JobOrderID=NULL, StatusCode=0 WHERE JobOrderID=%s",
+        (jid,),
+    )
+    cursor.execute("DELETE FROM WO_JobOrders WHERE JobOrderID=%s", (jid,))
+    return sp_ids
+
+
+def _cascade_delete_complaint(cursor, cid):
+    """Delete a complaint, its linked WO (if any), and all children."""
+    sp_ids = []
+    cursor.execute("SELECT JobOrderID FROM WO_Complaints WHERE ComplaintID=%s", (cid,))
+    row = cursor.fetchone()
+    if row and row[0]:
+        sp_ids.extend(_cascade_delete_joborder(cursor, int(row[0])))
+    cursor.execute(
+        "SELECT SPItemID FROM WO_Images WHERE ParentType='complaint' AND ParentID=%s",
+        (cid,),
+    )
+    sp_ids.extend([r[0] for r in cursor.fetchall() if r[0]])
+    cursor.execute(
+        "DELETE FROM WO_Images WHERE ParentType='complaint' AND ParentID=%s",
+        (cid,),
+    )
+    cursor.execute(
+        "DELETE FROM WO_Activity WHERE ParentType='complaint' AND ParentID=%s",
+        (cid,),
+    )
+    cursor.execute("DELETE FROM WO_Complaints WHERE ComplaintID=%s", (cid,))
+    return sp_ids
+
+
+def _delete_sp_items(sp_ids):
+    """Best-effort SP cleanup. Failures logged but not raised."""
+    for sp_id in sp_ids:
+        if not sp_id:
+            continue
+        try:
+            sp.delete_item(sp_id)
+        except Exception as e:
+            print(f"[admin_delete] SP delete failed for {sp_id}: {e}")
+
+
+@workorders_bp.route("/admin/complaint/<int:cid>", methods=["DELETE"])
+@require_roles(ROLE_ADMIN)
+def api_admin_delete_complaint(cid):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        sp_ids = _cascade_delete_complaint(cursor, cid)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Delete failed: {str(e)}"}), 500
+    _delete_sp_items(sp_ids)
+    return jsonify({"ok": True, "sp_deleted": len(sp_ids)})
+
+
+@workorders_bp.route("/admin/joborder/<int:jid>", methods=["DELETE"])
+@require_roles(ROLE_ADMIN)
+def api_admin_delete_joborder(jid):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        sp_ids = _cascade_delete_joborder(cursor, jid)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Delete failed: {str(e)}"}), 500
+    _delete_sp_items(sp_ids)
+    return jsonify({"ok": True, "sp_deleted": len(sp_ids)})
+
+
+@workorders_bp.route("/admin/wipe-all", methods=["POST"])
+@require_roles(ROLE_ADMIN)
+def api_admin_wipe_all():
+    """Nuke ALL fault report + WO data. Preserves KB unless include_kb=true.
+    Resets WO_Counters unless include_counters=false.
+    Body: {include_kb: bool, reset_counters: bool}"""
+    data = request.get_json(silent=True) or {}
+    include_kb     = bool(data.get("include_kb", False))
+    reset_counters = bool(data.get("reset_counters", True))
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT SPItemID FROM WO_Images WHERE SPItemID IS NOT NULL")
+        sp_ids = [r[0] for r in cursor.fetchall()]
+        cursor.execute("DELETE FROM WO_Images")
+        cursor.execute("DELETE FROM WO_Activity")
+        cursor.execute("DELETE FROM WO_JobOrderTasks")
+        cursor.execute("UPDATE WO_Complaints SET JobOrderID=NULL")  # break FK first
+        cursor.execute("DELETE FROM WO_JobOrders")
+        cursor.execute("DELETE FROM WO_Complaints")
+        if include_kb:
+            cursor.execute("DELETE FROM WO_KB_Tickboxes")
+            cursor.execute("DELETE FROM WO_KB_Entries")
+        if reset_counters:
+            cursor.execute("DELETE FROM WO_Counters")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Wipe failed: {str(e)}"}), 500
+    _delete_sp_items(sp_ids)
+    return jsonify({"ok": True, "sp_deleted": len(sp_ids)})
+
+
 # ── Images (SP-backed proxy) ──────────────────────────────────────────────────
 
 @workorders_bp.route("/images", methods=["POST"])

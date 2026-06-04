@@ -373,6 +373,9 @@
     {% if role == 'admin' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('kb_admin', this); if(window.__kbInit) window.__kbInit();">Manage KB</button>
     {% endif %}
+    {% if role == 'admin' %}
+    <button class="tab-btn" style="color:#b91c1c" onclick="switchTab('admin_delete', this); if(window.__adInit) window.__adInit();">🗑 Test Cleanup</button>
+    {% endif %}
 </div>
 
 <div class="container">
@@ -736,6 +739,11 @@
     {% if role == 'admin' or role == 'field_manager' %}
     <div id="tab-kb_admin" class="tab-pane">
         {% include "_kb_admin_tab.html" %}
+    </div>
+    {% endif %}
+    {% if role == 'admin' %}
+    <div id="tab-admin_delete" class="tab-pane">
+        {% include "_admin_delete_tab.html" %}
     </div>
     {% endif %}
 
