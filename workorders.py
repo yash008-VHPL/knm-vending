@@ -140,7 +140,12 @@ def init_workorders_db():
                 ReportedBy        NVARCHAR(255)  NULL,
                 EventCode         INT            NULL,
                 PerceivedUrgency  TINYINT        NOT NULL DEFAULT 1,
-                DisplayID         NVARCHAR(30)   NULL
+                DisplayID         NVARCHAR(30)   NULL,
+                RefundIssued      BIT            NOT NULL DEFAULT 0,
+                ClosedReason      NVARCHAR(255)  NULL,
+                ClosedBy          NVARCHAR(255)  NULL,
+                ClosedAt          DATETIME2      NULL,
+                GroupID           INT            NULL
             )
         """),
         ("WO_JobOrders", """
@@ -661,6 +666,9 @@ def api_complaint_create():
         except (TypeError, ValueError):
             return jsonify({"error": "Impact severity must be an integer 1-5."}), 400
 
+    # Refund issued flag (CS rep can tick at submission; does NOT close).
+    refund_issued = bool(data.get("refund_issued"))
+
     machine_name = (data.get("machine_name") or "").strip() or None
     machine_code = (data.get("machine_code") or "").strip() or None
     reported_by  = (data.get("reported_by") or "").strip() or None
@@ -716,15 +724,15 @@ def api_complaint_create():
                 (Description, Source, ImpactDescription, ImpactSeverity,
                  MachineName, MachineCode, SubmitterEmail,
                  FirstReportedAt, ReportedBy, EventCode, PerceivedUrgency,
-                 StatusCode, DisplayID)
+                 StatusCode, DisplayID, RefundIssued)
             OUTPUT INSERTED.ComplaintID
             VALUES (%s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s,
-                    0, %s)
+                    0, %s, %s)
         """, (desc, source, impact_desc, impact_severity,
               machine_name, machine_code, user,
               first_reported_at, reported_by, event_code, urgency,
-              display_id))
+              display_id, 1 if refund_issued else 0))
         new_id = int(cursor.fetchone()[0])
 
         _log_activity(cursor, "complaint", new_id, "submitted",
@@ -781,6 +789,7 @@ def api_complaint_list():
             StatusCode, JobOrderID,
             SubmitterEmail, SubmittedAt,
             FirstReportedAt, ReportedBy, EventCode, PerceivedUrgency,
+            RefundIssued, GroupID, ClosedReason, ClosedBy, ClosedAt,
             (SELECT COUNT(*) FROM WO_Images
                 WHERE ParentType='complaint' AND ParentID = wc.ComplaintID) AS ImgCount
         FROM WO_Complaints wc
@@ -807,7 +816,12 @@ def api_complaint_list():
             "event_code": int(r[14]) if r[14] is not None else None,
             "perceived_urgency_code":  int(r[15]),
             "perceived_urgency_label": _label(PRIORITY, r[15]),
-            "image_count": int(r[16]),
+            "refund_issued": bool(r[16]),
+            "group_id":      int(r[17]) if r[17] is not None else None,
+            "closed_reason": r[18],
+            "closed_by":     r[19],
+            "closed_at":     _iso(r[20]),
+            "image_count":   int(r[21]),
         } for r in rows])
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
@@ -825,7 +839,8 @@ def api_complaint_detail(cid):
                    MachineName, MachineCode,
                    StatusCode, JobOrderID,
                    SubmitterEmail, SubmittedAt,
-                   FirstReportedAt, ReportedBy, EventCode, PerceivedUrgency
+                   FirstReportedAt, ReportedBy, EventCode, PerceivedUrgency,
+                   RefundIssued, GroupID, ClosedReason, ClosedBy, ClosedAt
             FROM WO_Complaints WHERE ComplaintID = %s
         """, (cid,))
         row = cursor.fetchone()
@@ -851,8 +866,150 @@ def api_complaint_detail(cid):
         "event_code": int(row[14]) if row[14] is not None else None,
         "perceived_urgency_code":  int(row[15]),
         "perceived_urgency_label": _label(PRIORITY, row[15]),
+        "refund_issued": bool(row[16]),
+        "group_id":      int(row[17]) if row[17] is not None else None,
+        "closed_reason": row[18],
+        "closed_by":     row[19],
+        "closed_at":     _iso(row[20]),
         "images": images, "activity": activity,
     })
+
+
+# ── Complaint actions: refund flag, manager close, link group, suggestions ────
+
+@workorders_bp.route("/complaints/<int:cid>/refund", methods=["POST"])
+@api_login_required
+def api_complaint_refund(cid):
+    """CS rep toggles RefundIssued. Does NOT close the complaint.
+    Body: {refund_issued: bool}"""
+    data = request.get_json(silent=True) or {}
+    flag = bool(data.get("refund_issued"))
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE WO_Complaints SET RefundIssued = %s WHERE ComplaintID = %s",
+            (1 if flag else 0, cid),
+        )
+        _log_activity(cursor, "complaint", cid, "refund_flag",
+                      f"refund_issued = {flag}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "refund_issued": flag})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/complaints/close", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_complaint_close():
+    """Manager-only. Bulk-close fresh complaints (no WO needed).
+    Body: {complaint_ids: [int, ...], reason: str}"""
+    data = request.get_json(silent=True) or {}
+    ids = data.get("complaint_ids") or []
+    reason = (data.get("reason") or "").strip() or "Closed by manager"
+    if not isinstance(ids, list) or not ids:
+        return jsonify({"error": "complaint_ids list required."}), 400
+    try:
+        ids = [int(i) for i in ids]
+    except (TypeError, ValueError):
+        return jsonify({"error": "complaint_ids must be integers."}), 400
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        ph = ",".join(["%s"] * len(ids))
+        cursor.execute(f"""
+            UPDATE WO_Complaints
+            SET StatusCode = 2,
+                ClosedReason = %s,
+                ClosedBy = %s,
+                ClosedAt = SYSUTCDATETIME()
+            WHERE ComplaintID IN ({ph}) AND StatusCode <> 2
+        """, (reason, user, *ids))
+        for cid in ids:
+            _log_activity(cursor, "complaint", cid, "closed",
+                          f"manager close: {reason}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "closed_count": len(ids)})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/complaints/link", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_complaint_link():
+    """Manager-only. Link multiple complaints into one issue group.
+    GroupID = smallest ComplaintID in the selection (or current GroupID if any).
+    Body: {complaint_ids: [int, ...]}"""
+    data = request.get_json(silent=True) or {}
+    ids = data.get("complaint_ids") or []
+    if not isinstance(ids, list) or len(ids) < 2:
+        return jsonify({"error": "Need 2+ complaint_ids to link."}), 400
+    try:
+        ids = sorted({int(i) for i in ids})
+    except (TypeError, ValueError):
+        return jsonify({"error": "complaint_ids must be integers."}), 400
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        ph = ",".join(["%s"] * len(ids))
+        # If any selected complaint already belongs to a group, adopt the smallest existing GroupID
+        cursor.execute(
+            f"SELECT MIN(ISNULL(GroupID, ComplaintID)) FROM WO_Complaints WHERE ComplaintID IN ({ph})",
+            tuple(ids),
+        )
+        group_id = int(cursor.fetchone()[0])
+        cursor.execute(f"""
+            UPDATE WO_Complaints SET GroupID = %s
+            WHERE ComplaintID IN ({ph})
+        """, (group_id, *ids))
+        for cid in ids:
+            _log_activity(cursor, "complaint", cid, "linked",
+                          f"Linked into group {group_id}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "group_id": group_id, "linked_count": len(ids)})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/complaints/oneoff-suggestions")
+@require_roles(*MANAGER_ROLES)
+def api_complaint_oneoff_suggestions():
+    """Manager-only. Returns fresh complaints >48h old where the same MachineCode
+    has had NO subsequent complaints (i.e. likely a one-off worth closing)."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.ComplaintID, c.DisplayID, c.MachineName, c.MachineCode,
+                   c.Description, c.SubmittedAt, c.RefundIssued
+            FROM WO_Complaints c
+            WHERE c.StatusCode = 0
+              AND c.SubmittedAt < DATEADD(hour, -48, SYSUTCDATETIME())
+              AND NOT EXISTS (
+                  SELECT 1 FROM WO_Complaints c2
+                  WHERE c2.MachineCode = c.MachineCode
+                    AND c2.ComplaintID <> c.ComplaintID
+                    AND c2.SubmittedAt > c.SubmittedAt
+              )
+            ORDER BY c.SubmittedAt
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([{
+            "id": r[0], "display_id": r[1],
+            "machine_name": r[2], "machine_code": r[3],
+            "description": (r[4] or "")[:160],
+            "submitted_at": _iso(r[5]),
+            "refund_issued": bool(r[6]),
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
 # ── Job Orders  →  "Tech Support" tab ─────────────────────────────────────────
@@ -967,14 +1124,34 @@ def api_joborder_create():
                 VALUES (%s, %s, %s, 0)
             """, (new_id, i + 1, label[:500]))
 
-        # If created from complaint, mark complaint as assigned
+        # If created from complaint, mark it (and ALL group-linked complaints) as assigned
         if complaint_id:
-            cursor.execute("""
-                UPDATE WO_Complaints SET JobOrderID = %s, StatusCode = 1
-                WHERE ComplaintID = %s
-            """, (new_id, complaint_id))
-            _log_activity(cursor, "complaint", complaint_id, "linked",
-                          f"Linked to {display_id}", user)
+            cursor.execute(
+                "SELECT GroupID FROM WO_Complaints WHERE ComplaintID = %s",
+                (complaint_id,),
+            )
+            grow = cursor.fetchone()
+            group_id = int(grow[0]) if (grow and grow[0] is not None) else None
+            if group_id is not None:
+                cursor.execute("""
+                    UPDATE WO_Complaints SET JobOrderID = %s, StatusCode = 1
+                    WHERE GroupID = %s
+                """, (new_id, group_id))
+                cursor.execute(
+                    "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s",
+                    (group_id,),
+                )
+                linked_ids = [r[0] for r in cursor.fetchall()]
+                for cid in linked_ids:
+                    _log_activity(cursor, "complaint", cid, "linked",
+                                  f"Group {group_id} → {display_id}", user)
+            else:
+                cursor.execute("""
+                    UPDATE WO_Complaints SET JobOrderID = %s, StatusCode = 1
+                    WHERE ComplaintID = %s
+                """, (new_id, complaint_id))
+                _log_activity(cursor, "complaint", complaint_id, "linked",
+                              f"Linked to {display_id}", user)
 
         conn.commit()
         conn.close()
@@ -1317,12 +1494,40 @@ def api_joborder_review(jid):
         new_display = None
         if decision == "accept":
             if complaint_id:
+                # If complaint is in a group, close ALL complaints in that group
                 cursor.execute(
-                    "UPDATE WO_Complaints SET StatusCode = 2 WHERE ComplaintID = %s",
+                    "SELECT GroupID FROM WO_Complaints WHERE ComplaintID = %s",
                     (complaint_id,),
                 )
-                _log_activity(cursor, "complaint", complaint_id, "closed",
-                              f"Closed via accept of {old_display}", user)
+                grow = cursor.fetchone()
+                group_id = int(grow[0]) if (grow and grow[0] is not None) else None
+                if group_id is not None:
+                    cursor.execute("""
+                        UPDATE WO_Complaints
+                        SET StatusCode = 2,
+                            ClosedReason = %s,
+                            ClosedBy = %s,
+                            ClosedAt = SYSUTCDATETIME()
+                        WHERE GroupID = %s
+                    """, (f"Resolved via {old_display}", user, group_id))
+                    cursor.execute(
+                        "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s",
+                        (group_id,),
+                    )
+                    for r in cursor.fetchall():
+                        _log_activity(cursor, "complaint", r[0], "closed",
+                                      f"Group close via accept of {old_display}", user)
+                else:
+                    cursor.execute("""
+                        UPDATE WO_Complaints
+                        SET StatusCode = 2,
+                            ClosedReason = %s,
+                            ClosedBy = %s,
+                            ClosedAt = SYSUTCDATETIME()
+                        WHERE ComplaintID = %s
+                    """, (f"Resolved via {old_display}", user, complaint_id))
+                    _log_activity(cursor, "complaint", complaint_id, "closed",
+                                  f"Closed via accept of {old_display}", user)
         else:
             # reject: create a new WO inheriting the complaint linkage
             new_display = allocate_display_id(cursor, "WkO")
@@ -1344,13 +1549,33 @@ def api_joborder_review(jid):
             _log_activity(cursor, "joborder", new_wo_id, "created",
                           f"Created as follow-up to {old_display}", user)
             if complaint_id:
-                cursor.execute("""
-                    UPDATE WO_Complaints
-                    SET JobOrderID = %s, StatusCode = 1
-                    WHERE ComplaintID = %s
-                """, (new_wo_id, complaint_id))
-                _log_activity(cursor, "complaint", complaint_id, "rerouted",
-                              f"Linked to follow-up {new_display}", user)
+                # Group propagation: re-link entire group to the new follow-up WO.
+                cursor.execute(
+                    "SELECT GroupID FROM WO_Complaints WHERE ComplaintID = %s",
+                    (complaint_id,),
+                )
+                grow = cursor.fetchone()
+                group_id = int(grow[0]) if (grow and grow[0] is not None) else None
+                if group_id is not None:
+                    cursor.execute("""
+                        UPDATE WO_Complaints SET JobOrderID = %s, StatusCode = 1
+                        WHERE GroupID = %s
+                    """, (new_wo_id, group_id))
+                    cursor.execute(
+                        "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s",
+                        (group_id,),
+                    )
+                    for r in cursor.fetchall():
+                        _log_activity(cursor, "complaint", r[0], "rerouted",
+                                      f"Group {group_id} → follow-up {new_display}", user)
+                else:
+                    cursor.execute("""
+                        UPDATE WO_Complaints
+                        SET JobOrderID = %s, StatusCode = 1
+                        WHERE ComplaintID = %s
+                    """, (new_wo_id, complaint_id))
+                    _log_activity(cursor, "complaint", complaint_id, "rerouted",
+                                  f"Linked to follow-up {new_display}", user)
 
         conn.commit()
         conn.close()

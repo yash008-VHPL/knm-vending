@@ -148,18 +148,69 @@
     }
     .ts-triage.collapsed .triage-body { display: none; }
     .ts-triage .triage-body { margin-top: 10px; }
+
+    .ts-triage-actions {
+        display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+        margin-bottom: 8px; padding: 6px 0;
+    }
+    .ts-triage-actions button {
+        padding: 6px 12px; border-radius: 5px; border: none;
+        font-size: 0.8rem; font-weight: 700; cursor: pointer;
+    }
+    .ts-triage-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .ts-tri-btn-link  { background: #1a56db; color: white; }
+    .ts-tri-btn-close { background: #15803d; color: white; }
+    .ts-tri-sel-count { font-size: 0.78rem; color: #92400e; font-weight: 600; }
+
     .ts-triage-row {
         background: white; border: 1px solid #fde68a; border-radius: 8px;
         padding: 10px 12px; margin-bottom: 6px;
+        display: flex; gap: 10px; align-items: flex-start;
+    }
+    .ts-triage-row .chk { padding-top: 3px; }
+    .ts-triage-row .chk input { width: 18px; height: 18px; cursor: pointer; }
+    .ts-triage-row .left { flex: 1; min-width: 0; }
+    .ts-triage-row .right {
+        text-align: right; min-width: 180px; max-width: 250px;
+        display: flex; flex-direction: column; gap: 4px; align-items: flex-end;
     }
     .ts-triage-row .id { font-family: ui-monospace, monospace; font-size: 0.74rem; color: #92400e; }
     .ts-triage-row .desc { font-size: 0.88rem; color: #111827; margin-top: 3px; }
-    .ts-triage-row .sub { font-size: 0.74rem; color: #92400e; margin-top: 3px; }
-    .ts-triage-row .right { display: flex; gap: 6px; align-items: center; margin-top: 6px; }
-    .ts-triage-row .triage-btn {
-        padding: 6px 12px; border-radius: 5px; border: none; background: #b45309; color: white;
-        font-size: 0.8rem; font-weight: 700; cursor: pointer;
+    .ts-triage-row .submeta { font-size: 0.74rem; color: #92400e; margin-top: 3px; }
+    .ts-triage-row .right .machine-name {
+        font-weight: 700; color: #111827; font-size: 0.95rem;
+        line-height: 1.2; text-align: right;
     }
+    .ts-triage-row .right .machine-code {
+        font-family: ui-monospace, monospace; font-size: 0.72rem; color: #6b7280;
+    }
+    .ts-triage-row .right .row-actions { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; justify-content: flex-end; }
+    .ts-triage-row .triage-btn {
+        padding: 5px 10px; border-radius: 5px; border: none; background: #b45309; color: white;
+        font-size: 0.76rem; font-weight: 700; cursor: pointer;
+    }
+    .ts-triage-row .triage-btn.close {
+        background: #f3f4f6; color: #374151; border: 1px solid #d1d5db !important;
+    }
+    .ts-tri-mini-badge {
+        font-size: 0.62rem; font-weight: 700; padding: 1px 6px; border-radius: 10px; white-space: nowrap;
+    }
+
+    /* One-off suggestion popup */
+    .ts-oneoff {
+        display: none; position: fixed; bottom: 18px; right: 18px; z-index: 105;
+        background: white; border: 2px solid #b45309; border-radius: 11px;
+        padding: 14px 16px; max-width: 360px; box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+    }
+    .ts-oneoff.open { display: block; }
+    .ts-oneoff h4 { margin: 0 0 6px 0; font-size: 0.92rem; color: #92400e; }
+    .ts-oneoff .body { font-size: 0.85rem; color: #374151; margin-bottom: 10px; }
+    .ts-oneoff .meta { font-family: ui-monospace, monospace; font-size: 0.72rem; color: #6b7280; }
+    .ts-oneoff .actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .ts-oneoff button { padding: 6px 12px; border-radius: 6px; border: none; font-weight: 700; font-size: 0.82rem; cursor: pointer; }
+    .ts-oneoff .skip   { background: #f3f4f6; color: #374151; }
+    .ts-oneoff .later  { background: #fef3c7; color: #92400e; }
+    .ts-oneoff .close  { background: #15803d; color: white; }
 
     /* Create-WO modal (reuses .ts-prompt-box pattern, bigger) */
     .ts-wo-modal {
@@ -218,7 +269,25 @@
             <span>⚠ Open Complaints — Triage</span>
             <span class="count" id="tsTriageCount">0</span>
         </h3>
-        <div class="triage-body" id="tsTriageList"></div>
+        <div class="triage-body">
+            <div class="ts-triage-actions">
+                <span class="ts-tri-sel-count" id="tsTriSelCount">0 selected</span>
+                <button class="ts-tri-btn-link"  id="tsTriLinkBtn"  disabled onclick="window.__tsTriLink()">🔗 Link selected</button>
+                <button class="ts-tri-btn-close" id="tsTriCloseBtn" disabled onclick="window.__tsTriCloseSelected()">✓ Close as one-off</button>
+            </div>
+            <div id="tsTriageList"></div>
+        </div>
+    </div>
+
+    <!-- One-off suggestion popup (manager only, after 48h rule check) -->
+    <div id="tsOneoff" class="ts-oneoff">
+        <h4>Suggested one-off close</h4>
+        <div class="body" id="tsOneoffBody"></div>
+        <div class="actions">
+            <button class="skip"  onclick="window.__tsOneoffSkip()">Skip</button>
+            <button class="later" onclick="window.__tsOneoffLater()">Keep open</button>
+            <button class="close" onclick="window.__tsOneoffClose()">Close as one-off</button>
+        </div>
     </div>
 
     <div class="ts-toolbar">
@@ -315,6 +384,7 @@
             if(isManager()){
                 document.getElementById('tsTriage').style.display = 'block';
                 loadTriage();
+                loadOneoffSuggestions();
             }
             window.__tsRefresh();
         }).catch(function(e){ showMsg(esc(e.message), 'error'); });
@@ -333,23 +403,133 @@
         if(!rows.length){
             document.getElementById('tsTriageList').innerHTML =
                 '<div style="color:#92400e;font-size:0.84rem;padding:8px 4px">No fresh complaints. ✓</div>';
+            updateTriSelCount();
             return;
         }
+        // Group complaints by GroupID; ungrouped each become their own pseudo-group.
         document.getElementById('tsTriageList').innerHTML = rows.map(function(c){
+            var refundBadge = c.refund_issued
+                ? '<span class="ts-tri-mini-badge" style="background:#fef9c3;color:#78350f">💵 Refund</span>' : '';
+            var groupBadge = c.group_id
+                ? '<span class="ts-tri-mini-badge" style="background:#e0e7ff;color:#3730a3">🔗 Grp ' + c.group_id + '</span>' : '';
             return ''
               + '<div class="ts-triage-row">'
-              +   '<div class="id">' + esc(c.display_id || '#' + c.id) + '</div>'
-              +   '<div class="desc">' + esc((c.description || '').slice(0, 140)) + '</div>'
-              +   '<div class="sub">' + esc(c.machine_name || '(no machine)') + ' · '
-              +     esc(c.perceived_urgency_label) + ' urgency · ' + esc(c.submitter) + '</div>'
+              +   '<div class="chk"><input type="checkbox" data-cid="' + c.id + '" onchange="window.__tsTriSelChange()"></div>'
+              +   '<div class="left">'
+              +     '<div class="id">' + esc(c.display_id || '#' + c.id) + '</div>'
+              +     '<div class="desc">' + esc((c.description || '').slice(0, 160)) + '</div>'
+              +     '<div class="submeta">' + esc(c.perceived_urgency_label) + ' urgency · ' + esc(c.submitter) + ' · ' + fmtDT(c.submitted_at) + '</div>'
+              +   '</div>'
               +   '<div class="right">'
-              +     '<button class="triage-btn" onclick="window.__tsOpenCreateWO(' + c.id + ')">Create WO</button>'
+              +     '<div class="machine-name">' + esc(c.machine_name || '(no machine)') + '</div>'
+              +     '<div class="machine-code">' + esc(c.machine_code || '') + '</div>'
+              +     '<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap;justify-content:flex-end">'
+              +       refundBadge + groupBadge
+              +     '</div>'
+              +     '<div class="row-actions">'
+              +       '<button class="triage-btn close" onclick="window.__tsTriCloseOne(' + c.id + ', \'' + esc(c.display_id || ('#' + c.id)) + '\')">Close</button>'
+              +       '<button class="triage-btn"       onclick="window.__tsOpenCreateWO(' + c.id + ')">Create WO</button>'
+              +     '</div>'
               +   '</div>'
               + '</div>';
         }).join('');
+        updateTriSelCount();
     }
+
+    function selectedTriCids(){
+        return Array.prototype.map.call(
+            document.querySelectorAll('#tsTriageList input[type="checkbox"]:checked'),
+            function(i){ return parseInt(i.dataset.cid, 10); }
+        );
+    }
+    function updateTriSelCount(){
+        var n = selectedTriCids().length;
+        document.getElementById('tsTriSelCount').textContent = n + ' selected';
+        document.getElementById('tsTriLinkBtn').disabled  = (n < 2);
+        document.getElementById('tsTriCloseBtn').disabled = (n < 1);
+    }
+    window.__tsTriSelChange = updateTriSelCount;
+
+    window.__tsTriLink = function(){
+        var ids = selectedTriCids();
+        if(ids.length < 2) return;
+        if(!confirm('Link ' + ids.length + ' complaints as one issue?')) return;
+        postJSON('/api/wo/complaints/link', { complaint_ids: ids })
+            .then(function(res){
+                showMsg('Linked into group ' + res.group_id + '.', 'loading');
+                loadTriage();
+            })
+            .catch(function(e){ alert('Link failed: ' + e.message); });
+    };
+
+    window.__tsTriCloseSelected = function(){
+        var ids = selectedTriCids();
+        if(!ids.length) return;
+        var reason = prompt('Reason for closing ' + ids.length + ' complaint(s) as one-off:');
+        if(reason == null) return;
+        if(!reason.trim()){ alert('Reason required.'); return; }
+        postJSON('/api/wo/complaints/close', { complaint_ids: ids, reason: reason.trim() })
+            .then(function(){ loadTriage(); window.__tsRefresh(); })
+            .catch(function(e){ alert('Close failed: ' + e.message); });
+    };
+
+    window.__tsTriCloseOne = function(id, label){
+        var reason = prompt('Reason for closing ' + label + ' as one-off:');
+        if(reason == null) return;
+        if(!reason.trim()){ alert('Reason required.'); return; }
+        postJSON('/api/wo/complaints/close', { complaint_ids: [id], reason: reason.trim() })
+            .then(function(){ loadTriage(); window.__tsRefresh(); })
+            .catch(function(e){ alert('Close failed: ' + e.message); });
+    };
+
     window.__tsToggleTriage = function(){
         document.getElementById('tsTriage').classList.toggle('collapsed');
+    };
+
+    // ── 48h one-off suggestion popup (shown one at a time) ──
+    function loadOneoffSuggestions(){
+        api('/api/wo/complaints/oneoff-suggestions').then(function(arr){
+            // Filter out dismissed ones (session-only via state)
+            state.oneoffDismissed = state.oneoffDismissed || {};
+            state.oneoffQueue = arr.filter(function(s){ return !state.oneoffDismissed[s.id]; });
+            showNextOneoff();
+        }).catch(function(){ /* silent */ });
+    }
+    function showNextOneoff(){
+        if(!state.oneoffQueue || !state.oneoffQueue.length){
+            document.getElementById('tsOneoff').classList.remove('open');
+            return;
+        }
+        state.oneoffCurrent = state.oneoffQueue.shift();
+        var c = state.oneoffCurrent;
+        var hours = Math.floor((Date.now() - new Date(c.submitted_at).getTime()) / 3600000);
+        document.getElementById('tsOneoffBody').innerHTML =
+            '<strong>' + esc(c.machine_name || c.machine_code) + '</strong> — '
+            + esc((c.description || '').slice(0, 100))
+            + '<div class="meta" style="margin-top:5px">' + esc(c.display_id || '#' + c.id) + ' · ' + hours + 'h old · no further complaints from this site.</div>';
+        document.getElementById('tsOneoff').classList.add('open');
+    }
+    window.__tsOneoffSkip = function(){
+        if(state.oneoffCurrent) state.oneoffDismissed[state.oneoffCurrent.id] = true;
+        showNextOneoff();
+    };
+    window.__tsOneoffLater = function(){
+        // Dismiss for this session; reappears next page load if still applicable.
+        if(state.oneoffCurrent) state.oneoffDismissed[state.oneoffCurrent.id] = true;
+        showNextOneoff();
+    };
+    window.__tsOneoffClose = function(){
+        var c = state.oneoffCurrent;
+        if(!c) return;
+        var reason = prompt('Reason (default: "Suggested one-off — no recurrence in 48h"):', 'Suggested one-off — no recurrence in 48h');
+        if(reason == null) return;
+        postJSON('/api/wo/complaints/close', { complaint_ids: [c.id], reason: reason.trim() })
+            .then(function(){
+                state.oneoffDismissed[c.id] = true;
+                loadTriage();
+                showNextOneoff();
+            })
+            .catch(function(e){ alert('Close failed: ' + e.message); });
     };
 
     window.__tsRefresh = function(){
