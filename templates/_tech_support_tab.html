@@ -391,8 +391,12 @@
     };
 
     function loadTriage(){
-        api('/api/wo/complaints?scope=all&status=fresh').then(function(rows){
-            state.triage = rows;
+        api('/api/wo/complaints?scope=all&status=all').then(function(rows){
+            // Triage shows complaints needing manager attention:
+            //   StatusCode 0 = fresh, 3 = unresolved (returned from rejected WO).
+            state.triage = (rows || []).filter(function(c){
+                return c.status_code === 0 || c.status_code === 3;
+            });
             renderTriage();
         }).catch(function(e){ /* silent: don't block tab */ console.warn(e); });
     }
@@ -412,19 +416,26 @@
                 ? '<span class="ts-tri-mini-badge" style="background:#fef9c3;color:#78350f">💵 Refund</span>' : '';
             var groupBadge = c.group_id
                 ? '<span class="ts-tri-mini-badge" style="background:#e0e7ff;color:#3730a3">🔗 Grp ' + c.group_id + '</span>' : '';
+            var unresolvedBadge = c.status_code === 3
+                ? '<span class="ts-tri-mini-badge" style="background:#fee2e2;color:#b91c1c">⚠ UNRESOLVED</span>' : '';
+            var prevWoLink = c.status_code === 3 && c.job_order_id
+                ? '<div style="margin-top:4px"><a href="#" onclick="event.stopPropagation();window.__tsOpenJob(' + c.job_order_id + ');return false;" style="font-size:0.74rem;color:#b91c1c;font-weight:600">View failed WO #' + c.job_order_id + ' →</a></div>'
+                : '';
+            var rowStyle = c.status_code === 3 ? ' style="border-color:#fecaca;background:#fef2f2"' : '';
             return ''
-              + '<div class="ts-triage-row">'
+              + '<div class="ts-triage-row"' + rowStyle + '>'
               +   '<div class="chk"><input type="checkbox" data-cid="' + c.id + '" onchange="window.__tsTriSelChange()"></div>'
               +   '<div class="left">'
               +     '<div class="id">' + esc(c.display_id || '#' + c.id) + '</div>'
               +     '<div class="desc">' + esc((c.description || '').slice(0, 160)) + '</div>'
               +     '<div class="submeta">' + esc(c.perceived_urgency_label) + ' urgency · ' + esc(c.submitter) + ' · ' + fmtDT(c.submitted_at) + '</div>'
+              +     prevWoLink
               +   '</div>'
               +   '<div class="right">'
               +     '<div class="machine-name">' + esc(c.machine_name || '(no machine)') + '</div>'
               +     '<div class="machine-code">' + esc(c.machine_code || '') + '</div>'
               +     '<div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap;justify-content:flex-end">'
-              +       refundBadge + groupBadge
+              +       unresolvedBadge + refundBadge + groupBadge
               +     '</div>'
               +     '<div class="row-actions">'
               +       '<button class="triage-btn close" onclick="window.__tsTriCloseOne(' + c.id + ', \'' + esc(c.display_id || ('#' + c.id)) + '\')">Close</button>'
@@ -585,6 +596,90 @@
         }).catch(function(e){ showMsg(esc(e.message), 'error'); });
     };
 
+    function renderLinkedComplaints(j){
+        var list = j.linked_complaints || [];
+        if(!list.length) return '';
+        var count = list.length;
+        var header = count > 1
+            ? 'Linked complaints (' + count + ') — one issue group'
+            : 'Source complaint';
+        return ''
+          + '<div class="ts-block" style="background:#fef9c3;border-color:#fde68a">'
+          +   '<div class="ts-block-title" style="color:#92400e">' + header + '</div>'
+          +   list.map(function(c){
+                  return ''
+                    + '<div style="background:white;border:1px solid #fde68a;border-radius:7px;padding:10px 12px;margin-bottom:6px">'
+                    +   '<div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start">'
+                    +     '<div style="font-family:ui-monospace,monospace;font-size:0.72rem;color:#92400e">' + esc(c.display_id || '#' + c.id) + '</div>'
+                    +     '<div style="font-size:0.7rem;color:#6b7280">' + esc(c.submitter) + ' · ' + fmtDT(c.submitted_at) + '</div>'
+                    +   '</div>'
+                    +   '<div style="font-size:0.9rem;color:#111827;margin-top:4px;white-space:pre-wrap">' + esc(c.description || '') + '</div>'
+                    +   '<div style="font-size:0.74rem;color:#6b7280;margin-top:5px">'
+                    +     'Urgency: ' + esc(c.perceived_urgency_label)
+                    +     (c.impact_severity != null ? ' · Severity ' + c.impact_severity + '/5' : '')
+                    +     (c.reported_by ? ' · Reported by: ' + esc(c.reported_by) : '')
+                    +     (c.refund_issued ? ' · 💵 refund issued' : '')
+                    +   '</div>'
+                    +   (c.impact_description ? '<div style="font-size:0.78rem;color:#374151;margin-top:4px;font-style:italic">' + esc(c.impact_description) + '</div>' : '')
+                    + '</div>';
+              }).join('')
+          + '</div>';
+    }
+
+    function renderKBArticle(j){
+        var k = j.attached_kb;
+        if(!k) return '';
+        var rows = [
+            ['Symptom',                   k.symptom],
+            ['Confirmation of conclusion',k.diagnostic_confirmation],
+            ['Root cause',                k.root_cause],
+            ['Corrective action',         k.corrective_action],
+            ['Preventive action',         k.preventive_action],
+            ['Verification of completion',k.verification_of_completion],
+        ].filter(function(p){ return !!p[1]; });
+        var tbs = (k.tickboxes || []).map(function(t){
+            return '<li style="margin-bottom:3px">' + esc(t.label) + '</li>';
+        }).join('');
+        return ''
+          + '<div class="ts-block" style="background:#eff6ff;border-color:#bfdbfe">'
+          +   '<div class="ts-block-title" style="color:#1e40af">📖 Reference KB — ' + esc(k.title) + '</div>'
+          +   '<details style="margin-top:6px">'
+          +     '<summary style="cursor:pointer;font-size:0.85rem;color:#1e40af;font-weight:600">Expand</summary>'
+          +     rows.map(function(p){
+                    return '<div style="margin-top:8px">'
+                         + '<div style="font-size:0.7rem;font-weight:700;color:#1e40af;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:2px">' + esc(p[0]) + '</div>'
+                         + '<div style="font-size:0.85rem;color:#111827;white-space:pre-wrap">' + esc(p[1]) + '</div>'
+                         + '</div>';
+                }).join('')
+          +     (tbs ? '<div style="margin-top:8px"><div style="font-size:0.7rem;font-weight:700;color:#1e40af;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">Recommended steps</div><ol style="margin:0;padding-left:18px;font-size:0.85rem;color:#111827">' + tbs + '</ol></div>' : '')
+          +   '</details>'
+          + '</div>';
+    }
+
+    function renderDriverInputForm(j){
+        // Only show driver form when WO is still active (not closed) AND viewer is the assignee OR manager
+        var visible = j.status_code === 0 || j.status_code === 1;
+        if(!visible) return '';
+        return ''
+          + '<div class="ts-block">'
+          +   '<div class="ts-block-title">On-site observations</div>'
+          +   '<textarea id="tsObs" rows="3" placeholder="What did you see at the machine?" style="width:100%;padding:9px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.92rem">' + esc(j.on_site_observations || '') + '</textarea>'
+          + '</div>'
+          + '<div class="ts-block">'
+          +   '<div class="ts-block-title">On-site changes done</div>'
+          +   '<textarea id="tsChanges" rows="3" placeholder="What did you actually do / change?" style="width:100%;padding:9px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.92rem">' + esc(j.on_site_changes || '') + '</textarea>'
+          + '</div>'
+          + '<div class="ts-block">'
+          +   '<div class="ts-block-title">Comments</div>'
+          +   '<textarea id="tsTechComments" rows="3" placeholder="Anything you want to flag to the manager — uncertainties, follow-ups…" style="width:100%;padding:9px;border:1px solid #d1d5db;border-radius:6px;font-family:inherit;font-size:0.92rem">' + esc(j.technician_comments || '') + '</textarea>'
+          + '</div>'
+          + '<div class="ts-actions-row">'
+          +   '<button class="ts-btn-help"  onclick="window.__tsDriverNeedsHelp(' + j.id + ')">⚠ Needs specialist help</button>'
+          +   '<button onclick="window.__tsDriverSave(' + j.id + ')" style="background:#f3f4f6;color:#374151;border:1px solid #d1d5db;padding:11px;border-radius:8px;font-weight:700;font-size:0.9rem;cursor:pointer">💾 Save draft</button>'
+          +   '<button class="ts-btn-close" onclick="window.__tsDriverSubmit(' + j.id + ')">✓ Submit for approval</button>'
+          + '</div>';
+    }
+
     function renderDetail(j){
         var imgs = (j.images || []).map(function(im){
             return '<div class="ts-thumb"><img src="/api/wo/images/' + im.id + '"></div>';
@@ -630,19 +725,17 @@
           +   (j.notes
                ? '<div class="ts-block"><div class="ts-block-title">Notes</div><div class="ts-block-content">' + esc(j.notes) + '</div></div>'
                : '')
-          +   '<div class="ts-block"><div class="ts-block-title">Tickbox checklist</div>' + tasks + '</div>'
+          +   renderKBArticle(j)
+          +   renderLinkedComplaints(j)
+          +   (j.tasks && j.tasks.length ? '<div class="ts-block"><div class="ts-block-title">Tickbox checklist (optional)</div>' + tasks + '</div>' : '')
+          +   renderDriverInputForm(j)
           +   '<div class="ts-block"><div class="ts-block-title">Photos</div><div class="ts-img-grid">' + imgs + '</div></div>'
-          +   ((j.status_code === 0 || j.status_code === 1) ? ''
+          +   (j.status_code === 2 && isManager() ? ''
               + '<div class="ts-actions-row">'
-              +   '<button class="ts-btn-help"  onclick="window.__tsWOHelp(' + j.id + ')">⚠ Needs assistance</button>'
-              +   '<button class="ts-btn-close" onclick="window.__tsWOClose(' + j.id + ')">✓ Submit for review</button>'
-              + '</div>'
-              : (j.status_code === 2 && isManager() ? ''
-              + '<div class="ts-actions-row">'
-              +   '<button class="ts-btn-help"  onclick="window.__tsWOReject(' + j.id + ')">✗ Reject &amp; create new WO</button>'
+              +   '<button class="ts-btn-help"  onclick="window.__tsWOReject(' + j.id + ')">✗ Reject &amp; send back</button>'
               +   '<button class="ts-btn-close" onclick="window.__tsWOAccept(' + j.id + ')">✓ Accept &amp; close complaint</button>'
               + '</div>'
-              : ''))
+              : '')
           + '</div>';
 
         document.getElementById('tsList').style.display = 'none';
@@ -695,12 +788,12 @@
     };
 
     window.__tsWOReject = function(jobId){
-        var notes = prompt("Reason for rejecting — describes what's still needed. A new WO will be created with the same complaint link:");
+        var notes = prompt("Reason for rejecting — describes what went wrong / what's still needed. The linked complaint(s) go back to triage as 'unresolved' with this failed WO + the technician's report attached.");
         if(notes == null) return;
         if(!notes.trim()){ alert('Reason required to reject.'); return; }
         postJSON('/api/wo/joborders/' + jobId + '/review', { decision: 'reject', notes: notes.trim() })
-            .then(function(res){
-                alert('Rejected. New WO created: ' + (res.new_display_id || ('#' + res.new_wo_id)) + '. Edit it to set the revised diagnosis / proposed fix.');
+            .then(function(){
+                alert('WO rejected. Linked complaint(s) moved to "unresolved" in triage with this WO + technician report attached.');
                 window.__tsRefresh();
             })
             .catch(function(e){ alert('Reject failed: ' + e.message); });
@@ -711,10 +804,61 @@
         state.pendingAction = null;
     };
 
+    // ── Driver actions: save draft, submit for approval, needs specialist ──
+    function driverInputBody(){
+        var obs = document.getElementById('tsObs');
+        var ch  = document.getElementById('tsChanges');
+        var tc  = document.getElementById('tsTechComments');
+        return {
+            on_site_observations: obs ? obs.value : null,
+            on_site_changes:      ch  ? ch.value  : null,
+            technician_comments:  tc  ? tc.value  : null,
+        };
+    }
+
+    window.__tsDriverSave = function(jobId){
+        postJSON('/api/wo/joborders/' + jobId + '/driver-input', driverInputBody(), 'PATCH')
+            .then(function(){ alert('Draft saved.'); })
+            .catch(function(e){ alert('Save failed: ' + e.message); });
+    };
+
+    window.__tsDriverSubmit = function(jobId){
+        var body = driverInputBody();
+        if(!(body.on_site_observations || '').trim() || !(body.on_site_changes || '').trim()){
+            if(!confirm('On-site observations or changes are empty. Submit anyway?')) return;
+        }
+        postJSON('/api/wo/joborders/' + jobId + '/driver-input', body, 'PATCH').then(function(){
+            return postJSON('/api/wo/joborders/' + jobId + '/status', { status_code: 2 });
+        }).then(function(){
+            alert('Submitted for manager approval.');
+            window.__tsRefresh();
+        }).catch(function(e){ alert('Submit failed: ' + e.message); });
+    };
+
+    window.__tsDriverNeedsHelp = function(jobId){
+        var tc = document.getElementById('tsTechComments');
+        var reason = (tc && tc.value || '').trim();
+        if(!reason){
+            reason = prompt('Describe what you need specialist help with:');
+            if(!reason || !reason.trim()) return;
+            reason = reason.trim();
+        }
+        var body = driverInputBody();
+        body.technician_comments = reason;
+        postJSON('/api/wo/joborders/' + jobId + '/driver-input', body, 'PATCH').then(function(){
+            return postJSON('/api/wo/joborders/' + jobId + '/status',
+                { status_code: 1, block_reason: reason });
+        }).then(function(){
+            alert('Marked as "needs specialist help". Manager has been notified.');
+            window.__tsRefresh();
+        }).catch(function(e){ alert('Failed: ' + e.message); });
+    };
+
     // ── Create WO from complaint (manager) ──
     window.__tsOpenCreateWO = function(complaintId){
         api('/api/wo/complaints/' + complaintId).then(function(c){
             state.draftComplaint = c;
+            state.attachedKBID = null;  // reset per new WO draft
             renderCreateWOForm(c);
             document.getElementById('tsWOModal').classList.add('open');
         }).catch(function(e){ alert('Load failed: ' + e.message); });
@@ -741,7 +885,10 @@
           + '<div class="fld"><label>Diagnosis</label><textarea id="tsWODiag" placeholder="What you think is wrong"></textarea></div>'
           + '<div class="fld"><label>Proposed fix</label><textarea id="tsWOFix" placeholder="What the operator should do"></textarea></div>'
           + '<div class="fld"><label>Notes (internal)</label><textarea id="tsWONotes" placeholder="Anything else"></textarea></div>'
-          + '<div class="fld"><label>Assigned to (email)</label><input type="text" id="tsWOAssigned" placeholder="operator@kopinearme.com"></div>'
+          + '<div class="fld"><label>Assigned to (technician)</label>'
+          +   '<select id="tsWOAssigned"><option value="">— Loading technicians… —</option></select>'
+          +   '<div style="font-size:0.74rem;color:#6b7280;margin-top:4px">Pulled from AAD Operator role. <a href="#" onclick="window.__tsRefreshTechs();return false;">Refresh</a></div>'
+          + '</div>'
           + '<div class="fld">'
           +   '<label>Tickbox checklist (operator works through these)</label>'
           +   '<div id="tsWOTickboxes"></div>'
@@ -759,6 +906,38 @@
         state.draftComplaint = null;
     };
 
+    // ── Technician dropdown (AAD-backed) ──
+    function loadTechniciansInto(selectEl, currentValue){
+        api('/api/wo/technicians').then(function(d){
+            var techs = (d && d.technicians) || [];
+            var opts = '<option value="">— Unassigned —</option>';
+            if(!techs.length){
+                opts += '<option value="" disabled>(no technicians found — assign Operator role in AAD)</option>';
+            } else {
+                opts += techs.map(function(t){
+                    var selected = (currentValue || '').toLowerCase() === t.email.toLowerCase() ? ' selected' : '';
+                    return '<option value="' + esc(t.email) + '"' + selected + '>' + esc(t.display_name) + ' &lt;' + esc(t.email) + '&gt;</option>';
+                }).join('');
+            }
+            selectEl.innerHTML = opts;
+        }).catch(function(e){
+            selectEl.innerHTML = '<option value="">— failed: ' + esc(e.message) + ' —</option>';
+        });
+    }
+    // Call after the form is rendered
+    var _origRenderCreateWOForm = renderCreateWOForm;
+    renderCreateWOForm = function(c){
+        _origRenderCreateWOForm(c);
+        loadTechniciansInto(document.getElementById('tsWOAssigned'), null);
+    };
+
+    window.__tsRefreshTechs = function(){
+        postJSON('/api/wo/technicians/refresh', {}).then(function(){
+            var sel = document.getElementById('tsWOAssigned');
+            if(sel) loadTechniciansInto(sel, sel.value);
+        }).catch(function(){});
+    };
+
     window.__tsKBLookup = function(){
         var ev = document.getElementById('tsWOEventCode').value;
         if(!ev){
@@ -773,15 +952,31 @@
             } else {
                 state.kbSuggestions = arr;
                 list.innerHTML = arr.map(function(k, i){
+                    var attached = state.attachedKBID === k.id;
                     return ''
-                      + '<div class="ts-wo-kb-item" onclick="window.__tsKBApply(' + i + ')">'
-                      +   '<div class="ttl">' + esc(k.title) + '</div>'
-                      +   '<div class="meta">used ' + k.use_count + 'x · ' + (k.tickboxes||[]).length + ' tickboxes</div>'
+                      + '<div class="ts-wo-kb-item"' + (attached ? ' style="border-color:#15803d;background:#f0fdf4"' : '') + '>'
+                      +   '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'
+                      +     '<div style="flex:1;cursor:pointer" onclick="window.__tsKBApply(' + i + ')">'
+                      +       '<div class="ttl">' + esc(k.title) + (attached ? ' ✓' : '') + '</div>'
+                      +       '<div class="meta">used ' + k.use_count + 'x · ' + (k.tickboxes||[]).length + ' tickboxes</div>'
+                      +     '</div>'
+                      +     '<button onclick="window.__tsKBAttach(' + i + ')" style="padding:4px 10px;border-radius:5px;border:1px solid ' + (attached ? '#15803d;background:#15803d;color:white' : '#cbd5e1;background:white;color:#374151') + ';font-size:0.74rem;font-weight:700;cursor:pointer">'
+                      +       (attached ? '✓ Attached' : '📎 Attach to WO')
+                      +     '</button>'
+                      +   '</div>'
                       + '</div>';
                 }).join('');
             }
             panel.style.display = 'block';
         }).catch(function(e){ console.warn(e); });
+    };
+
+    window.__tsKBAttach = function(idx){
+        var k = (state.kbSuggestions || [])[idx];
+        if(!k) return;
+        state.attachedKBID = (state.attachedKBID === k.id) ? null : k.id;
+        // Re-render the KB list so the active state updates
+        window.__tsKBLookup();
     };
 
     window.__tsKBApply = function(idx){
@@ -836,16 +1031,17 @@
         ).filter(function(x){ return !!x; });
 
         var body = {
-            complaint_id:  c.id,
-            machine_name:  c.machine_name,
-            machine_code:  c.machine_code,
-            diagnosis:     document.getElementById('tsWODiag').value.trim()  || null,
-            proposed_fix:  document.getElementById('tsWOFix').value.trim()   || null,
-            notes:         document.getElementById('tsWONotes').value.trim() || null,
-            assigned_to:   document.getElementById('tsWOAssigned').value.trim() || null,
-            priority:      parseInt(document.getElementById('tsWOPriority').value, 10),
-            event_code:    document.getElementById('tsWOEventCode').value || null,
-            tasks:         tickboxes,
+            complaint_id:    c.id,
+            machine_name:    c.machine_name,
+            machine_code:    c.machine_code,
+            diagnosis:       document.getElementById('tsWODiag').value.trim()  || null,
+            proposed_fix:    document.getElementById('tsWOFix').value.trim()   || null,
+            notes:           document.getElementById('tsWONotes').value.trim() || null,
+            assigned_to:     document.getElementById('tsWOAssigned').value.trim() || null,
+            priority:        parseInt(document.getElementById('tsWOPriority').value, 10),
+            event_code:      document.getElementById('tsWOEventCode').value || null,
+            attached_kb_id:  state.attachedKBID || null,
+            tasks:           tickboxes,
         };
         postJSON('/api/wo/joborders', body).then(function(res){
             window.__tsCloseWOModal();

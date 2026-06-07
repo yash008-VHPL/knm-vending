@@ -51,7 +51,7 @@ MANAGER_ROLES  = {ROLE_FIELD_MANAGER, ROLE_ADMIN}
 # ── Status / Priority code maps ───────────────────────────────────────────────
 # Stored as TINYINT in DB; expanded to strings in API responses.
 
-COMPLAINT_STATUS = {0: "fresh",    1: "assigned",         2: "closed"}
+COMPLAINT_STATUS = {0: "fresh", 1: "assigned", 2: "closed", 3: "unresolved"}
 JOBORDER_STATUS  = {
     0: "assigned",
     1: "needs_assistance",
@@ -169,6 +169,10 @@ def init_workorders_db():
                 ProposedFix       NVARCHAR(MAX)  NULL,
                 LastBlockReason   NVARCHAR(MAX)  NULL,
                 DisplayID         NVARCHAR(30)   NULL,
+                AttachedKBID      INT            NULL,
+                OnSiteObservations NVARCHAR(MAX) NULL,
+                OnSiteChanges      NVARCHAR(MAX) NULL,
+                TechnicianComments NVARCHAR(MAX) NULL,
                 CreatedBy         NVARCHAR(255)  NOT NULL,
                 CreatedAt         DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
                 CompletedBy       NVARCHAR(255)  NULL,
@@ -500,6 +504,49 @@ def _ingest_data_urls(cursor, parent_type, parent_id, stage, data_urls, user):
         )
         count += 1
     return count
+
+
+# ── Technicians (AAD-backed via Graph) ────────────────────────────────────────
+
+@workorders_bp.route("/technicians")
+@require_roles(*MANAGER_ROLES)
+def api_technicians():
+    """Returns users with the 'operator' app role (rendered as 'Technician' in UI).
+    Pulled live from Microsoft Graph via sharepoint_helper.list_users_by_role
+    using the dashboard's Easy Auth service principal + the Operator role's GUID.
+
+    Required env vars on App Service:
+        MS_EASYAUTH_SP_OBJECT_ID  — Object ID of the dashboard's enterprise app
+        MS_OPERATOR_ROLE_ID       — GUID of the 'operator' app role
+    """
+    import os
+    import config as _cfg
+    sp_id   = os.environ.get("MS_EASYAUTH_SP_OBJECT_ID") or getattr(_cfg, "MS_EASYAUTH_SP_OBJECT_ID", "")
+    role_id = os.environ.get("MS_OPERATOR_ROLE_ID")       or getattr(_cfg, "MS_OPERATOR_ROLE_ID", "")
+    if not sp_id or not role_id:
+        return jsonify({
+            "error": "Technician lookup not configured. Set MS_EASYAUTH_SP_OBJECT_ID and MS_OPERATOR_ROLE_ID env vars.",
+            "technicians": [],
+        }), 200  # 200 so dropdown falls back to free text
+    try:
+        users = sp.list_users_by_role(sp_id.strip(), role_id.strip())
+        return jsonify({"technicians": users})
+    except Exception as e:
+        return jsonify({
+            "error": f"Graph lookup failed: {str(e)}",
+            "technicians": [],
+        }), 200
+
+
+@workorders_bp.route("/technicians/refresh", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_technicians_refresh():
+    """Bust the 10-min cache to force a fresh Graph fetch."""
+    try:
+        sp.clear_user_cache()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
@@ -1059,6 +1106,15 @@ def api_joborder_create():
     else:
         event_code = None
 
+    attached_kb_id = data.get("attached_kb_id")
+    if attached_kb_id in (None, "", "null"):
+        attached_kb_id = None
+    else:
+        try:
+            attached_kb_id = int(attached_kb_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "attached_kb_id must be an integer."}), 400
+
     if complaint_id:
         try:
             complaint_id = int(complaint_id)
@@ -1095,16 +1151,16 @@ def api_joborder_create():
             INSERT INTO WO_JobOrders
                 (ComplaintID, MachineName, MachineCode, Notes,
                  AssignedTo, PriorityCode, StatusCode,
-                 EventCode, Diagnosis, ProposedFix,
+                 EventCode, Diagnosis, ProposedFix, AttachedKBID,
                  DisplayID, CreatedBy)
             OUTPUT INSERTED.JobOrderID
             VALUES (%s, %s, %s, %s,
                     %s, %s, 0,
-                    %s, %s, %s,
+                    %s, %s, %s, %s,
                     %s, %s)
         """, (complaint_id, machine_name, machine_code, notes,
               assigned, priority,
-              event_code, diagnosis, proposed_fix,
+              event_code, diagnosis, proposed_fix, attached_kb_id,
               display_id, user))
         new_id = int(cursor.fetchone()[0])
 
@@ -1246,7 +1302,8 @@ def api_joborder_detail(jid):
                    AssignedTo, PriorityCode, StatusCode,
                    Report, RootCause, CorrectiveAction, PreventiveAction,
                    EventCode, Diagnosis, ProposedFix, LastBlockReason,
-                   CreatedBy, CreatedAt, CompletedBy, CompletedAt
+                   CreatedBy, CreatedAt, CompletedBy, CompletedAt,
+                   AttachedKBID, OnSiteObservations, OnSiteChanges, TechnicianComments
             FROM WO_JobOrders WHERE JobOrderID = %s
         """, (jid,))
         row = cursor.fetchone()
@@ -1271,6 +1328,75 @@ def api_joborder_detail(jid):
 
         images   = _images_for(cursor, "joborder", jid)
         activity = _activity_for(cursor, "joborder", jid)
+
+        # Attached KB article (if manager pre-attached one).
+        attached_kb = None
+        kb_id = row[21]
+        if kb_id is not None:
+            cursor.execute("""
+                SELECT KBID, EventCode, Title, Symptom, DiagnosticConfirmation, RootCause,
+                       CorrectiveAction, PreventiveAction, VerificationOfCompletion
+                FROM WO_KB_Entries WHERE KBID = %s
+            """, (kb_id,))
+            kbr = cursor.fetchone()
+            if kbr:
+                cursor.execute(
+                    "SELECT SeqNum, Label FROM WO_KB_Tickboxes WHERE KBID=%s ORDER BY SeqNum, TBID",
+                    (kb_id,),
+                )
+                tbs = [{"seq": x[0], "label": x[1]} for x in cursor.fetchall()]
+                attached_kb = {
+                    "id": kbr[0],
+                    "event_code": int(kbr[1]) if kbr[1] is not None else None,
+                    "title": kbr[2],
+                    "symptom": kbr[3],
+                    "diagnostic_confirmation": kbr[4],
+                    "root_cause": kbr[5],
+                    "corrective_action": kbr[6],
+                    "preventive_action": kbr[7],
+                    "verification_of_completion": kbr[8],
+                    "tickboxes": tbs,
+                }
+
+        # Linked complaints — show ALL in the group if grouped, else just the primary.
+        linked = []
+        if row[2] is not None:
+            cursor.execute(
+                "SELECT GroupID FROM WO_Complaints WHERE ComplaintID = %s",
+                (row[2],),
+            )
+            grow = cursor.fetchone()
+            gid = int(grow[0]) if (grow and grow[0] is not None) else None
+            if gid is not None:
+                cursor.execute("""
+                    SELECT ComplaintID, DisplayID, Description, MachineName, MachineCode,
+                           SubmitterEmail, SubmittedAt, ReportedBy, PerceivedUrgency,
+                           ImpactSeverity, ImpactDescription, RefundIssued, StatusCode
+                    FROM WO_Complaints WHERE GroupID = %s
+                    ORDER BY SubmittedAt, ComplaintID
+                """, (gid,))
+            else:
+                cursor.execute("""
+                    SELECT ComplaintID, DisplayID, Description, MachineName, MachineCode,
+                           SubmitterEmail, SubmittedAt, ReportedBy, PerceivedUrgency,
+                           ImpactSeverity, ImpactDescription, RefundIssued, StatusCode
+                    FROM WO_Complaints WHERE ComplaintID = %s
+                """, (row[2],))
+            for cr in cursor.fetchall():
+                linked.append({
+                    "id": cr[0], "display_id": cr[1], "description": cr[2],
+                    "machine_name": cr[3], "machine_code": cr[4],
+                    "submitter": cr[5], "submitted_at": _iso(cr[6]),
+                    "reported_by": cr[7],
+                    "perceived_urgency_code":  int(cr[8]),
+                    "perceived_urgency_label": _label(PRIORITY, cr[8]),
+                    "impact_severity":   int(cr[9]) if cr[9] is not None else None,
+                    "impact_description": cr[10],
+                    "refund_issued":     bool(cr[11]),
+                    "status_code":       int(cr[12]),
+                    "status_label":      _label(COMPLAINT_STATUS, cr[12]),
+                })
+
         conn.close()
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
@@ -1290,7 +1416,13 @@ def api_joborder_detail(jid):
         "last_block_reason": row[16],
         "created_by": row[17], "created_at": _iso(row[18]),
         "completed_by": row[19], "completed_at": _iso(row[20]),
+        "attached_kb_id":        int(row[21]) if row[21] is not None else None,
+        "on_site_observations":  row[22],
+        "on_site_changes":       row[23],
+        "technician_comments":   row[24],
+        "attached_kb":           attached_kb,
         "tasks": tasks,
+        "linked_complaints": linked,
         "images": images, "activity": activity,
     })
 
@@ -1337,6 +1469,15 @@ def api_joborder_update(jid):
                 sets.append("EventCode = %s"); params.append(ev)
             except (TypeError, ValueError):
                 return jsonify({"error": "EventCode must be an integer."}), 400
+    if "attached_kb_id" in data:
+        kb = data["attached_kb_id"]
+        if kb in (None, "", "null"):
+            sets.append("AttachedKBID = NULL")
+        else:
+            try:
+                sets.append("AttachedKBID = %s"); params.append(int(kb))
+            except (TypeError, ValueError):
+                return jsonify({"error": "attached_kb_id must be an integer."}), 400
 
     if not sets:
         return jsonify({"error": "No updatable fields supplied."}), 400
@@ -1446,6 +1587,61 @@ def api_joborder_status(jid):
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+# ── Driver input: on-site observations, changes done, comments ────────────────
+
+@workorders_bp.route("/joborders/<int:jid>/driver-input", methods=["PATCH"])
+@require_roles(*OPERATOR_ROLES)
+def api_joborder_driver_input(jid):
+    """Driver (operator) saves their on-site write-up. Does NOT change status —
+    use /status for that (typically status=2 'pending_review' on submit).
+
+    Body any of:
+        on_site_observations: str
+        on_site_changes:      str
+        technician_comments:  str
+    """
+    data = request.get_json(silent=True) or {}
+    user = get_current_user()
+    sets, params = [], []
+    if "on_site_observations" in data:
+        sets.append("OnSiteObservations = %s")
+        params.append((data["on_site_observations"] or "").strip() or None)
+    if "on_site_changes" in data:
+        sets.append("OnSiteChanges = %s")
+        params.append((data["on_site_changes"] or "").strip() or None)
+    if "technician_comments" in data:
+        sets.append("TechnicianComments = %s")
+        params.append((data["technician_comments"] or "").strip() or None)
+    if not sets:
+        return jsonify({"error": "No fields to save."}), 400
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT AssignedTo FROM WO_JobOrders WHERE JobOrderID = %s",
+            (jid,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Job order not found."}), 404
+        if get_role(user) not in MANAGER_ROLES and (row[0] or "").lower() != user.lower():
+            conn.close()
+            return jsonify({"error": "Not assigned to you."}), 403
+        params.append(jid)
+        cursor.execute(
+            f"UPDATE WO_JobOrders SET {', '.join(sets)} WHERE JobOrderID = %s",
+            tuple(params),
+        )
+        _log_activity(cursor, "joborder", jid, "driver_input",
+                      "; ".join(s.split(" = ")[0] for s in sets), user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
 # ── Manager review (the "review loop" for WO completion) ─────────────────────
 
 @workorders_bp.route("/joborders/<int:jid>/review", methods=["POST"])
@@ -1529,27 +1725,10 @@ def api_joborder_review(jid):
                     _log_activity(cursor, "complaint", complaint_id, "closed",
                                   f"Closed via accept of {old_display}", user)
         else:
-            # reject: create a new WO inheriting the complaint linkage
-            new_display = allocate_display_id(cursor, "WkO")
-            cursor.execute("""
-                INSERT INTO WO_JobOrders
-                    (ComplaintID, MachineName, MachineCode,
-                     AssignedTo, PriorityCode, StatusCode,
-                     EventCode, Notes, DisplayID, CreatedBy)
-                OUTPUT INSERTED.JobOrderID
-                VALUES (%s, %s, %s,
-                        %s, %s, 0,
-                        %s, %s, %s, %s)
-            """, (complaint_id, machine_name, machine_code,
-                  assigned, priority_code,
-                  event_code,
-                  (f"Follow-up to {old_display}. " + (notes or "")).strip(),
-                  new_display, user))
-            new_wo_id = int(cursor.fetchone()[0])
-            _log_activity(cursor, "joborder", new_wo_id, "created",
-                          f"Created as follow-up to {old_display}", user)
+            # reject: WO is closed; complaints go to UNRESOLVED (StatusCode=3).
+            # JobOrderID stays pointing to the failed WO so manager can review it.
+            # No auto-follow-up — manager re-triages and creates a new WO when ready.
             if complaint_id:
-                # Group propagation: re-link entire group to the new follow-up WO.
                 cursor.execute(
                     "SELECT GroupID FROM WO_Complaints WHERE ComplaintID = %s",
                     (complaint_id,),
@@ -1558,24 +1737,23 @@ def api_joborder_review(jid):
                 group_id = int(grow[0]) if (grow and grow[0] is not None) else None
                 if group_id is not None:
                     cursor.execute("""
-                        UPDATE WO_Complaints SET JobOrderID = %s, StatusCode = 1
+                        UPDATE WO_Complaints SET StatusCode = 3
                         WHERE GroupID = %s
-                    """, (new_wo_id, group_id))
+                    """, (group_id,))
                     cursor.execute(
                         "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s",
                         (group_id,),
                     )
                     for r in cursor.fetchall():
-                        _log_activity(cursor, "complaint", r[0], "rerouted",
-                                      f"Group {group_id} → follow-up {new_display}", user)
+                        _log_activity(cursor, "complaint", r[0], "unresolved",
+                                      f"Group {group_id}: {old_display} rejected — {notes or 'no notes'}", user)
                 else:
                     cursor.execute("""
-                        UPDATE WO_Complaints
-                        SET JobOrderID = %s, StatusCode = 1
+                        UPDATE WO_Complaints SET StatusCode = 3
                         WHERE ComplaintID = %s
-                    """, (new_wo_id, complaint_id))
-                    _log_activity(cursor, "complaint", complaint_id, "rerouted",
-                                  f"Linked to follow-up {new_display}", user)
+                    """, (complaint_id,))
+                    _log_activity(cursor, "complaint", complaint_id, "unresolved",
+                                  f"{old_display} rejected — {notes or 'no notes'}", user)
 
         conn.commit()
         conn.close()
