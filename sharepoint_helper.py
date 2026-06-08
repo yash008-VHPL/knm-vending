@@ -32,6 +32,7 @@ import config
 GRAPH_BASE      = "https://graph.microsoft.com/v1.0"
 GRAPH_SCOPE     = ["https://graph.microsoft.com/.default"]
 TOKEN_EXPIRY_PAD = 60  # refresh 60s before actual expiry
+USER_CACHE_TTL  = 600  # 10 min cache for role-member lookups
 
 # Folder name → root under the default "Documents" drive.
 FOLDER_COMPLAINT = "ComplaintUploads"
@@ -40,6 +41,7 @@ FOLDER_WORKORDER = "WorkOrderUploads"
 # Module-level cache. Reset on import; populated on first call.
 _token_cache: Dict[str, float | str | None] = {"value": None, "expires_at": 0.0}
 _drive_cache: Dict[str, str | None]         = {"id": None}
+_role_user_cache: Dict[str, Dict]           = {}   # role_id → {"data": [...], "expires_at": float}
 _token_lock  = threading.Lock()
 
 
@@ -242,6 +244,68 @@ def delete_item(sp_item_id: str) -> None:
     r = requests.delete(url, headers=_auth_header(), timeout=20)
     if r.status_code not in (204, 404):
         r.raise_for_status()
+
+
+# ── Directory: list users with a given app role ──────────────────────────────
+
+def list_users_by_role(sp_object_id: str, app_role_id: str) -> list:
+    """Return active users assigned the given app role on the given service principal.
+    Each element: {email, display_name, principal_id}.
+
+    Requires Directory.Read.All on the calling app. Results cached in-process
+    for USER_CACHE_TTL seconds keyed by (sp_object_id, app_role_id).
+    """
+    cache_key = f"{sp_object_id}:{app_role_id}"
+    now = time.time()
+    cached = _role_user_cache.get(cache_key)
+    if cached and cached.get("expires_at", 0) > now:
+        return list(cached["data"])
+
+    out = []
+    url = f"{GRAPH_BASE}/servicePrincipals/{sp_object_id}/appRoleAssignedTo"
+    while url:
+        r = requests.get(url, headers=_auth_header(), timeout=20)
+        r.raise_for_status()
+        page = r.json()
+        for a in page.get("value", []):
+            if a.get("appRoleId") != app_role_id:
+                continue
+            if (a.get("principalType") or "") != "User":
+                continue  # skip group assignments for now
+            pid = a.get("principalId")
+            display = a.get("principalDisplayName") or ""
+            # Look up email
+            email = ""
+            try:
+                ur = requests.get(
+                    f"{GRAPH_BASE}/users/{pid}?$select=mail,userPrincipalName,displayName,accountEnabled",
+                    headers=_auth_header(), timeout=15,
+                )
+                if ur.status_code == 200:
+                    uj = ur.json()
+                    if uj.get("accountEnabled") is False:
+                        continue
+                    email = (uj.get("mail") or uj.get("userPrincipalName") or "").strip()
+                    if uj.get("displayName"):
+                        display = uj["displayName"]
+            except Exception:
+                pass
+            if email:
+                out.append({
+                    "email": email.lower(),
+                    "display_name": display or email,
+                    "principal_id": pid,
+                })
+        url = page.get("@odata.nextLink")
+
+    out.sort(key=lambda u: (u.get("display_name") or "").lower())
+    _role_user_cache[cache_key] = {"data": out, "expires_at": now + USER_CACHE_TTL}
+    return list(out)
+
+
+def clear_user_cache():
+    """Force the next list_users_by_role call to re-fetch from Graph."""
+    _role_user_cache.clear()
 
 
 # ── Smoke test (call manually; do NOT run at import) ──────────────────────────
