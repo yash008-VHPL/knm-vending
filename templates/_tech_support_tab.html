@@ -861,6 +861,7 @@
             state.attachedKBID = null;  // reset per new WO draft
             renderCreateWOForm(c);
             document.getElementById('tsWOModal').classList.add('open');
+            window.__tsKBLookup();   // pre-load all KB entries for picker
         }).catch(function(e){ alert('Load failed: ' + e.message); });
     };
 
@@ -874,13 +875,11 @@
           +   '<div class="fld"><label>Machine</label><input type="text" readonly value="' + esc((c.machine_name||'') + ' (' + (c.machine_code||'') + ')') + '"></div>'
           +   '<div class="fld"><label>Customer urgency</label><input type="text" readonly value="' + esc(c.perceived_urgency_label) + '"></div>'
           + '</div>'
-          + '<div class="row2">'
-          +   '<div class="fld"><label>Event code (8xxxxx — optional)</label><input type="number" id="tsWOEventCode" min="800000" max="899999" placeholder="8xxxxx" onchange="window.__tsKBLookup()"></div>'
-          +   '<div class="fld"><label>Priority</label><select id="tsWOPriority"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>'
-          + '</div>'
-          + '<div class="ts-wo-kb" id="tsWOKBPanel" style="display:none">'
-          +   '<div style="font-size:0.74rem;font-weight:700;text-transform:uppercase;color:#1e40af;letter-spacing:0.05em;margin-bottom:6px">KB Suggestions (tap one to pre-fill)</div>'
-          +   '<div id="tsWOKBList"></div>'
+          + '<div class="fld"><label>Priority</label><select id="tsWOPriority"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>'
+          + '<div class="ts-wo-kb" id="tsWOKBPanel" style="display:block">'
+          +   '<div style="font-size:0.74rem;font-weight:700;text-transform:uppercase;color:#1e40af;letter-spacing:0.05em;margin-bottom:6px">📖 Knowledge Base — attach one to this WO (driver will see it)</div>'
+          +   '<input type="search" id="tsWOKBFilter" placeholder="Search KB titles…" oninput="window.__tsKBRender()" style="width:100%;padding:6px 9px;border:1px solid #bfdbfe;border-radius:5px;font-size:0.82rem;margin-bottom:6px">'
+          +   '<div id="tsWOKBList" style="max-height:240px;overflow-y:auto"><div class="ts-wo-kb-empty">Loading KB…</div></div>'
           + '</div>'
           + '<div class="fld"><label>Diagnosis</label><textarea id="tsWODiag" placeholder="What you think is wrong"></textarea></div>'
           + '<div class="fld"><label>Proposed fix</label><textarea id="tsWOFix" placeholder="What the operator should do"></textarea></div>'
@@ -910,9 +909,14 @@
     function loadTechniciansInto(selectEl, currentValue){
         api('/api/wo/technicians').then(function(d){
             var techs = (d && d.technicians) || [];
+            var apiErr = d && d.error;
             var opts = '<option value="">— Unassigned —</option>';
             if(!techs.length){
-                opts += '<option value="" disabled>(no technicians found — assign Operator role in AAD)</option>';
+                if(apiErr){
+                    opts += '<option value="" disabled>⚠ ' + esc(apiErr) + '</option>';
+                } else {
+                    opts += '<option value="" disabled>(no users with Operator role found — check AAD assignments)</option>';
+                }
             } else {
                 opts += techs.map(function(t){
                     var selected = (currentValue || '').toLowerCase() === t.email.toLowerCase() ? ' selected' : '';
@@ -921,7 +925,7 @@
             }
             selectEl.innerHTML = opts;
         }).catch(function(e){
-            selectEl.innerHTML = '<option value="">— failed: ' + esc(e.message) + ' —</option>';
+            selectEl.innerHTML = '<option value="">⚠ ' + esc(e.message) + '</option>';
         });
     }
     // Call after the form is rendered
@@ -939,44 +943,55 @@
     };
 
     window.__tsKBLookup = function(){
-        var ev = document.getElementById('tsWOEventCode').value;
-        if(!ev){
-            document.getElementById('tsWOKBPanel').style.display = 'none';
+        // Load ALL KB entries when WO form opens (event code is now system-assigned later).
+        api('/api/wo/kb').then(function(arr){
+            state.kbSuggestions = arr || [];
+            window.__tsKBRender();
+        }).catch(function(e){
+            document.getElementById('tsWOKBList').innerHTML =
+                '<div class="ts-wo-kb-empty">Failed to load KB: ' + esc(e.message) + '</div>';
+        });
+    };
+
+    window.__tsKBRender = function(){
+        var arr = state.kbSuggestions || [];
+        var filt = (document.getElementById('tsWOKBFilter') ? document.getElementById('tsWOKBFilter').value : '').toLowerCase();
+        var rows = arr.filter(function(k){
+            if(!filt) return true;
+            var hay = ((k.title || '') + ' ' + (k.symptom || '') + ' ' + (k.diagnostic_confirmation || '') + ' ' + (k.corrective_action || '')).toLowerCase();
+            return hay.indexOf(filt) >= 0;
+        });
+        var list = document.getElementById('tsWOKBList');
+        if(!rows.length){
+            list.innerHTML = '<div class="ts-wo-kb-empty">' + (arr.length === 0 ? 'No KB entries yet. Add some in the Manage KB tab.' : 'No matches.') + '</div>';
             return;
         }
-        api('/api/wo/kb/suggest?event_code=' + encodeURIComponent(ev)).then(function(arr){
-            var panel = document.getElementById('tsWOKBPanel');
-            var list  = document.getElementById('tsWOKBList');
-            if(!arr.length){
-                list.innerHTML = '<div class="ts-wo-kb-empty">No KB entries for this code.</div>';
-            } else {
-                state.kbSuggestions = arr;
-                list.innerHTML = arr.map(function(k, i){
-                    var attached = state.attachedKBID === k.id;
-                    return ''
-                      + '<div class="ts-wo-kb-item"' + (attached ? ' style="border-color:#15803d;background:#f0fdf4"' : '') + '>'
-                      +   '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'
-                      +     '<div style="flex:1;cursor:pointer" onclick="window.__tsKBApply(' + i + ')">'
-                      +       '<div class="ttl">' + esc(k.title) + (attached ? ' ✓' : '') + '</div>'
-                      +       '<div class="meta">used ' + k.use_count + 'x · ' + (k.tickboxes||[]).length + ' tickboxes</div>'
-                      +     '</div>'
-                      +     '<button onclick="window.__tsKBAttach(' + i + ')" style="padding:4px 10px;border-radius:5px;border:1px solid ' + (attached ? '#15803d;background:#15803d;color:white' : '#cbd5e1;background:white;color:#374151') + ';font-size:0.74rem;font-weight:700;cursor:pointer">'
-                      +       (attached ? '✓ Attached' : '📎 Attach to WO')
-                      +     '</button>'
-                      +   '</div>'
-                      + '</div>';
-                }).join('');
-            }
-            panel.style.display = 'block';
-        }).catch(function(e){ console.warn(e); });
+        list.innerHTML = rows.map(function(k){
+            var origIdx = arr.indexOf(k);
+            var attached = state.attachedKBID === k.id;
+            return ''
+              + '<div class="ts-wo-kb-item"' + (attached ? ' style="border-color:#15803d;background:#f0fdf4"' : '') + '>'
+              +   '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'
+              +     '<div style="flex:1;cursor:pointer" onclick="window.__tsKBApply(' + origIdx + ')">'
+              +       '<div class="ttl">' + esc(k.title) + (attached ? ' ✓' : '') + '</div>'
+              +       '<div class="meta">'
+              +         (k.event_code ? 'event ' + k.event_code + ' · ' : '')
+              +         'used ' + k.use_count + 'x · ' + (k.tickboxes||[]).length + ' tickboxes'
+              +       '</div>'
+              +     '</div>'
+              +     '<button onclick="window.__tsKBAttach(' + origIdx + ')" style="padding:4px 10px;border-radius:5px;border:1px solid ' + (attached ? '#15803d;background:#15803d;color:white' : '#cbd5e1;background:white;color:#374151') + ';font-size:0.74rem;font-weight:700;cursor:pointer">'
+              +       (attached ? '✓ Attached' : '📎 Attach to WO')
+              +     '</button>'
+              +   '</div>'
+              + '</div>';
+        }).join('');
     };
 
     window.__tsKBAttach = function(idx){
         var k = (state.kbSuggestions || [])[idx];
         if(!k) return;
         state.attachedKBID = (state.attachedKBID === k.id) ? null : k.id;
-        // Re-render the KB list so the active state updates
-        window.__tsKBLookup();
+        window.__tsKBRender();
     };
 
     window.__tsKBApply = function(idx){
@@ -1030,6 +1045,7 @@
             function(i){ return i.value.trim(); }
         ).filter(function(x){ return !!x; });
 
+        // Event code: system-default to 800000 (catch-all). Auto-categorization later.
         var body = {
             complaint_id:    c.id,
             machine_name:    c.machine_name,
@@ -1039,7 +1055,7 @@
             notes:           document.getElementById('tsWONotes').value.trim() || null,
             assigned_to:     document.getElementById('tsWOAssigned').value.trim() || null,
             priority:        parseInt(document.getElementById('tsWOPriority').value, 10),
-            event_code:      document.getElementById('tsWOEventCode').value || null,
+            event_code:      800000,
             attached_kb_id:  state.attachedKBID || null,
             tasks:           tickboxes,
         };

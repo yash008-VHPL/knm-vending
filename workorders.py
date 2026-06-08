@@ -549,6 +549,55 @@ def api_technicians_refresh():
         return jsonify({"error": str(e)}), 500
 
 
+@workorders_bp.route("/technicians/diag")
+@require_roles(ROLE_ADMIN)
+def api_technicians_diag():
+    """Admin diagnostic: shows raw Graph response so we can see why the dropdown
+    is empty. Returns the env-var presence, the appRoleAssignedTo response, and
+    the role-filter logic."""
+    import os
+    import requests as _req
+    import config as _cfg
+    sp_id   = (os.environ.get("MS_EASYAUTH_SP_OBJECT_ID") or getattr(_cfg, "MS_EASYAUTH_SP_OBJECT_ID", "") or "").strip()
+    role_id = (os.environ.get("MS_OPERATOR_ROLE_ID")     or getattr(_cfg, "MS_OPERATOR_ROLE_ID", "")     or "").strip()
+    out = {
+        "env": {
+            "MS_EASYAUTH_SP_OBJECT_ID_present": bool(sp_id),
+            "MS_EASYAUTH_SP_OBJECT_ID_value":   sp_id,
+            "MS_OPERATOR_ROLE_ID_present":      bool(role_id),
+            "MS_OPERATOR_ROLE_ID_value":        role_id,
+        },
+    }
+    if not sp_id or not role_id:
+        out["status"] = "env_vars_missing"
+        return jsonify(out)
+    try:
+        token_present = bool(sp._acquire_token())
+        out["token_acquired"] = token_present
+        url = f"{sp.GRAPH_BASE}/servicePrincipals/{sp_id}/appRoleAssignedTo"
+        r = _req.get(url, headers=sp._auth_header(), timeout=20)
+        out["graph_status_code"] = r.status_code
+        try:
+            j = r.json()
+        except Exception:
+            j = {"raw": r.text[:400]}
+        if r.status_code != 200:
+            out["status"] = "graph_error"
+            out["graph_response"] = j
+            return jsonify(out)
+        assignments = j.get("value", [])
+        out["total_assignments"] = len(assignments)
+        out["distinct_app_role_ids_seen"] = sorted({a.get("appRoleId") for a in assignments})
+        out["matches_for_target_role"] = sum(1 for a in assignments if a.get("appRoleId") == role_id)
+        out["sample_assignment"] = assignments[0] if assignments else None
+        out["status"] = "ok"
+        return jsonify(out)
+    except Exception as e:
+        out["status"] = "exception"
+        out["error"] = str(e)
+        return jsonify(out)
+
+
 # ── Bootstrap ─────────────────────────────────────────────────────────────────
 
 @workorders_bp.route("/bootstrap")
