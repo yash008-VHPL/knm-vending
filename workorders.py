@@ -588,8 +588,25 @@ def api_technicians_diag():
         assignments = j.get("value", [])
         out["total_assignments"] = len(assignments)
         out["distinct_app_role_ids_seen"] = sorted({a.get("appRoleId") for a in assignments})
-        out["matches_for_target_role"] = sum(1 for a in assignments if a.get("appRoleId") == role_id)
+        target_matches = [a for a in assignments if a.get("appRoleId") == role_id]
+        out["matches_for_target_role"] = len(target_matches)
         out["sample_assignment"] = assignments[0] if assignments else None
+        # Try to look up the FIRST user-type match and show what /users/{id} returns
+        user_match = next((a for a in target_matches if (a.get("principalType") or "") == "User"), None)
+        if user_match:
+            pid = user_match.get("principalId")
+            try:
+                ur = _req.get(
+                    f"{sp.GRAPH_BASE}/users/{pid}?$select=id,mail,userPrincipalName,displayName,accountEnabled",
+                    headers=sp._auth_header(), timeout=15,
+                )
+                out["user_lookup_status"]   = ur.status_code
+                try:
+                    out["user_lookup_body"] = ur.json()
+                except Exception:
+                    out["user_lookup_body"] = ur.text[:400]
+            except Exception as e2:
+                out["user_lookup_exception"] = str(e2)
         out["status"] = "ok"
         return jsonify(out)
     except Exception as e:
