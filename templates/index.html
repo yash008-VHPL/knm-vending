@@ -348,7 +348,18 @@
     </div>
     <div class="header-user">
         <span>{{ username }}</span>
+        {% if roles and roles|length > 1 %}
+        <select onchange="if(this.value){window.location='/api/switch-role/'+encodeURIComponent(this.value);}"
+                style="background:rgba(255,255,255,0.18);color:white;border:1px solid rgba(255,255,255,0.3);border-radius:6px;padding:5px 8px;font-size:0.82rem;font-weight:700;cursor:pointer">
+            {% for r in roles %}
+            <option value="{{ r }}" {% if r == role %}selected{% endif %} style="color:#111827">
+                {% if r == 'admin' %}Admin{% elif r == 'field_manager' %}Field Manager{% elif r == 'operator' %}Technician{% elif r == 'customer_service' %}Customer Service{% elif r == 'dispatch' %}Dispatch{% elif r == 'sales' %}Sales{% else %}{{ r }}{% endif %}
+            </option>
+            {% endfor %}
+        </select>
+        {% else %}
         <span class="role-badge">{{ role }}</span>
+        {% endif %}
         <a href="/.auth/logout?post_logout_redirect_uri=/" class="logout-btn">Sign out</a>
     </div>
 </header>

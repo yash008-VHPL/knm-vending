@@ -31,13 +31,39 @@ def get_current_user():
     return config.DEV_USER_EMAIL.strip().lower() if config.DEV_USER_EMAIL else ""
 
 
-def get_role(email=None):
+def get_all_roles(email=None):
+    """Return all roles claims for the signed-in user. May contain duplicates
+    or empties; caller can clean as needed."""
+    out = []
     principal = _decode_principal()
     if principal:
         for claim in principal.get("claims", []):
             if claim.get("typ") == "roles":
-                return claim.get("val", "").strip().lower()
-    return config.DEV_ROLE.strip().lower() if config.DEV_ROLE else None
+                v = (claim.get("val") or "").strip().lower()
+                if v and v not in out:
+                    out.append(v)
+    if not out and config.DEV_ROLE:
+        out = [config.DEV_ROLE.strip().lower()]
+    return out
+
+
+def get_role(email=None):
+    """Return the active role for the current request.
+    Honors a 'knm_active_role' cookie ONLY if its value is among the user's
+    actual role claims; otherwise falls back to the first claim.
+    """
+    roles = get_all_roles(email)
+    if not roles:
+        return None
+    # Cookie-based override for multi-role users
+    try:
+        wanted = (request.cookies.get("knm_active_role") or "").strip().lower()
+    except RuntimeError:
+        # No request context (e.g. unit tests); ignore cookie
+        wanted = ""
+    if wanted and wanted in roles:
+        return wanted
+    return roles[0]
 
 
 def login_required(f):
@@ -450,7 +476,31 @@ def logout():
 @login_required
 def index():
     email = get_current_user()
-    return render_template("index.html", role=get_role(email), username=email)
+    return render_template(
+        "index.html",
+        role=get_role(email),
+        roles=get_all_roles(email),
+        username=email,
+    )
+
+
+@app.route("/api/switch-role/<path:new_role>")
+@login_required
+def switch_role(new_role):
+    """Set the knm_active_role cookie if new_role is one of the user's actual
+    role claims. Then redirect back to '/' so the page re-renders."""
+    email = get_current_user()
+    roles = get_all_roles(email)
+    new_role = (new_role or "").strip().lower()
+    if new_role not in roles:
+        return jsonify({"error": "You don't have that role."}), 403
+    resp = redirect("/")
+    resp.set_cookie(
+        "knm_active_role", new_role,
+        max_age=60 * 60 * 24 * 7,   # 7 days
+        httponly=False, samesite="Lax",
+    )
+    return resp
 
 
 # ── Locations ──────────────────────────────────────────────────────────────────
