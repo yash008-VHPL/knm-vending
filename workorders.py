@@ -410,7 +410,7 @@ def allocate_display_id(cursor, kind: str) -> str:
     Uses WO_Counters with row-level locking to atomically allocate a new
     sequence number for the current YYMM. Caller must commit.
     """
-    if kind not in ("CMP", "WkO", "MVO"):
+    if kind not in ("CMP", "WkO", "MVO", "VIS"):
         raise ValueError(f"Unknown DisplayID kind: {kind!r}")
     now = datetime.utcnow()
     yymm = now.strftime("%y%m")
@@ -3353,3 +3353,936 @@ def api_equipment_log():
         },
         "events": events[:300],
     })
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Operator Work Order — unified PDF-template flow (Phase 2 / 2026-06-09)
+#  Replaces the existing operator/driver "Tech Support" flow per COO directive.
+#  Combines open Service WOs + open Delivery WO per machine into one document.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Service category constants (fixed 4 per the PDF template) ────────────────
+SERVICE_CATEGORIES = [
+    ("PMC", "General Machine Preventive Maintenance and Cleaning"),
+    ("CMR", "Machine Corrective Maintenance and Recovery"),
+    ("INR", "Machine Installation or Replacement"),
+    ("OTH", "Other Services"),
+]
+
+
+# ── Admin: WO_DeliveryItems CRUD (config) ────────────────────────────────────
+
+@workorders_bp.route("/admin/delivery-items")
+@api_login_required
+def api_delivery_items_list():
+    """All items; admins see inactive too. Used by operator visit form + admin UI."""
+    include_inactive = (
+        request.args.get("include_inactive") in ("1", "true", "yes")
+        and get_role(get_current_user()) == ROLE_ADMIN
+    )
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        sql = """
+            SELECT ItemID, Name, Unit, Content, SortOrder, IsActive,
+                   CreatedBy, CreatedAt, UpdatedBy, UpdatedAt
+            FROM WO_DeliveryItems
+        """
+        if not include_inactive:
+            sql += " WHERE IsActive = 1"
+        sql += " ORDER BY SortOrder, ItemID"
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([{
+            "id": r[0], "name": r[1], "unit": r[2], "content": r[3],
+            "sort_order": int(r[4]), "is_active": bool(r[5]),
+            "created_by": r[6], "created_at": _iso(r[7]),
+            "updated_by": r[8], "updated_at": _iso(r[9]),
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/admin/delivery-items", methods=["POST"])
+@require_roles(ROLE_ADMIN)
+def api_delivery_items_create():
+    data = request.get_json(silent=True) or {}
+    name = (data.get("name") or "").strip()
+    unit = (data.get("unit") or "").strip()
+    content = (data.get("content") or "").strip()
+    if not name or not unit or not content:
+        return jsonify({"error": "name, unit, content required."}), 400
+    try:
+        sort_order = int(data.get("sort_order") or 999)
+    except (TypeError, ValueError):
+        sort_order = 999
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO WO_DeliveryItems (Name, Unit, Content, SortOrder, CreatedBy)
+            OUTPUT INSERTED.ItemID
+            VALUES (%s, %s, %s, %s, %s)
+        """, (name[:255], unit[:50], content[:50], sort_order, user))
+        new_id = int(cursor.fetchone()[0])
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/admin/delivery-items/<int:iid>", methods=["PATCH"])
+@require_roles(ROLE_ADMIN)
+def api_delivery_items_update(iid):
+    data = request.get_json(silent=True) or {}
+    sets, params = [], []
+    for fld, col in (("name", "Name"), ("unit", "Unit"), ("content", "Content")):
+        if fld in data:
+            sets.append(f"{col} = %s")
+            params.append((str(data[fld]) or "").strip()[:255] or None)
+    if "sort_order" in data:
+        try:
+            sets.append("SortOrder = %s")
+            params.append(int(data["sort_order"]))
+        except (TypeError, ValueError):
+            pass
+    if "is_active" in data:
+        sets.append("IsActive = %s")
+        params.append(1 if data["is_active"] else 0)
+    if not sets:
+        return jsonify({"error": "No fields to update."}), 400
+    user = get_current_user()
+    sets.append("UpdatedBy = %s"); params.append(user)
+    sets.append("UpdatedAt = SYSUTCDATETIME()")
+    params.append(iid)
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"UPDATE WO_DeliveryItems SET {', '.join(sets)} WHERE ItemID = %s",
+            tuple(params),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/admin/delivery-items/<int:iid>", methods=["DELETE"])
+@require_roles(ROLE_ADMIN)
+def api_delivery_items_delete(iid):
+    """Soft-delete: IsActive=0 (preserves historical lines)."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE WO_DeliveryItems SET IsActive=0 WHERE ItemID=%s",
+            (iid,),
+        )
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Operator: color-coded location list ──────────────────────────────────────
+
+@workorders_bp.route("/operator/locations")
+@require_roles(*OPERATOR_ROLES)
+def api_operator_locations():
+    """Returns distinct machines where the current operator has open work.
+    Color codes:
+      'red'   = at least one open service JobOrder assigned to me
+      'blue'  = an open delivery WO assigned to me
+      'both'  = both red + blue
+    """
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT MachineCode, MAX(MachineName) AS MachineName,
+                   COUNT(*) AS OpenJobOrders
+            FROM WO_JobOrders
+            WHERE AssignedTo = %s AND StatusCode IN (0, 1)
+            GROUP BY MachineCode
+        """, (user,))
+        service_map = {str(r[0]): {"name": r[1], "open_jobs": int(r[2])}
+                       for r in cursor.fetchall() if r[0] is not None}
+
+        cursor.execute("""
+            SELECT MachineCode, MAX(MachineName) AS MachineName,
+                   COUNT(*) AS OpenDeliveries
+            FROM WO_DeliveryOrders
+            WHERE AssignedTo = %s AND Status <> 'completed'
+            GROUP BY MachineCode
+        """, (user,))
+        delivery_map = {str(r[0]): {"name": r[1], "open_deliveries": int(r[2])}
+                        for r in cursor.fetchall() if r[0] is not None}
+
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    out = []
+    for code in sorted(set(service_map) | set(delivery_map)):
+        has_svc = code in service_map
+        has_del = code in delivery_map
+        color = "both" if (has_svc and has_del) else ("red" if has_svc else "blue")
+        name = (service_map.get(code, {}).get("name")
+                or delivery_map.get(code, {}).get("name") or code)
+        out.append({
+            "machine_code": code,
+            "machine_name": name,
+            "color": color,
+            "open_service_count":  service_map.get(code, {}).get("open_jobs", 0),
+            "open_delivery_count": delivery_map.get(code, {}).get("open_deliveries", 0),
+        })
+    return jsonify(out)
+
+
+# ── Operator: location detail (combined view) ────────────────────────────────
+
+@workorders_bp.route("/operator/location/<path:code>")
+@require_roles(*OPERATOR_ROLES)
+def api_operator_location_detail(code):
+    """Returns the operator's view of one machine:
+      - Open service JobOrders assigned to me (with KB ref + diagnosis + proposed fix)
+      - The single open delivery WO assigned to me (if any) with its lines
+      - The 17 active delivery items (for the PDF-template grid)
+    """
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Machine info
+        cursor.execute("""
+            SELECT TOP 1 MachineName, ISNULL(IsActive, 1)
+            FROM MachineLookup WHERE MachineCode = %s
+        """, (code,))
+        m = cursor.fetchone()
+        if not m:
+            conn.close()
+            return jsonify({"error": "Machine not found."}), 404
+        machine = {"code": code, "name": m[0], "is_active": bool(m[1])}
+
+        # Service JobOrders for me, open
+        cursor.execute("""
+            SELECT JobOrderID, DisplayID, ComplaintID, Notes,
+                   PriorityCode, StatusCode,
+                   Diagnosis, ProposedFix, EventCode, AttachedKBID,
+                   OnSiteObservations, OnSiteChanges, TechnicianComments,
+                   CreatedBy, CreatedAt
+            FROM WO_JobOrders
+            WHERE MachineCode = %s AND AssignedTo = %s AND StatusCode IN (0, 1)
+            ORDER BY PriorityCode DESC, CreatedAt
+        """, (code, user))
+        service_wos = []
+        for r in cursor.fetchall():
+            wo = {
+                "id": r[0], "display_id": r[1], "complaint_id": r[2], "notes": r[3],
+                "priority_code": int(r[4]), "priority_label": _label(PRIORITY, r[4]),
+                "status_code":   int(r[5]), "status_label":   _label(JOBORDER_STATUS, r[5]),
+                "diagnosis": r[6], "proposed_fix": r[7],
+                "event_code": int(r[8]) if r[8] is not None else None,
+                "attached_kb_id": int(r[9]) if r[9] is not None else None,
+                "on_site_observations": r[10],
+                "on_site_changes":      r[11],
+                "technician_comments":  r[12],
+                "created_by": r[13], "created_at": _iso(r[14]),
+                "attached_kb": None,
+            }
+            # Pull KB ref summary if attached
+            if wo["attached_kb_id"]:
+                cursor.execute("""
+                    SELECT KBID, Title, Symptom, DiagnosticConfirmation, RootCause,
+                           CorrectiveAction, PreventiveAction, VerificationOfCompletion
+                    FROM WO_KB_Entries WHERE KBID = %s
+                """, (wo["attached_kb_id"],))
+                kr = cursor.fetchone()
+                if kr:
+                    wo["attached_kb"] = {
+                        "id": kr[0], "title": kr[1],
+                        "symptom": kr[2], "diagnostic_confirmation": kr[3],
+                        "root_cause": kr[4], "corrective_action": kr[5],
+                        "preventive_action": kr[6], "verification_of_completion": kr[7],
+                    }
+            service_wos.append(wo)
+
+        # Open delivery WO for me (max 1)
+        cursor.execute("""
+            SELECT TOP 1 DeliveryOrderID, Notes, Priority, Status,
+                         CreatedBy, CreatedAt
+            FROM WO_DeliveryOrders
+            WHERE MachineCode = %s AND AssignedTo = %s AND Status <> 'completed'
+            ORDER BY CreatedAt
+        """, (code, user))
+        drow = cursor.fetchone()
+        delivery_wo = None
+        if drow:
+            delivery_wo = {
+                "id": drow[0], "notes": drow[1], "priority": drow[2],
+                "status": drow[3], "created_by": drow[4], "created_at": _iso(drow[5]),
+                "lines": [],
+            }
+            cursor.execute("""
+                SELECT l.LineID, l.ItemID, l.QtyOrdered, l.QtyDelivered,
+                       i.Name, i.Unit, i.Content, i.SortOrder
+                FROM WO_DeliveryOrderLines l
+                INNER JOIN WO_DeliveryItems i ON i.ItemID = l.ItemID
+                WHERE l.DeliveryOrderID = %s
+                ORDER BY i.SortOrder, i.ItemID
+            """, (drow[0],))
+            for lr in cursor.fetchall():
+                delivery_wo["lines"].append({
+                    "line_id": lr[0], "item_id": lr[1],
+                    "qty_ordered": int(lr[2] or 0),
+                    "qty_delivered": int(lr[3]) if lr[3] is not None else None,
+                    "name": lr[4], "unit": lr[5], "content": lr[6],
+                    "sort_order": int(lr[7]),
+                })
+
+        # All active delivery items (for the grid — qty defaults to 0 if no line)
+        cursor.execute("""
+            SELECT ItemID, Name, Unit, Content, SortOrder
+            FROM WO_DeliveryItems WHERE IsActive = 1
+            ORDER BY SortOrder, ItemID
+        """)
+        items = [{
+            "id": r[0], "name": r[1], "unit": r[2], "content": r[3],
+            "sort_order": int(r[4]),
+        } for r in cursor.fetchall()]
+
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    return jsonify({
+        "machine":       machine,
+        "service_wos":   service_wos,
+        "delivery_wo":   delivery_wo,
+        "delivery_items": items,
+        "service_categories": [
+            {"code": code_, "label": label_} for code_, label_ in SERVICE_CATEGORIES
+        ],
+    })
+
+
+# ── Visit Sessions: start, patch, finalize, detail, PDF ──────────────────────
+
+def _visit_row_to_json(cursor, vrow):
+    """Format a WO_VisitSessions row as JSON. Pulls junction + delivery lines."""
+    vid = int(vrow[0])
+    out = {
+        "id": vid, "display_id": vrow[1],
+        "machine_code": vrow[2], "machine_name": vrow[3],
+        "operator_email": vrow[4],
+        "visit_date": str(vrow[5]) if vrow[5] else None,
+        "dispense_counter": int(vrow[6]) if vrow[6] is not None else None,
+        "services": {
+            "PMC": {"done": bool(vrow[7]),  "remarks": vrow[8]},
+            "CMR": {"done": bool(vrow[9]),  "remarks": vrow[10]},
+            "INR": {"done": bool(vrow[11]), "remarks": vrow[12]},
+            "OTH": {"done": bool(vrow[13]), "remarks": vrow[14]},
+        },
+        "receiving_name": vrow[15], "receiving_date": str(vrow[16]) if vrow[16] else None,
+        "service_name":   vrow[17], "service_date":   str(vrow[18]) if vrow[18] else None,
+        "customer_unavailable":        bool(vrow[19]),
+        "customer_unavailable_reason": vrow[20],
+        "status":      vrow[21],
+        "pdf_url":     vrow[22],
+        "linked_delivery_order_id": int(vrow[23]) if vrow[23] is not None else None,
+        "created_at":   _iso(vrow[24]),
+        "updated_at":   _iso(vrow[25]),
+        "submitted_at": _iso(vrow[26]),
+        "signed_at":    _iso(vrow[27]),
+        "linked_job_order_ids": [],
+    }
+    cursor.execute(
+        "SELECT JobOrderID FROM WO_VisitSession_JobOrders WHERE VisitID = %s",
+        (vid,),
+    )
+    out["linked_job_order_ids"] = [int(r[0]) for r in cursor.fetchall()]
+    return out
+
+
+def _select_visit_sql():
+    return """
+        SELECT VisitID, DisplayID, MachineCode, MachineNameSnap,
+               OperatorEmail, VisitDate, DispenseCounter,
+               Svc_PMC_Done, Svc_PMC_Remarks,
+               Svc_CMR_Done, Svc_CMR_Remarks,
+               Svc_INR_Done, Svc_INR_Remarks,
+               Svc_OTH_Done, Svc_OTH_Remarks,
+               ReceivingName, ReceivingDate,
+               ServiceName,   ServiceDate,
+               CustomerUnavailable, CustomerUnavailableReason,
+               Status, PDFSPWebURL,
+               LinkedDeliveryOrderID,
+               CreatedAt, UpdatedAt, SubmittedAt, SignedAt
+        FROM WO_VisitSessions
+    """
+
+
+@workorders_bp.route("/visits/start", methods=["POST"])
+@require_roles(*OPERATOR_ROLES)
+def api_visit_start():
+    """Create a draft visit for current operator + machine_code.
+    Body: {machine_code, service_job_order_ids: [int...], delivery_order_id: int|null}
+    Returns: full visit detail."""
+    data = request.get_json(silent=True) or {}
+    code = (data.get("machine_code") or "").strip()
+    if not code:
+        return jsonify({"error": "machine_code required."}), 400
+    sjo_ids = data.get("service_job_order_ids") or []
+    do_id   = data.get("delivery_order_id")
+    user = get_current_user()
+    today = datetime.utcnow().date()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT MachineName FROM MachineLookup WHERE MachineCode=%s", (code,))
+        mrow = cursor.fetchone()
+        machine_name = mrow[0] if mrow else None
+
+        display_id = allocate_display_id(cursor, "VIS")
+        cursor.execute("""
+            INSERT INTO WO_VisitSessions
+                (DisplayID, MachineCode, MachineNameSnap, OperatorEmail,
+                 VisitDate, LinkedDeliveryOrderID)
+            OUTPUT INSERTED.VisitID
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (display_id, code, machine_name, user, today, do_id))
+        vid = int(cursor.fetchone()[0])
+
+        for jid in sjo_ids:
+            try:
+                jid_int = int(jid)
+            except (TypeError, ValueError):
+                continue
+            cursor.execute(
+                "INSERT INTO WO_VisitSession_JobOrders (VisitID, JobOrderID) VALUES (%s, %s)",
+                (vid, jid_int),
+            )
+
+        cursor.execute(_select_visit_sql() + " WHERE VisitID = %s", (vid,))
+        row = cursor.fetchone()
+        out = _visit_row_to_json(cursor, row)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "visit": out})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/visits/<int:vid>", methods=["GET"])
+@require_roles(*OPERATOR_ROLES)
+def api_visit_detail(vid):
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(_select_visit_sql() + " WHERE VisitID = %s", (vid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Visit not found."}), 404
+        if get_role(user) not in MANAGER_ROLES and (row[4] or "").lower() != user.lower():
+            conn.close()
+            return jsonify({"error": "Not your visit."}), 403
+        out = _visit_row_to_json(cursor, row)
+        conn.close()
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/visits/<int:vid>", methods=["PATCH"])
+@require_roles(*OPERATOR_ROLES)
+def api_visit_update(vid):
+    """Save draft. Body any of:
+        dispense_counter:int, services:{PMC|CMR|INR|OTH: {done, remarks}},
+        delivery_lines:[{line_id?:int, item_id:int, qty_delivered:int}],
+        service_name:str, service_date:'YYYY-MM-DD',
+        customer_unavailable:bool, customer_unavailable_reason:str
+    """
+    data = request.get_json(silent=True) or {}
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT OperatorEmail, Status, LinkedDeliveryOrderID FROM WO_VisitSessions WHERE VisitID=%s",
+            (vid,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Visit not found."}), 404
+        if get_role(user) not in MANAGER_ROLES and (row[0] or "").lower() != user.lower():
+            conn.close()
+            return jsonify({"error": "Not your visit."}), 403
+        if row[1] in ("signed", "pending_email_signature"):
+            conn.close()
+            return jsonify({"error": "Visit already finalised; cannot edit."}), 400
+        linked_do = row[2]
+
+        sets, params = [], []
+        if "dispense_counter" in data:
+            try:
+                sets.append("DispenseCounter = %s")
+                params.append(int(data["dispense_counter"]) if data["dispense_counter"] not in (None, "") else None)
+            except (TypeError, ValueError):
+                return jsonify({"error": "dispense_counter must be integer."}), 400
+        svc = data.get("services") or {}
+        for code_ in ("PMC", "CMR", "INR", "OTH"):
+            if code_ in svc:
+                sets.append(f"Svc_{code_}_Done = %s")
+                params.append(1 if svc[code_].get("done") else 0)
+                sets.append(f"Svc_{code_}_Remarks = %s")
+                params.append((svc[code_].get("remarks") or "").strip() or None)
+        if "service_name" in data:
+            sets.append("ServiceName = %s")
+            params.append((data["service_name"] or "").strip() or None)
+        if "service_date" in data:
+            sets.append("ServiceDate = %s")
+            params.append(data["service_date"] or None)
+        if "customer_unavailable" in data:
+            sets.append("CustomerUnavailable = %s")
+            params.append(1 if data["customer_unavailable"] else 0)
+        if "customer_unavailable_reason" in data:
+            sets.append("CustomerUnavailableReason = %s")
+            params.append((data["customer_unavailable_reason"] or "").strip() or None)
+
+        if sets:
+            sets.append("UpdatedAt = SYSUTCDATETIME()")
+            params.append(vid)
+            cursor.execute(
+                f"UPDATE WO_VisitSessions SET {', '.join(sets)} WHERE VisitID = %s",
+                tuple(params),
+            )
+
+        # Upsert delivery lines (qty_delivered) — operator records actual qty
+        lines = data.get("delivery_lines") or []
+        if lines and linked_do is not None:
+            for ln in lines:
+                try:
+                    item_id = int(ln.get("item_id"))
+                    qty = int(ln.get("qty_delivered") or 0)
+                except (TypeError, ValueError):
+                    continue
+                # Try update first; insert if no row
+                cursor.execute("""
+                    UPDATE WO_DeliveryOrderLines SET QtyDelivered = %s
+                    WHERE DeliveryOrderID = %s AND ItemID = %s
+                """, (qty, linked_do, item_id))
+                cursor.execute("""
+                    IF NOT EXISTS (
+                        SELECT 1 FROM WO_DeliveryOrderLines
+                        WHERE DeliveryOrderID = %s AND ItemID = %s
+                    )
+                    INSERT INTO WO_DeliveryOrderLines
+                        (DeliveryOrderID, ItemID, QtyOrdered, QtyDelivered)
+                    VALUES (%s, %s, 0, %s)
+                """, (linked_do, item_id, linked_do, item_id, qty))
+
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── PDF generation (ReportLab — mirrors the KNM Work Order paper template) ────
+
+def _build_visit_pdf(visit, service_wos, delivery_wo, delivery_items_with_qty):
+    """Return PDF bytes for a finalised visit, modelled on KNM's 'Work Order 11May26.pdf'.
+    delivery_items_with_qty: [{name, unit, content, qty_delivered}]
+    """
+    from io import BytesIO
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib import colors
+    from reportlab.lib.units import mm
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer,
+                                    Table, TableStyle, KeepTogether)
+
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4,
+                            leftMargin=18*mm, rightMargin=18*mm,
+                            topMargin=15*mm, bottomMargin=15*mm,
+                            title=f"Work Order {visit.get('display_id') or visit['id']}")
+    ss = getSampleStyleSheet()
+    h1 = ParagraphStyle("h1", parent=ss["Heading1"], fontSize=18, alignment=2, textColor=colors.black, spaceAfter=4)
+    cn = ParagraphStyle("cn", parent=ss["Normal"], fontSize=10, leading=12)
+    sm = ParagraphStyle("sm", parent=ss["Normal"], fontSize=8,  leading=10, textColor=colors.grey)
+    sec = ParagraphStyle("sec", parent=ss["Heading2"], fontSize=12, spaceBefore=8, spaceAfter=4, textColor=colors.black)
+    body = ParagraphStyle("body", parent=ss["Normal"], fontSize=9, leading=11)
+
+    story = []
+
+    # Header
+    header_data = [
+        [Paragraph("<b>Kopi Near Me Pte. Ltd.</b>", cn), Paragraph("WORK ORDER", h1)],
+        [Paragraph("Kopi Near Me Pte. Ltd.<br/>18 Kim Chuan Terrace, #03-03, Singapore 537040", sm),
+         Paragraph("sales@kopinearme.com", sm)],
+    ]
+    story.append(Table(header_data, colWidths=[110*mm, 60*mm],
+                       style=TableStyle([("VALIGN", (0,0), (-1,-1), "TOP")])))
+    story.append(Spacer(1, 4*mm))
+
+    # Visit meta — Company / Date / Counter / DisplayID
+    machine_name = visit.get("machine_name") or visit.get("machine_code")
+    visit_date   = visit.get("visit_date")  or ""
+    counter      = visit.get("dispense_counter")
+    display_id   = visit.get("display_id") or f"VIS-{visit['id']}"
+
+    meta = [
+        [Paragraph("<b>Company Name</b>", body), Paragraph(machine_name, body),
+         Paragraph("<b>Date:</b>", body), Paragraph(str(visit_date), body)],
+        [Paragraph("<b>Dispense Counter:</b>", body),
+         Paragraph(str(counter) if counter is not None else "—", body),
+         Paragraph("<b>WO ID:</b>", body), Paragraph(display_id, body)],
+    ]
+    story.append(Table(meta, colWidths=[36*mm, 60*mm, 24*mm, 50*mm],
+                       style=TableStyle([
+                           ("LINEBELOW", (0,0), (-1,-1), 0.4, colors.grey),
+                           ("FONTSIZE", (0,0), (-1,-1), 9),
+                           ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+                           ("TOPPADDING",    (0,0), (-1,-1), 3),
+                       ])))
+    story.append(Spacer(1, 4*mm))
+
+    # Service requested highlight (if any open service WO)
+    if service_wos:
+        for wo in service_wos:
+            bits = []
+            if wo.get("display_id"):  bits.append(f"<b>{wo['display_id']}</b>")
+            if wo.get("diagnosis"):   bits.append(f"<b>Diagnosis:</b> {wo['diagnosis']}")
+            if wo.get("proposed_fix"):bits.append(f"<b>Proposed fix:</b> {wo['proposed_fix']}")
+            if wo.get("attached_kb"): bits.append(f"<b>Ref KB:</b> {wo['attached_kb'].get('title')}")
+            txt = "<br/>".join(bits)
+            box = Table([[Paragraph("⚠ <b>Service requested to fix issue</b>", body),
+                          Paragraph(txt, body)]],
+                        colWidths=[55*mm, 115*mm],
+                        style=TableStyle([
+                            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#fef3c7")),
+                            ("BOX",        (0,0), (-1,-1), 0.7, colors.HexColor("#b45309")),
+                            ("VALIGN",     (0,0), (-1,-1), "TOP"),
+                            ("LEFTPADDING",  (0,0), (-1,-1), 6),
+                            ("RIGHTPADDING", (0,0), (-1,-1), 6),
+                            ("TOPPADDING",   (0,0), (-1,-1), 5),
+                            ("BOTTOMPADDING",(0,0), (-1,-1), 5),
+                        ]))
+            story.append(box)
+            story.append(Spacer(1, 2*mm))
+        story.append(Spacer(1, 2*mm))
+
+    # SERVICES section
+    story.append(Paragraph("SERVICES", sec))
+    sv = visit.get("services", {})
+    svc_rows = [["Description", "Completed", "Remarks"]]
+    for code_, label_ in SERVICE_CATEGORIES:
+        v = sv.get(code_) or {}
+        svc_rows.append([
+            Paragraph(label_, body),
+            "✓" if v.get("done") else "☐",
+            Paragraph(v.get("remarks") or "", body),
+        ])
+    svc_t = Table(svc_rows, colWidths=[80*mm, 22*mm, 68*mm])
+    svc_t.setStyle(TableStyle([
+        ("BACKGROUND",  (0,0), (-1,0), colors.HexColor("#f9fafb")),
+        ("FONTNAME",    (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",    (0,0), (-1,-1), 9),
+        ("LINEBELOW",   (0,0), (-1,-1), 0.3, colors.lightgrey),
+        ("ALIGN",       (1,1), (1,-1), "CENTER"),
+        ("VALIGN",      (0,0), (-1,-1), "MIDDLE"),
+        ("TOPPADDING",  (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 4),
+    ]))
+    story.append(svc_t)
+    story.append(Spacer(1, 4*mm))
+
+    # DELIVERY section
+    story.append(Paragraph("DELIVERY", sec))
+    dl_rows = [["Description", "Unit", "Content", "Qty"]]
+    for it in delivery_items_with_qty:
+        qty = it.get("qty_delivered")
+        dl_rows.append([
+            Paragraph(it["name"], body),
+            it["unit"], it["content"],
+            str(qty) if qty is not None else "—",
+        ])
+    dl_t = Table(dl_rows, colWidths=[80*mm, 22*mm, 30*mm, 38*mm])
+    dl_t.setStyle(TableStyle([
+        ("BACKGROUND",   (0,0), (-1,0), colors.HexColor("#f9fafb")),
+        ("FONTNAME",     (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE",     (0,0), (-1,-1), 9),
+        ("LINEBELOW",    (0,0), (-1,-1), 0.3, colors.lightgrey),
+        ("ALIGN",        (1,1), (-1,-1), "CENTER"),
+        ("VALIGN",       (0,0), (-1,-1), "MIDDLE"),
+        ("TOPPADDING",   (0,0), (-1,-1), 3),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 3),
+    ]))
+    story.append(dl_t)
+    story.append(Spacer(1, 6*mm))
+
+    # Acknowledgement + signatures
+    story.append(Paragraph(
+        "The Receiving Personnel has checked and verified that services rendered and goods delivered are in good order.",
+        body
+    ))
+    story.append(Spacer(1, 4*mm))
+
+    if visit.get("customer_unavailable"):
+        unavail_box = Table([[Paragraph(
+            f"⚠ <b>Customer unavailable on site.</b><br/>Reason: {visit.get('customer_unavailable_reason') or '—'}<br/>"
+            "PDF to be emailed to contact person for sign-off.", body
+        )]], colWidths=[170*mm],
+        style=TableStyle([
+            ("BACKGROUND", (0,0), (-1,-1), colors.HexColor("#fee2e2")),
+            ("BOX", (0,0), (-1,-1), 0.7, colors.HexColor("#b91c1c")),
+            ("LEFTPADDING",   (0,0), (-1,-1), 8),
+            ("RIGHTPADDING",  (0,0), (-1,-1), 8),
+            ("TOPPADDING",    (0,0), (-1,-1), 6),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+        ]))
+        story.append(unavail_box)
+        story.append(Spacer(1, 4*mm))
+
+    sigs = [
+        [Paragraph("<b>Receiving Personnel</b>", body),
+         Paragraph("<b>Service Personnel</b>", body)],
+        [Paragraph(f"Signature: <i>{visit.get('receiving_name') or '— pending —'}</i>", body),
+         Paragraph(f"Signature: <i>{visit.get('service_name') or '— pending —'}</i>", body)],
+        [Paragraph(f"Name / Date: {visit.get('receiving_name') or '—'} / {visit.get('receiving_date') or '—'}", body),
+         Paragraph(f"Name / Date: {visit.get('service_name') or '—'} / {visit.get('service_date') or '—'}", body)],
+    ]
+    story.append(Table(sigs, colWidths=[85*mm, 85*mm],
+                       style=TableStyle([
+                           ("LINEABOVE", (0,1), (-1,1), 0.4, colors.grey),
+                           ("VALIGN", (0,0), (-1,-1), "TOP"),
+                           ("TOPPADDING", (0,0), (-1,-1), 6),
+                           ("BOTTOMPADDING", (0,0), (-1,-1), 4),
+                       ])))
+
+    doc.build(story)
+    return buf.getvalue()
+
+
+@workorders_bp.route("/visits/<int:vid>/finalize", methods=["POST"])
+@require_roles(*OPERATOR_ROLES)
+def api_visit_finalize(vid):
+    """Finalise the visit: validate, save signature(s), generate PDF, upload to SP,
+    transition linked WOs.
+
+    Body:
+        receiving_name: str|null (if customer present)
+        receiving_date: 'YYYY-MM-DD'
+        service_name:   str (operator typed)
+        service_date:   'YYYY-MM-DD'
+        customer_unavailable: bool
+        customer_unavailable_reason: str
+    """
+    data = request.get_json(silent=True) or {}
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(_select_visit_sql() + " WHERE VisitID = %s", (vid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Visit not found."}), 404
+        if get_role(user) not in MANAGER_ROLES and (row[4] or "").lower() != user.lower():
+            conn.close()
+            return jsonify({"error": "Not your visit."}), 403
+        if row[21] in ("signed", "pending_email_signature"):
+            conn.close()
+            return jsonify({"error": "Already finalised."}), 400
+
+        cust_unavail   = bool(data.get("customer_unavailable"))
+        cust_reason    = (data.get("customer_unavailable_reason") or "").strip() or None
+        receiving_name = (data.get("receiving_name") or "").strip() or None
+        receiving_date = data.get("receiving_date") or None
+        service_name   = (data.get("service_name") or "").strip() or None
+        service_date   = data.get("service_date") or None
+
+        if not service_name:
+            conn.close()
+            return jsonify({"error": "Service Personnel name (you) is required."}), 400
+
+        if cust_unavail and not cust_reason:
+            conn.close()
+            return jsonify({"error": "Reason required when customer unavailable."}), 400
+        if not cust_unavail and not receiving_name:
+            conn.close()
+            return jsonify({"error": "Receiving Personnel name required (or mark customer unavailable)."}), 400
+
+        new_status = "pending_email_signature" if cust_unavail else "signed"
+
+        cursor.execute("""
+            UPDATE WO_VisitSessions
+            SET ReceivingName = %s, ReceivingDate = %s,
+                ServiceName   = %s, ServiceDate   = %s,
+                CustomerUnavailable = %s, CustomerUnavailableReason = %s,
+                Status = %s, SubmittedAt = SYSUTCDATETIME(),
+                SignedAt = CASE WHEN %s = 'signed' THEN SYSUTCDATETIME() ELSE NULL END
+            WHERE VisitID = %s
+        """, (receiving_name, receiving_date,
+              service_name, service_date,
+              1 if cust_unavail else 0, cust_reason,
+              new_status, new_status, vid))
+
+        # Refetch the visit + supporting data needed for PDF
+        cursor.execute(_select_visit_sql() + " WHERE VisitID = %s", (vid,))
+        vrow = cursor.fetchone()
+        visit = _visit_row_to_json(cursor, vrow)
+
+        # Linked service WOs (snapshot)
+        service_wos = []
+        if visit["linked_job_order_ids"]:
+            ph = ",".join(["%s"] * len(visit["linked_job_order_ids"]))
+            cursor.execute(f"""
+                SELECT JobOrderID, DisplayID, Diagnosis, ProposedFix, AttachedKBID
+                FROM WO_JobOrders WHERE JobOrderID IN ({ph})
+            """, tuple(visit["linked_job_order_ids"]))
+            for r in cursor.fetchall():
+                wo = {"id": r[0], "display_id": r[1], "diagnosis": r[2],
+                      "proposed_fix": r[3], "attached_kb": None}
+                if r[4] is not None:
+                    cursor.execute(
+                        "SELECT Title FROM WO_KB_Entries WHERE KBID = %s",
+                        (r[4],),
+                    )
+                    kt = cursor.fetchone()
+                    if kt:
+                        wo["attached_kb"] = {"title": kt[0]}
+                service_wos.append(wo)
+
+        # Delivery items (all active + the qty_delivered from lines if linked)
+        delivery_items_with_qty = []
+        cursor.execute("""
+            SELECT ItemID, Name, Unit, Content, SortOrder
+            FROM WO_DeliveryItems WHERE IsActive = 1
+            ORDER BY SortOrder, ItemID
+        """)
+        items_meta = [(r[0], r[1], r[2], r[3]) for r in cursor.fetchall()]
+        qty_map = {}
+        if visit["linked_delivery_order_id"]:
+            cursor.execute("""
+                SELECT ItemID, QtyDelivered
+                FROM WO_DeliveryOrderLines WHERE DeliveryOrderID = %s
+            """, (visit["linked_delivery_order_id"],))
+            qty_map = {int(r[0]): (int(r[1]) if r[1] is not None else None)
+                       for r in cursor.fetchall()}
+        for iid, name, unit, content in items_meta:
+            delivery_items_with_qty.append({
+                "name": name, "unit": unit, "content": content,
+                "qty_delivered": qty_map.get(int(iid)),
+            })
+
+        # Transition linked WOs:
+        #   Each linked JobOrder → StatusCode = 2 (pending_review) so manager reviews
+        for jid in visit["linked_job_order_ids"]:
+            cursor.execute("""
+                UPDATE WO_JobOrders
+                SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
+                WHERE JobOrderID = %s
+            """, (user, jid))
+            _log_activity(cursor, "joborder", jid, "visit_submit",
+                          f"Linked to visit {visit['display_id']}", user)
+        # Linked DeliveryOrder → status = completed (only if signed; if pending email, mark in flight)
+        if visit["linked_delivery_order_id"] and not cust_unavail:
+            cursor.execute("""
+                UPDATE WO_DeliveryOrders
+                SET Status = 'completed', CompletedBy = %s, CompletedAt = SYSUTCDATETIME(),
+                    RecipientName = %s
+                WHERE DeliveryOrderID = %s
+            """, (user, receiving_name, visit["linked_delivery_order_id"]))
+            _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
+                          "visit_submit",
+                          f"Linked to visit {visit['display_id']}", user)
+
+        # Build PDF + upload to SharePoint
+        try:
+            pdf_bytes = _build_visit_pdf(visit, service_wos, None, delivery_items_with_qty)
+            now = datetime.utcnow()
+            sp_item_id, web_url, _path = sp.upload_bytes(
+                kind="workorder",
+                display_id=visit["display_id"] or f"VIS-{vid}",
+                year=now.year, month=now.month,
+                file_name=f"{visit['display_id'] or 'VIS-' + str(vid)}.pdf",
+                data=pdf_bytes,
+                content_type="application/pdf",
+            )
+            cursor.execute(
+                "UPDATE WO_VisitSessions SET PDFSPItemID = %s, PDFSPWebURL = %s WHERE VisitID = %s",
+                (sp_item_id, web_url, vid),
+            )
+        except Exception as e:
+            # PDF/SP failure should not block submission; log and continue
+            print(f"[visit_finalize] PDF/SP upload failed for visit {vid}: {e}")
+
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "status": new_status})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/visits/<int:vid>/pdf")
+@require_roles(*OPERATOR_ROLES)
+def api_visit_pdf(vid):
+    """Proxy the SP-hosted PDF so Easy Auth gates the read."""
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT OperatorEmail, PDFSPItemID FROM WO_VisitSessions WHERE VisitID = %s
+        """, (vid,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"error": "Visit not found."}), 404
+        if get_role(user) not in MANAGER_ROLES and (row[0] or "").lower() != user.lower():
+            return jsonify({"error": "Not your visit."}), 403
+        if not row[1]:
+            return jsonify({"error": "PDF not yet generated."}), 404
+        body, ctype = sp.download_bytes(row[1])
+        return Response(body, mimetype=ctype or "application/pdf")
+    except Exception as e:
+        return jsonify({"error": f"PDF read failed: {str(e)}"}), 500
+
+
+@workorders_bp.route("/visits")
+@require_roles(*OPERATOR_ROLES)
+def api_visit_list():
+    """List visits — operator sees their own; manager sees all."""
+    user = get_current_user()
+    scope = (request.args.get("scope") or "mine").strip().lower()
+    if get_role(user) not in MANAGER_ROLES:
+        scope = "mine"
+    where, params = [], []
+    if scope == "mine":
+        where.append("OperatorEmail = %s")
+        params.append(user)
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(_select_visit_sql() + f" {where_sql} ORDER BY VisitDate DESC, VisitID DESC")
+        rows = cursor.fetchall()
+        out = [_visit_row_to_json(cursor, r) for r in rows]
+        conn.close()
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500

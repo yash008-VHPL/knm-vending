@@ -1,7 +1,4 @@
 # Append to requirements.txt before deploy. Do not commit config.py changes.
-flask
-gunicorn
 msal>=1.28
-pymssql
 requests>=2.32
 reportlab>=4.0
