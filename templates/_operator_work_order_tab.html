@@ -1,0 +1,581 @@
+<!--
+  Operator Work Order tab — replaces the prior "Tech Support" operator view.
+  Mirrors the KNM paper Work Order template (Services + Delivery + Signatures).
+  Color-coded location list → Work Order page → customer signature popup.
+  Namespace: .owo-*
+-->
+
+<style>
+    .owo-section { max-width: 860px; margin: 14px auto; padding: 0 12px; }
+
+    .owo-toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; align-items: center; }
+    .owo-toolbar input[type="search"] {
+        padding: 9px 12px; border: 1px solid #d1d5db; border-radius: 7px;
+        font-size: 0.92rem; flex: 1; min-width: 160px;
+    }
+    .owo-msg { padding: 10px 14px; border-radius: 7px; font-size: 0.88rem; margin-bottom: 12px; }
+    .owo-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .owo-msg.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .owo-msg.ok      { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+    .owo-empty { text-align: center; color: #9ca3af; padding: 40px 10px; font-size: 0.9rem; }
+
+    /* Location card */
+    .owo-card {
+        background: white; border: 1px solid #e5e7eb; border-radius: 11px;
+        padding: 14px 16px; margin-bottom: 10px; cursor: pointer;
+        position: relative; overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .owo-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+    .owo-card .stripe {
+        position: absolute; left: 0; top: 0; bottom: 0; width: 8px;
+    }
+    .owo-card.red    .stripe { background: #dc2626; }
+    .owo-card.blue   .stripe { background: #2563eb; }
+    .owo-card.both   .stripe {
+        background: repeating-linear-gradient(135deg, #dc2626 0, #dc2626 10px, #2563eb 10px, #2563eb 20px);
+    }
+    .owo-card-body { padding-left: 12px; }
+    .owo-card .name { font-weight: 700; color: #111827; font-size: 1rem; }
+    .owo-card .code { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; margin-top: 2px; }
+    .owo-card .sub { font-size: 0.82rem; color: #6b7280; margin-top: 5px; display: flex; gap: 8px; flex-wrap: wrap; }
+    .owo-pill {
+        font-size: 0.68rem; font-weight: 700; text-transform: uppercase;
+        padding: 2px 8px; border-radius: 10px; letter-spacing: 0.04em; white-space: nowrap;
+    }
+    .owo-pill.red  { background: #fee2e2; color: #b91c1c; }
+    .owo-pill.blue { background: #dbeafe; color: #1e40af; }
+
+    /* Work order detail */
+    .owo-detail { background: white; border: 1px solid #e5e7eb; border-radius: 11px; padding: 14px; }
+    .owo-detail .back {
+        background: none; border: none; color: #1a56db; font-weight: 600;
+        font-size: 0.9rem; cursor: pointer; padding: 0; margin-bottom: 10px;
+    }
+    .owo-header {
+        display: flex; gap: 10px; justify-content: space-between; flex-wrap: wrap;
+        border-bottom: 1px solid #e5e7eb; padding-bottom: 10px; margin-bottom: 12px;
+    }
+    .owo-header h2 { margin: 0; font-size: 1.15rem; color: #111827; }
+    .owo-header .id { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #6b7280; margin-top: 2px; }
+    .owo-header .right { font-size: 0.78rem; color: #6b7280; text-align: right; }
+
+    .owo-svc-highlight {
+        background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px;
+        padding: 10px 12px; margin-bottom: 12px;
+    }
+    .owo-svc-highlight h4 { margin: 0 0 5px 0; font-size: 0.92rem; color: #92400e; }
+    .owo-svc-highlight .ref { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #92400e; }
+    .owo-svc-highlight .field { font-size: 0.86rem; color: #111827; margin-top: 5px; }
+    .owo-svc-highlight .field strong { color: #92400e; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .owo-svc-highlight .more {
+        color: #1a56db; cursor: pointer; font-size: 0.82rem; margin-top: 6px;
+        text-decoration: underline; background: none; border: none; padding: 0; font-weight: 600;
+    }
+
+    .owo-sec-title {
+        font-size: 0.75rem; font-weight: 800; letter-spacing: 0.08em;
+        color: #6b7280; text-transform: uppercase; margin: 14px 0 8px 0;
+        border-bottom: 1px solid #e5e7eb; padding-bottom: 4px;
+    }
+
+    .owo-meta-row {
+        display: grid; gap: 10px; grid-template-columns: 1fr 1fr; margin-bottom: 10px;
+    }
+    .owo-meta-row label {
+        display: block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        color: #6b7280; letter-spacing: 0.04em; margin-bottom: 4px;
+    }
+    .owo-meta-row input, .owo-meta-row select {
+        width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-size: 0.9rem;
+    }
+
+    /* Services table */
+    .owo-svc-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    .owo-svc-table th, .owo-svc-table td {
+        padding: 8px 10px; border-bottom: 1px solid #f3f4f6; text-align: left; vertical-align: middle;
+    }
+    .owo-svc-table th { font-size: 0.7rem; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; }
+    .owo-svc-table td input[type="checkbox"] { width: 20px; height: 20px; cursor: pointer; }
+    .owo-svc-table td input[type="text"] {
+        width: 100%; padding: 6px 9px; border: 1px solid #d1d5db; border-radius: 5px; font-size: 0.86rem;
+    }
+
+    /* Delivery table */
+    .owo-del-table { width: 100%; border-collapse: collapse; font-size: 0.86rem; }
+    .owo-del-table th, .owo-del-table td {
+        padding: 7px 8px; border-bottom: 1px solid #f3f4f6; vertical-align: middle;
+    }
+    .owo-del-table th { font-size: 0.68rem; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em; text-align: left; }
+    .owo-del-table td.center { text-align: center; }
+    .owo-del-table td input[type="number"] {
+        width: 70px; padding: 6px 8px; border: 1px solid #d1d5db; border-radius: 5px; font-size: 0.88rem;
+    }
+    .owo-qty-ordered { color: #6b7280; font-size: 0.78rem; }
+
+    .owo-cust-unavail {
+        background: #fef2f2; border: 1px solid #fecaca; padding: 9px 11px;
+        border-radius: 7px; margin: 12px 0;
+    }
+    .owo-cust-unavail label { font-weight: 600; color: #991b1b; cursor: pointer; }
+    .owo-cust-unavail textarea {
+        width: 100%; padding: 8px; border: 1px solid #fecaca; border-radius: 5px;
+        font-family: inherit; font-size: 0.86rem; margin-top: 6px; display: none;
+    }
+    .owo-cust-unavail.on textarea { display: block; }
+
+    .owo-actions {
+        display: flex; gap: 8px; margin-top: 14px; padding-top: 12px;
+        border-top: 1px solid #e5e7eb; flex-wrap: wrap;
+    }
+    .owo-actions button {
+        flex: 1; min-width: 130px; padding: 11px; border-radius: 8px; border: none;
+        font-weight: 700; font-size: 0.92rem; cursor: pointer;
+    }
+    .owo-btn-save  { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+    .owo-btn-submit{ background: #15803d; color: white; }
+
+    /* Signature popup */
+    .owo-sig-overlay {
+        display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.6);
+        z-index: 110; padding: 20px; align-items: center; justify-content: center;
+    }
+    .owo-sig-overlay.open { display: flex; }
+    .owo-sig-box {
+        background: white; border-radius: 11px; padding: 20px; max-width: 480px; width: 100%;
+    }
+    .owo-sig-box h3 { margin: 0 0 8px 0; font-size: 1.05rem; }
+    .owo-sig-box p { margin: 0 0 12px 0; font-size: 0.88rem; color: #374151; line-height: 1.4; }
+    .owo-sig-box .fld { display: block; margin-bottom: 10px; }
+    .owo-sig-box label {
+        display: block; font-size: 0.72rem; font-weight: 700; color: #6b7280;
+        text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+    }
+    .owo-sig-box input {
+        width: 100%; padding: 9px 11px; border: 1px solid #d1d5db; border-radius: 7px; font-size: 0.95rem;
+    }
+    .owo-sig-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+    .owo-sig-actions button {
+        padding: 9px 16px; border-radius: 7px; border: none; font-weight: 700; cursor: pointer;
+    }
+    .owo-sig-cancel { background: #f3f4f6; color: #374151; }
+    .owo-sig-confirm { background: #15803d; color: white; }
+    .owo-sig-skip   { background: #fef3c7; color: #92400e; }
+
+    /* Modal — full WO context popout from "View full complaint" */
+    .owo-modal {
+        display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.55);
+        z-index: 120; padding: 20px; align-items: flex-start; justify-content: center; overflow-y: auto;
+    }
+    .owo-modal.open { display: flex; }
+    .owo-modal .box {
+        background: white; border-radius: 11px; padding: 18px; max-width: 600px; width: 100%; margin: auto;
+    }
+    .owo-modal .box h3 { margin: 0 0 8px 0; }
+    .owo-modal .box .x {
+        background: none; border: none; color: #6b7280; font-size: 1.4rem; cursor: pointer; float: right; line-height: 1;
+    }
+
+    @media (max-width: 600px) {
+        .owo-meta-row { grid-template-columns: 1fr; }
+        .owo-del-table td input[type="number"] { width: 60px; }
+    }
+</style>
+
+<div class="owo-section">
+    <div class="owo-toolbar">
+        <input type="search" id="owoSearch" placeholder="Search location…" oninput="window.__owoFilter()">
+        <button onclick="window.__owoRefresh()" style="padding:8px 14px;border-radius:6px;border:1px solid #d1d5db;background:white;font-weight:600;cursor:pointer">↻ Refresh</button>
+    </div>
+    <div id="owoMsg"></div>
+    <div id="owoList"></div>
+    <div id="owoDetail" style="display:none"></div>
+</div>
+
+<!-- Customer signature popup -->
+<div id="owoSigOverlay" class="owo-sig-overlay" onclick="if(event.target===this)window.__owoSigCancel()">
+    <div class="owo-sig-box">
+        <h3 id="owoSigTitle">Customer Sign-off</h3>
+        <p>Please review the work performed and confirm by typing your name. Your name forms part of the signed Work Order document; we do not retain a separate signature image.</p>
+        <div class="fld">
+            <label>Receiving Personnel Name *</label>
+            <input type="text" id="owoSigName" placeholder="Print full name">
+        </div>
+        <div class="fld">
+            <label>Date *</label>
+            <input type="date" id="owoSigDate">
+        </div>
+        <div class="owo-sig-actions">
+            <button class="owo-sig-cancel" onclick="window.__owoSigCancel()">Cancel</button>
+            <button class="owo-sig-skip"   onclick="window.__owoSigUnavailable()">Customer unavailable</button>
+            <button class="owo-sig-confirm" onclick="window.__owoSigConfirm()">Confirm &amp; Submit</button>
+        </div>
+    </div>
+</div>
+
+<!-- Full-complaint detail modal -->
+<div id="owoComplaintModal" class="owo-modal" onclick="if(event.target===this)window.__owoCloseComplaint()">
+    <div class="box">
+        <button class="x" onclick="window.__owoCloseComplaint()">&times;</button>
+        <h3>Source Complaint</h3>
+        <div id="owoComplaintBody">Loading…</div>
+    </div>
+</div>
+
+<script>
+(function(){
+    'use strict';
+
+    var state = {
+        bootstrap: null, locations: [], loaded: false,
+        currentDetail: null,   // server response for /api/wo/operator/location/<code>
+        currentVisit: null,    // the draft visit we created
+    };
+
+    function api(url, opts){
+        opts = opts || {};
+        opts.headers = opts.headers || {};
+        opts.headers['Accept'] = 'application/json';
+        return fetch(url, opts).then(function(r){
+            return r.text().then(function(txt){
+                var d;
+                try { d = txt ? JSON.parse(txt) : {}; } catch(e){
+                    throw new Error('Server returned non-JSON (status ' + r.status + ').');
+                }
+                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                return d;
+            });
+        }, function(err){
+            throw new Error('Network error — ' + (err && err.message || err));
+        });
+    }
+    function postJSON(url, body, method){
+        return api(url, {
+            method: method || 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body || {}),
+        });
+    }
+    function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+    }); }
+    function todayISO(){
+        var d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+        return d.toISOString().slice(0,10);
+    }
+    function showMsg(html, cls){
+        document.getElementById('owoMsg').innerHTML = html ? '<div class="owo-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+
+    window.__owoInit = function(){
+        if(state.loaded) return;
+        state.loaded = true;
+        window.__owoRefresh();
+    };
+
+    window.__owoRefresh = function(){
+        showMsg('Loading your locations…', 'loading');
+        document.getElementById('owoDetail').style.display = 'none';
+        document.getElementById('owoList').style.display = 'block';
+        api('/api/wo/operator/locations').then(function(arr){
+            state.locations = arr || [];
+            renderList();
+            showMsg('', '');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    function renderList(){
+        var q = (document.getElementById('owoSearch').value || '').toLowerCase();
+        var rows = state.locations.filter(function(l){
+            if(!q) return true;
+            return (l.machine_name || '').toLowerCase().indexOf(q) >= 0
+                || (l.machine_code || '').toLowerCase().indexOf(q) >= 0;
+        });
+        if(!rows.length){
+            document.getElementById('owoList').innerHTML =
+                '<div class="owo-empty">No work assigned to you. ✓</div>';
+            return;
+        }
+        document.getElementById('owoList').innerHTML = rows.map(function(l){
+            var pills = '';
+            if(l.open_service_count)  pills += '<span class="owo-pill red">Service · ' + l.open_service_count + '</span>';
+            if(l.open_delivery_count) pills += '<span class="owo-pill blue">Top up · ' + l.open_delivery_count + '</span>';
+            return ''
+              + '<div class="owo-card ' + esc(l.color) + '" onclick="window.__owoOpenLocation(\'' + esc(l.machine_code) + '\')">'
+              +   '<div class="stripe"></div>'
+              +   '<div class="owo-card-body">'
+              +     '<div class="name">' + esc(l.machine_name || '?') + '</div>'
+              +     '<div class="code">' + esc(l.machine_code || '') + '</div>'
+              +     '<div class="sub">' + pills + '</div>'
+              +   '</div>'
+              + '</div>';
+        }).join('');
+    }
+
+    window.__owoFilter = renderList;
+
+    // ── Open one location → load detail → create draft visit ──
+    window.__owoOpenLocation = function(code){
+        showMsg('Loading work order…', 'loading');
+        api('/api/wo/operator/location/' + encodeURIComponent(code)).then(function(d){
+            state.currentDetail = d;
+            // Start a draft visit linking all open service WOs + the delivery WO
+            var sjo = (d.service_wos || []).map(function(w){ return w.id; });
+            return postJSON('/api/wo/visits/start', {
+                machine_code: code,
+                service_job_order_ids: sjo,
+                delivery_order_id: d.delivery_wo ? d.delivery_wo.id : null,
+            }).then(function(res){
+                state.currentVisit = res.visit;
+                renderDetail();
+                showMsg('', '');
+            });
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    };
+
+    function renderDetail(){
+        var d = state.currentDetail; var v = state.currentVisit;
+        if(!d || !v) return;
+
+        // Header (machine, date, dispense counter, display id)
+        var html = ''
+          + '<button class="back" onclick="window.__owoRefresh()">← Back to locations</button>'
+          + '<div class="owo-detail">'
+          +   '<div class="owo-header">'
+          +     '<div>'
+          +       '<h2>' + esc(d.machine.name || d.machine.code) + '</h2>'
+          +       '<div class="id">' + esc(d.machine.code) + '</div>'
+          +     '</div>'
+          +     '<div class="right">'
+          +       '<div>' + esc(v.display_id || '#' + v.id) + '</div>'
+          +       '<div>' + esc(v.visit_date) + '</div>'
+          +     '</div>'
+          +   '</div>';
+
+        // Service highlights for each open service WO
+        (d.service_wos || []).forEach(function(wo){
+            var bits = '';
+            if(wo.attached_kb && wo.attached_kb.title){
+                bits += '<div class="field"><strong>KB Ref:</strong> ' + esc(wo.attached_kb.title) + '</div>';
+            }
+            if(wo.diagnosis){
+                bits += '<div class="field"><strong>Diagnosis:</strong> ' + esc(wo.diagnosis) + '</div>';
+            }
+            if(wo.proposed_fix){
+                bits += '<div class="field"><strong>Proposed fix:</strong> ' + esc(wo.proposed_fix) + '</div>';
+            }
+            html += ''
+              + '<div class="owo-svc-highlight">'
+              +   '<h4>⚠ Service requested to fix issue</h4>'
+              +   '<div class="ref">' + esc(wo.display_id || '#' + wo.id) + '</div>'
+              +   bits
+              +   (wo.complaint_id ? '<button class="more" onclick="window.__owoShowComplaint(' + wo.complaint_id + ')">View full complaint →</button>' : '')
+              + '</div>';
+        });
+
+        // Meta — Company name (read-only) / Date / Dispense Counter / WO ID
+        html += ''
+          + '<div class="owo-meta-row">'
+          +   '<div><label>Company Name</label><input type="text" readonly value="' + esc(d.machine.name || d.machine.code) + '"></div>'
+          +   '<div><label>Date</label><input type="date" id="owoDate" value="' + esc(v.visit_date) + '" disabled></div>'
+          + '</div>'
+          + '<div class="owo-meta-row">'
+          +   '<div><label>Dispense Counter</label><input type="number" id="owoCounter" placeholder="Read from machine display" value="' + (v.dispense_counter != null ? v.dispense_counter : '') + '"></div>'
+          +   '<div><label>Work Order ID</label><input type="text" readonly value="' + esc(v.display_id || '') + '"></div>'
+          + '</div>';
+
+        // SERVICES table
+        html += '<div class="owo-sec-title">Services</div>'
+              + '<table class="owo-svc-table">'
+              +   '<thead><tr><th style="width:60%">Description</th><th style="width:90px">Completed</th><th>Remarks</th></tr></thead>'
+              +   '<tbody>';
+        (d.service_categories || []).forEach(function(cat){
+            var v_cat = (v.services && v.services[cat.code]) || {};
+            html += '<tr>'
+                  +   '<td>' + esc(cat.label) + '</td>'
+                  +   '<td><input type="checkbox" id="owoSvc_' + cat.code + '_done"' + (v_cat.done ? ' checked' : '') + '></td>'
+                  +   '<td><input type="text" id="owoSvc_' + cat.code + '_remarks" value="' + esc(v_cat.remarks || '') + '" placeholder="Optional"></td>'
+                  + '</tr>';
+        });
+        html += '</tbody></table>';
+
+        // DELIVERY table
+        html += '<div class="owo-sec-title">Delivery</div>';
+        var hasDelivery = d.delivery_wo && (d.delivery_items || []).length;
+        if(!hasDelivery){
+            html += '<div style="font-size:0.86rem;color:#6b7280;padding:8px 4px">No delivery scheduled for this visit. Skip to signatures.</div>';
+        } else {
+            // Build map of line qty_ordered/delivered per item id for prefill
+            var ordMap = {}, delMap = {};
+            (d.delivery_wo.lines || []).forEach(function(ln){
+                ordMap[ln.item_id] = ln.qty_ordered;
+                delMap[ln.item_id] = ln.qty_delivered;
+            });
+            html += '<table class="owo-del-table">'
+                  + '<thead><tr><th>Description</th><th>Unit</th><th>Content</th><th style="text-align:center">Qty Delivered</th></tr></thead>'
+                  + '<tbody>';
+            d.delivery_items.forEach(function(it){
+                var qOrd = ordMap[it.id];
+                var qDel = delMap[it.id];
+                html += '<tr>'
+                      + '<td>' + esc(it.name) + (qOrd ? ' <span class="owo-qty-ordered">(' + qOrd + ' ordered)</span>' : '') + '</td>'
+                      + '<td>' + esc(it.unit) + '</td>'
+                      + '<td>' + esc(it.content) + '</td>'
+                      + '<td class="center"><input type="number" min="0" data-item-id="' + it.id + '" value="' + (qDel != null ? qDel : (qOrd != null ? qOrd : '')) + '"></td>'
+                      + '</tr>';
+            });
+            html += '</tbody></table>';
+        }
+
+        // Customer unavailable
+        html += ''
+          + '<div class="owo-cust-unavail" id="owoCustBox">'
+          +   '<label><input type="checkbox" id="owoCustChk" onchange="document.getElementById(\'owoCustBox\').classList.toggle(\'on\', this.checked);"> '
+          +     'Customer unavailable at site (PDF will be emailed to contact for sign-off; flag manager)'
+          +   '</label>'
+          +   '<textarea id="owoCustReason" placeholder="Reason (e.g. shop closed, no staff present)"></textarea>'
+          + '</div>'
+          + '<div class="owo-sec-title">Service Personnel (you)</div>'
+          + '<div class="owo-meta-row">'
+          +   '<div><label>Your Name</label><input type="text" id="owoSvcName" value="' + esc((state.bootstrap && state.bootstrap.email) || '') + '"></div>'
+          +   '<div><label>Date</label><input type="date" id="owoSvcDate" value="' + todayISO() + '"></div>'
+          + '</div>';
+
+        // Action buttons
+        html += ''
+          + '<div class="owo-actions">'
+          +   '<button class="owo-btn-save"   onclick="window.__owoSave()">💾 Save draft</button>'
+          +   '<button class="owo-btn-submit" onclick="window.__owoSubmit()">✓ Submit &amp; sign</button>'
+          + '</div>'
+          + '</div>';
+
+        document.getElementById('owoList').style.display = 'none';
+        var det = document.getElementById('owoDetail');
+        det.style.display = 'block';
+        det.innerHTML = html;
+    }
+
+    function gatherDraftBody(){
+        var v = state.currentVisit;
+        var svc = {};
+        (state.currentDetail.service_categories || []).forEach(function(cat){
+            svc[cat.code] = {
+                done:    document.getElementById('owoSvc_' + cat.code + '_done').checked,
+                remarks: document.getElementById('owoSvc_' + cat.code + '_remarks').value.trim(),
+            };
+        });
+        var dl = [];
+        document.querySelectorAll('.owo-del-table input[type="number"][data-item-id]').forEach(function(inp){
+            var qv = inp.value;
+            if(qv === '') return;
+            dl.push({ item_id: parseInt(inp.dataset.itemId, 10), qty_delivered: parseInt(qv, 10) || 0 });
+        });
+        var counter = document.getElementById('owoCounter').value;
+        return {
+            dispense_counter: counter !== '' ? parseInt(counter, 10) : null,
+            services: svc,
+            delivery_lines: dl,
+            service_name: document.getElementById('owoSvcName').value.trim() || null,
+            service_date: document.getElementById('owoSvcDate').value || null,
+            customer_unavailable: document.getElementById('owoCustChk').checked,
+            customer_unavailable_reason: document.getElementById('owoCustReason').value.trim() || null,
+        };
+    }
+
+    window.__owoSave = function(){
+        var v = state.currentVisit;
+        postJSON('/api/wo/visits/' + v.id, gatherDraftBody(), 'PATCH')
+            .then(function(){ showMsg('Draft saved.', 'ok'); })
+            .catch(function(e){ showMsg('Save failed: ' + esc(e.message), 'error'); });
+    };
+
+    window.__owoSubmit = function(){
+        var v = state.currentVisit;
+        var body = gatherDraftBody();
+        if(!body.service_name){ alert('Enter your name (Service Personnel) before submitting.'); return; }
+        // Save draft first, then open the customer signature popup
+        postJSON('/api/wo/visits/' + v.id, body, 'PATCH').then(function(){
+            document.getElementById('owoSigName').value = '';
+            document.getElementById('owoSigDate').value = todayISO();
+            document.getElementById('owoSigOverlay').classList.add('open');
+        }).catch(function(e){ alert('Save failed: ' + e.message); });
+    };
+
+    window.__owoSigCancel = function(){
+        document.getElementById('owoSigOverlay').classList.remove('open');
+    };
+
+    window.__owoSigUnavailable = function(){
+        var reason = document.getElementById('owoCustReason').value.trim();
+        if(!reason){
+            reason = prompt('Customer unavailable — type a brief reason (will be flagged to manager):');
+            if(!reason || !reason.trim()){ alert('Reason required.'); return; }
+            document.getElementById('owoCustReason').value = reason.trim();
+            document.getElementById('owoCustChk').checked = true;
+            document.getElementById('owoCustBox').classList.add('on');
+        }
+        finalizeVisit({
+            customer_unavailable: true,
+            customer_unavailable_reason: reason.trim ? reason.trim() : reason,
+            service_name: document.getElementById('owoSvcName').value.trim(),
+            service_date: document.getElementById('owoSvcDate').value,
+        });
+    };
+
+    window.__owoSigConfirm = function(){
+        var nm = document.getElementById('owoSigName').value.trim();
+        var dt = document.getElementById('owoSigDate').value;
+        if(!nm){ alert('Receiving personnel name required.'); return; }
+        if(!dt){ alert('Date required.'); return; }
+        finalizeVisit({
+            receiving_name: nm,
+            receiving_date: dt,
+            service_name: document.getElementById('owoSvcName').value.trim(),
+            service_date: document.getElementById('owoSvcDate').value,
+            customer_unavailable: false,
+        });
+    };
+
+    function finalizeVisit(body){
+        var v = state.currentVisit;
+        postJSON('/api/wo/visits/' + v.id + '/finalize', body)
+            .then(function(res){
+                document.getElementById('owoSigOverlay').classList.remove('open');
+                if(res.status === 'pending_email_signature'){
+                    alert('Work Order submitted as customer-unavailable. Manager has been notified to email the PDF for sign-off.');
+                } else {
+                    alert('Work Order signed and submitted. The PDF is saved.');
+                }
+                window.__owoRefresh();
+            })
+            .catch(function(e){ alert('Submit failed: ' + e.message); });
+    }
+
+    // ── View full complaint (link inside the service highlight box) ──
+    window.__owoShowComplaint = function(cid){
+        document.getElementById('owoComplaintBody').textContent = 'Loading…';
+        document.getElementById('owoComplaintModal').classList.add('open');
+        api('/api/wo/complaints/' + cid).then(function(c){
+            document.getElementById('owoComplaintBody').innerHTML = ''
+              + '<div style="font-family:ui-monospace,monospace;font-size:0.78rem;color:#6b7280">' + esc(c.display_id || '#' + c.id) + '</div>'
+              + '<div style="font-size:0.78rem;color:#6b7280;margin-bottom:8px">' + esc(c.submitter) + ' · first reported ' + esc(c.first_reported_at || c.submitted_at) + '</div>'
+              + '<div style="font-size:0.92rem;color:#111827;white-space:pre-wrap;background:#f9fafb;border:1px solid #e5e7eb;padding:10px;border-radius:6px;margin-bottom:8px">' + esc(c.description || '') + '</div>'
+              + (c.reported_by ? '<div style="font-size:0.84rem;color:#374151"><strong>Reported by:</strong> ' + esc(c.reported_by) + '</div>' : '')
+              + '<div style="font-size:0.84rem;color:#374151"><strong>Perceived urgency:</strong> ' + esc(c.perceived_urgency_label) + '</div>'
+              + (c.impact_severity != null ? '<div style="font-size:0.84rem;color:#374151"><strong>Impact severity:</strong> ' + esc(c.impact_severity) + ' / 5</div>' : '')
+              + (c.impact_description ? '<div style="font-size:0.84rem;color:#374151;margin-top:6px"><em>' + esc(c.impact_description) + '</em></div>' : '')
+              + (c.refund_issued ? '<div style="font-size:0.84rem;color:#92400e;margin-top:6px">💵 Refund was issued by CS</div>' : '');
+        }).catch(function(e){
+            document.getElementById('owoComplaintBody').textContent = 'Failed: ' + e.message;
+        });
+    };
+
+    window.__owoCloseComplaint = function(){
+        document.getElementById('owoComplaintModal').classList.remove('open');
+    };
+
+    // Catch initial bootstrap email for prefilling service-personnel name
+    api('/api/wo/bootstrap').then(function(b){ state.bootstrap = b; }).catch(function(){});
+})();
+</script>

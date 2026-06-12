@@ -385,9 +385,13 @@
     {% if role != 'operator' %}
     <button class="tab-btn"        onclick="switchTab('fault_report', this); if(window.__frInit) window.__frInit();">Fault Report</button>
     {% endif %}
-    {# ── Tech Support: admin, field_manager, operator. Default for operator + field_manager. ── #}
-    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <button class="tab-btn{% if role in ['operator','field_manager'] %} active{% endif %}" onclick="switchTab('tech_support', this); if(window.__tsInit) window.__tsInit();">Tech Support</button>
+    {# ── Work Orders (new PDF-template flow): operator default + admin can inspect ── #}
+    {% if role == 'admin' or role == 'operator' %}
+    <button class="tab-btn{% if role == 'operator' %} active{% endif %}" onclick="switchTab('work_orders', this); if(window.__owoInit) window.__owoInit();">Work Orders</button>
+    {% endif %}
+    {# ── Tech Support: admin + field_manager (triage/review). Default for field_manager. ── #}
+    {% if role == 'admin' or role == 'field_manager' %}
+    <button class="tab-btn{% if role == 'field_manager' %} active{% endif %}" onclick="switchTab('tech_support', this); if(window.__tsInit) window.__tsInit();">Tech Support</button>
     {% endif %}
     {# ── Manage KB: admin, field_manager ── #}
     {% if role == 'admin' or role == 'field_manager' %}
@@ -763,8 +767,13 @@
         {% include "_fault_report_tab.html" %}
     </div>
     {% endif %}
-    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <div id="tab-tech_support" class="tab-pane{% if role in ['operator','field_manager'] %} active{% endif %}">
+    {% if role == 'admin' or role == 'operator' %}
+    <div id="tab-work_orders" class="tab-pane{% if role == 'operator' %} active{% endif %}">
+        {% include "_operator_work_order_tab.html" %}
+    </div>
+    {% endif %}
+    {% if role == 'admin' or role == 'field_manager' %}
+    <div id="tab-tech_support" class="tab-pane{% if role == 'field_manager' %} active{% endif %}">
         {% include "_tech_support_tab.html" %}
     </div>
     {% endif %}
