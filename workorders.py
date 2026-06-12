@@ -3211,9 +3211,28 @@ def api_equipment_log():
             return jsonify({"error": "Machine not found in MachineLookup."}), 404
 
         machine_names = sorted({r[0] for r in ml_rows if r[0]})
-        last_topup    = from_ole_date(ml_rows[0][3])
+        last_topup_ole = ml_rows[0][3]
+        last_topup    = from_ole_date(last_topup_ole)
         prev_topup    = from_ole_date(ml_rows[0][4])
         vends_before  = int(ml_rows[0][5]) if ml_rows[0][5] is not None else None
+
+        # Vends SINCE last top-up (more actionable than vends_before for the operator)
+        if last_topup_ole is not None:
+            cursor.execute("""
+                SELECT COUNT(*) FROM [MasterData Table] mdt
+                WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s
+                  AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+                  AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%%'
+                  AND CAST(mdt.[Date Time] AS FLOAT) >= %s
+            """, (code, float(last_topup_ole)))
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) FROM [MasterData Table] mdt
+                WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s
+                  AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+                  AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%%'
+            """, (code,))
+        vends_since = int(cursor.fetchone()[0])
 
         events = []
 
@@ -3344,6 +3363,7 @@ def api_equipment_log():
             "last_topup":              _iso(last_topup),
             "previous_topup":          _iso(prev_topup),
             "vends_before_last_topup": vends_before,
+            "vends_since_last_topup":  vends_since,
         },
         "counts": {
             "complaints":      len(complaint_ids),

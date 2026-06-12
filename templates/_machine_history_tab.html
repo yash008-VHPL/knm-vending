@@ -30,10 +30,17 @@
 
     .mh-detail {
         background: white; border: 1px solid #e5e7eb; border-radius: 11px;
-        padding: 16px 18px; margin-top: 14px;
+        padding: 16px 18px; margin-top: 14px; position: relative;
     }
-    .mh-detail h3 { margin: 0 0 8px 0; font-size: 1.05rem; color: #111827; }
+    .mh-detail h3 { margin: 0 0 8px 0; font-size: 1.05rem; color: #111827; padding-right: 30px; }
     .mh-detail .sub { font-size: 0.84rem; color: #6b7280; font-family: ui-monospace, monospace; margin-bottom: 12px; }
+    .mh-detail .close-x {
+        position: absolute; top: 10px; right: 12px;
+        background: #f3f4f6; color: #374151; border: 1px solid #d1d5db;
+        width: 30px; height: 30px; border-radius: 6px; cursor: pointer;
+        font-size: 1.05rem; font-weight: 700; line-height: 1;
+    }
+    .mh-detail .close-x:hover { background: #fee2e2; color: #b91c1c; border-color: #fecaca; }
 
     .mh-stats {
         display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
@@ -95,9 +102,26 @@
         opts.headers['Accept'] = 'application/json';
         return fetch(url, opts).then(function(r){
             return r.json().then(function(d){
-                if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+                if(!r.ok){
+                    var err = new Error(d.error || ('HTTP ' + r.status));
+                    err.kind = (r.status === 404) ? 'notfound' : 'http';
+                    err.status = r.status;
+                    throw err;
+                }
                 return d;
+            }, function(){
+                // JSON parse failure (e.g. HTML error page)
+                var err = new Error('Server returned non-JSON response (status ' + r.status + ').');
+                err.kind = 'http';
+                err.status = r.status;
+                throw err;
             });
+        }, function(networkErr){
+            // fetch() rejected — true network failure / CORS / offline
+            var err = new Error('Network error — could not reach the server. Check connectivity and retry.');
+            err.kind = 'network';
+            err.original = String(networkErr && networkErr.message || networkErr);
+            throw err;
         });
     }
     function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
@@ -106,6 +130,13 @@
     function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
     function showMsg(html, cls){
         document.getElementById('mhMsg').innerHTML = html ? '<div class="mh-msg '+ (cls||'') +'">'+ html +'</div>' : '';
+    }
+    function showError(err){
+        var label = 'Error';
+        if(err && err.kind === 'network')  label = '⚠ Network error';
+        else if(err && err.kind === 'notfound') label = 'Not found';
+        else if(err && err.status >= 500) label = '⚠ Server error';
+        showMsg('<strong>' + label + ':</strong> ' + esc(err && err.message ? err.message : String(err)), 'error');
     }
 
     window.__mhInit = function(){
@@ -117,10 +148,15 @@
     function loadMachines(){
         showMsg('Loading machines…', 'loading');
         api('/api/wo/manager/machines').then(function(arr){
-            state.machines = arr;
+            state.machines = arr || [];
+            if(!state.machines.length){
+                showMsg('No machines registered in MachineLookup yet.', 'error');
+                document.getElementById('mhMachineList').innerHTML = '<div class="mh-empty">No machines.</div>';
+                return;
+            }
             renderMachines();
             showMsg('', '');
-        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+        }).catch(showError);
     }
 
     function renderMachines(){
@@ -150,9 +186,22 @@
         state.currentCode = code;
         showMsg('Loading history…', 'loading');
         api('/api/wo/manager/equipment-log?machine_code=' + encodeURIComponent(code)).then(function(d){
+            // Hide the search/list while exploring one machine; show again on close.
+            document.querySelector('.mh-toolbar').style.display      = 'none';
+            document.getElementById('mhMachineList').style.display    = 'none';
             renderDetail(d);
             showMsg('', '');
-        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+        }).catch(function(e){
+            document.getElementById('mhDetail').style.display = 'none';
+            showError(e);
+        });
+    };
+
+    window.__mhClose = function(){
+        document.getElementById('mhDetail').style.display          = 'none';
+        document.querySelector('.mh-toolbar').style.display        = 'flex';
+        document.getElementById('mhMachineList').style.display     = 'block';
+        state.currentCode = null;
     };
 
     function renderDetail(d){
@@ -160,6 +209,7 @@
         var c = d.counts  || {};
         var html = ''
           + '<div class="mh-detail">'
+          +   '<button class="close-x" title="Close" onclick="window.__mhClose()">&times;</button>'
           +   '<h3>' + esc((m.names || []).join(' / ') || 'Unknown') + '</h3>'
           +   '<div class="sub">' + esc(m.code || '') + '</div>'
           +   '<div class="mh-stats">'
@@ -167,7 +217,7 @@
           +     '<div class="mh-stat"><div class="label">Work orders</div><div class="value">' + (c.job_orders || 0) + '</div></div>'
           +     '<div class="mh-stat"><div class="label">Deliveries</div><div class="value">' + (c.delivery_orders || 0) + '</div></div>'
           +     '<div class="mh-stat"><div class="label">Last topup</div><div class="value" style="font-size:0.88rem">' + esc(fmtDT(m.last_topup)) + '</div></div>'
-          +     '<div class="mh-stat"><div class="label">Vends before</div><div class="value">' + (m.vends_before_last_topup != null ? m.vends_before_last_topup : '—') + '</div></div>'
+          +     '<div class="mh-stat"><div class="label">Vends since</div><div class="value">' + (m.vends_since_last_topup != null ? m.vends_since_last_topup : '—') + '</div></div>'
           +   '</div>'
           +   '<div class="mh-events">' + renderEvents(d.events || []) + '</div>'
           + '</div>';
