@@ -401,9 +401,11 @@
     {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
     <button class="tab-btn"        onclick="switchTab('movements', this); if(window.__mvInit) window.__mvInit();">Movements</button>
     {% endif %}
-    {# ── Machine History: admin, field_manager ── #}
-    {% if role == 'admin' or role == 'field_manager' %}
+    {# ── Machine History: admin, field_manager, operator (read access per ops manager 2026-06-12) ── #}
+    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
     <button class="tab-btn"        onclick="switchTab('machine_history', this); if(window.__mhInit) window.__mhInit();">Machine History</button>
+    {% endif %}
+    {% if role == 'admin' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('historic_locations', this); if(window.__hlInit) window.__hlInit();">Historic Locations</button>
     {% endif %}
     {# ── Test Cleanup: admin only ── #}
@@ -787,10 +789,12 @@
         {% include "_movements_tab.html" %}
     </div>
     {% endif %}
-    {% if role == 'admin' or role == 'field_manager' %}
+    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
     <div id="tab-machine_history" class="tab-pane">
         {% include "_machine_history_tab.html" %}
     </div>
+    {% endif %}
+    {% if role == 'admin' or role == 'field_manager' %}
     <div id="tab-historic_locations" class="tab-pane">
         {% include "_historic_locations_tab.html" %}
     </div>

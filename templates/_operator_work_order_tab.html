@@ -19,6 +19,39 @@
     .owo-msg.ok      { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
     .owo-empty { text-align: center; color: #9ca3af; padding: 40px 10px; font-size: 0.9rem; }
 
+    /* Legend strip explaining colour codes */
+    .owo-legend {
+        background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
+        padding: 8px 12px; margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 14px;
+        font-size: 0.78rem; color: #374151; align-items: center;
+    }
+    .owo-legend-item { display: flex; gap: 6px; align-items: center; }
+    .owo-legend-swatch { width: 14px; height: 14px; border-radius: 3px; flex-shrink: 0; }
+    .owo-legend-swatch.red  { background: #dc2626; }
+    .owo-legend-swatch.blue { background: #2563eb; }
+    .owo-legend-swatch.both {
+        background: repeating-linear-gradient(135deg, #dc2626 0, #dc2626 4px, #2563eb 4px, #2563eb 8px);
+    }
+    .owo-legend-note {
+        margin-left: auto; font-size: 0.74rem; color: #6b7280; font-style: italic;
+    }
+
+    /* Summary chips inside a card */
+    .owo-card-summary { margin-top: 8px; }
+    .owo-card-summary > div {
+        font-size: 0.84rem; color: #374151; padding: 4px 0;
+        border-top: 1px dashed #e5e7eb; line-height: 1.35;
+    }
+    .owo-card-summary > div:first-child { border-top: none; padding-top: 6px; }
+    .owo-card-summary .tag {
+        display: inline-block; font-size: 0.64rem; font-weight: 700;
+        padding: 1px 6px; border-radius: 8px; margin-right: 6px; vertical-align: middle;
+        text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .owo-card-summary .tag.svc { background: #fee2e2; color: #b91c1c; }
+    .owo-card-summary .tag.del { background: #dbeafe; color: #1e40af; }
+    .owo-card-summary .prio-high { color: #b91c1c; font-weight: 700; }
+
     /* Location card */
     .owo-card {
         background: white; border: 1px solid #e5e7eb; border-radius: 11px;
@@ -66,8 +99,15 @@
     }
     .owo-svc-highlight h4 { margin: 0 0 5px 0; font-size: 0.92rem; color: #92400e; }
     .owo-svc-highlight .ref { font-family: ui-monospace, monospace; font-size: 0.78rem; color: #92400e; }
-    .owo-svc-highlight .field { font-size: 0.86rem; color: #111827; margin-top: 5px; }
+    .owo-svc-highlight .field { font-size: 0.86rem; color: #111827; margin-top: 5px; line-height: 1.35; }
     .owo-svc-highlight .field strong { color: #92400e; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; }
+    .owo-svc-highlight .verbatim {
+        max-height: 7.5em; overflow-y: auto;
+        background: white; border: 1px solid #fde68a; border-radius: 5px;
+        padding: 6px 8px; margin-top: 3px;
+        font-size: 0.84rem; line-height: 1.4; color: #111827;
+        white-space: pre-wrap; word-wrap: break-word;
+    }
     .owo-svc-highlight .more {
         color: #1a56db; cursor: pointer; font-size: 0.82rem; margin-top: 6px;
         text-decoration: underline; background: none; border: none; padding: 0; font-weight: 600;
@@ -292,15 +332,39 @@
             return (l.machine_name || '').toLowerCase().indexOf(q) >= 0
                 || (l.machine_code || '').toLowerCase().indexOf(q) >= 0;
         });
+
+        // Legend strip — always shown so the colours / pills are self-explanatory
+        var legend = ''
+          + '<div class="owo-legend">'
+          +   '<div class="owo-legend-item"><span class="owo-legend-swatch red"></span> <strong>Red stripe</strong> = service to perform</div>'
+          +   '<div class="owo-legend-item"><span class="owo-legend-swatch blue"></span> <strong>Blue stripe</strong> = scheduled top-up</div>'
+          +   '<div class="owo-legend-item"><span class="owo-legend-swatch both"></span> <strong>Striped</strong> = both</div>'
+          +   '<div class="owo-legend-note">List shows only OPEN work assigned to you.</div>'
+          + '</div>';
+
         if(!rows.length){
             document.getElementById('owoList').innerHTML =
-                '<div class="owo-empty">No work assigned to you. ✓</div>';
+                legend + '<div class="owo-empty">No work assigned to you. ✓</div>';
             return;
         }
-        document.getElementById('owoList').innerHTML = rows.map(function(l){
+        document.getElementById('owoList').innerHTML = legend + rows.map(function(l){
             var pills = '';
             if(l.open_service_count)  pills += '<span class="owo-pill red">Service · ' + l.open_service_count + '</span>';
             if(l.open_delivery_count) pills += '<span class="owo-pill blue">Top up · ' + l.open_delivery_count + '</span>';
+
+            // Per-task summary lines so operator gets an overview before tapping in
+            var summary = '';
+            (l.services || []).forEach(function(s){
+                var prioCls = s.priority_code === 2 ? ' prio-high' : '';
+                summary += '<div><span class="tag svc">SVC</span> '
+                        +  (s.priority_code === 2 ? '<span class="' + prioCls + '">[HIGH] </span>' : '')
+                        +  esc(s.summary || '')
+                        + '</div>';
+            });
+            (l.deliveries || []).forEach(function(dl){
+                summary += '<div><span class="tag del">TOP-UP</span> ' + esc(dl.summary || '') + '</div>';
+            });
+
             return ''
               + '<div class="owo-card ' + esc(l.color) + '" onclick="window.__owoOpenLocation(\'' + esc(l.machine_code) + '\')">'
               +   '<div class="stripe"></div>'
@@ -308,6 +372,7 @@
               +     '<div class="name">' + esc(l.machine_name || '?') + '</div>'
               +     '<div class="code">' + esc(l.machine_code || '') + '</div>'
               +     '<div class="sub">' + pills + '</div>'
+              +     (summary ? '<div class="owo-card-summary">' + summary + '</div>' : '')
               +   '</div>'
               + '</div>';
         }).join('');
@@ -356,6 +421,17 @@
         // Service highlights for each open service WO
         (d.service_wos || []).forEach(function(wo){
             var bits = '';
+            // Customer's verbatim report comes first — operator needs to see what was actually reported.
+            // Capped at ~6 lines with scroll so long reports don't blow up the highlight box.
+            if(wo.complaint_summary){
+                bits += '<div class="field"><strong>Customer reported:</strong>'
+                      +   '<div class="verbatim">' + esc(wo.complaint_summary) + '</div>'
+                      + '</div>';
+                var line2 = [];
+                if(wo.complaint_reporter) line2.push('by ' + esc(wo.complaint_reporter));
+                if(wo.complaint_urgency)  line2.push('urgency: ' + esc(wo.complaint_urgency));
+                if(line2.length) bits += '<div style="font-size:0.74rem;color:#92400e;margin-top:3px">' + line2.join(' · ') + '</div>';
+            }
             if(wo.attached_kb && wo.attached_kb.title){
                 bits += '<div class="field"><strong>KB Ref:</strong> ' + esc(wo.attached_kb.title) + '</div>';
             }
@@ -370,7 +446,7 @@
               +   '<h4>⚠ Service requested to fix issue</h4>'
               +   '<div class="ref">' + esc(wo.display_id || '#' + wo.id) + '</div>'
               +   bits
-              +   (wo.complaint_id ? '<button class="more" onclick="window.__owoShowComplaint(' + wo.complaint_id + ')">View full complaint →</button>' : '')
+              +   (wo.complaint_id ? '<button class="more" onclick="window.__owoShowComplaint(' + wo.complaint_id + ')">View full complaint (photos &amp; activity) →</button>' : '')
               + '</div>';
         });
 
@@ -400,32 +476,38 @@
         });
         html += '</tbody></table>';
 
-        // DELIVERY table
-        html += '<div class="owo-sec-title">Delivery</div>';
-        var hasDelivery = d.delivery_wo && (d.delivery_items || []).length;
-        if(!hasDelivery){
-            html += '<div style="font-size:0.86rem;color:#6b7280;padding:8px 4px">No delivery scheduled for this visit. Skip to signatures.</div>';
-        } else {
-            // Build map of line qty_ordered/delivered per item id for prefill
-            var ordMap = {}, delMap = {};
+        // DELIVERY table — always shown so the operator can opportunistically
+        // replenish stock running low, even without a scheduled delivery WO.
+        // An ad-hoc delivery WO is auto-created on save if needed.
+        var isScheduled = !!d.delivery_wo;
+        html += '<div class="owo-sec-title">Delivery'
+              + (isScheduled
+                    ? ' <span style="font-weight:500;color:#1e40af;text-transform:none">— scheduled top-up</span>'
+                    : ' <span style="font-weight:500;color:#6b7280;text-transform:none">— optional, record anything you replenish on site</span>')
+              + '</div>';
+        var ordMap = {}, delMap = {};
+        if(isScheduled){
             (d.delivery_wo.lines || []).forEach(function(ln){
                 ordMap[ln.item_id] = ln.qty_ordered;
                 delMap[ln.item_id] = ln.qty_delivered;
             });
-            html += '<table class="owo-del-table">'
-                  + '<thead><tr><th>Description</th><th>Unit</th><th>Content</th><th style="text-align:center">Qty Delivered</th></tr></thead>'
-                  + '<tbody>';
-            d.delivery_items.forEach(function(it){
-                var qOrd = ordMap[it.id];
-                var qDel = delMap[it.id];
-                html += '<tr>'
-                      + '<td>' + esc(it.name) + (qOrd ? ' <span class="owo-qty-ordered">(' + qOrd + ' ordered)</span>' : '') + '</td>'
-                      + '<td>' + esc(it.unit) + '</td>'
-                      + '<td>' + esc(it.content) + '</td>'
-                      + '<td class="center"><input type="number" min="0" data-item-id="' + it.id + '" value="' + (qDel != null ? qDel : (qOrd != null ? qOrd : '')) + '"></td>'
-                      + '</tr>';
-            });
-            html += '</tbody></table>';
+        }
+        html += '<table class="owo-del-table">'
+              + '<thead><tr><th>Description</th><th>Unit</th><th>Content</th><th style="text-align:center">Qty Delivered</th></tr></thead>'
+              + '<tbody>';
+        (d.delivery_items || []).forEach(function(it){
+            var qOrd = ordMap[it.id];
+            var qDel = delMap[it.id];
+            html += '<tr>'
+                  + '<td>' + esc(it.name) + (qOrd ? ' <span class="owo-qty-ordered">(' + qOrd + ' ordered)</span>' : '') + '</td>'
+                  + '<td>' + esc(it.unit) + '</td>'
+                  + '<td>' + esc(it.content) + '</td>'
+                  + '<td class="center"><input type="number" min="0" placeholder="0" data-item-id="' + it.id + '" value="' + (qDel != null ? qDel : (qOrd != null ? qOrd : '')) + '"></td>'
+                  + '</tr>';
+        });
+        html += '</tbody></table>';
+        if(!isScheduled){
+            html += '<div style="font-size:0.78rem;color:#6b7280;padding:6px 4px;font-style:italic">Leave rows blank if no replenishment needed. Quantities you enter are saved as an ad-hoc delivery against this visit.</div>';
         }
 
         // Customer unavailable
@@ -557,6 +639,38 @@
         document.getElementById('owoComplaintBody').textContent = 'Loading…';
         document.getElementById('owoComplaintModal').classList.add('open');
         api('/api/wo/complaints/' + cid).then(function(c){
+            // Photos uploaded by CS at intake
+            var photoHtml = '';
+            if(c.images && c.images.length){
+                photoHtml = '<div style="font-size:0.74rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.04em;margin-top:10px;margin-bottom:5px">Photos (' + c.images.length + ')</div>'
+                          + '<div style="display:flex;flex-wrap:wrap;gap:6px">'
+                          + c.images.map(function(im){
+                                return '<div style="width:90px;height:90px;border-radius:6px;overflow:hidden;border:1px solid #e5e7eb">'
+                                     + '<img src="/api/wo/images/' + im.id + '" style="width:100%;height:100%;object-fit:cover;cursor:zoom-in"'
+                                     + ' onclick="window.open(\'/api/wo/images/' + im.id + '\', \'_blank\')">'
+                                     + '</div>';
+                            }).join('')
+                          + '</div>';
+            } else {
+                photoHtml = '<div style="font-size:0.78rem;color:#9ca3af;font-style:italic;margin-top:10px">No photos submitted with this complaint.</div>';
+            }
+
+            // Activity timeline (so operator can see if there have been prior attempts / linking events)
+            var activityHtml = '';
+            if(c.activity && c.activity.length){
+                activityHtml = '<div style="font-size:0.74rem;font-weight:700;color:#6b7280;text-transform:uppercase;letter-spacing:0.04em;margin-top:10px;margin-bottom:5px">Activity</div>'
+                             + '<div style="font-size:0.78rem;color:#374151">'
+                             + c.activity.map(function(a){
+                                   return '<div style="padding:4px 0;border-bottom:1px solid #f3f4f6">'
+                                        + '<strong>' + esc(a.action) + '</strong>'
+                                        + ' · ' + esc(a.by) + ' · '
+                                        + esc((new Date(a.at)).toLocaleString())
+                                        + (a.detail ? '<br><span style="color:#6b7280">' + esc(a.detail) + '</span>' : '')
+                                        + '</div>';
+                               }).join('')
+                             + '</div>';
+            }
+
             document.getElementById('owoComplaintBody').innerHTML = ''
               + '<div style="font-family:ui-monospace,monospace;font-size:0.78rem;color:#6b7280">' + esc(c.display_id || '#' + c.id) + '</div>'
               + '<div style="font-size:0.78rem;color:#6b7280;margin-bottom:8px">' + esc(c.submitter) + ' · first reported ' + esc(c.first_reported_at || c.submitted_at) + '</div>'
@@ -565,7 +679,9 @@
               + '<div style="font-size:0.84rem;color:#374151"><strong>Perceived urgency:</strong> ' + esc(c.perceived_urgency_label) + '</div>'
               + (c.impact_severity != null ? '<div style="font-size:0.84rem;color:#374151"><strong>Impact severity:</strong> ' + esc(c.impact_severity) + ' / 5</div>' : '')
               + (c.impact_description ? '<div style="font-size:0.84rem;color:#374151;margin-top:6px"><em>' + esc(c.impact_description) + '</em></div>' : '')
-              + (c.refund_issued ? '<div style="font-size:0.84rem;color:#92400e;margin-top:6px">💵 Refund was issued by CS</div>' : '');
+              + (c.refund_issued ? '<div style="font-size:0.84rem;color:#92400e;margin-top:6px">💵 Refund was issued by CS</div>' : '')
+              + photoHtml
+              + activityHtml;
         }).catch(function(e){
             document.getElementById('owoComplaintBody').textContent = 'Failed: ' + e.message;
         });

@@ -3153,7 +3153,7 @@ def api_manager_overview():
 
 
 @workorders_bp.route("/manager/machines")
-@require_roles(*MANAGER_ROLES)
+@require_roles(*OPERATOR_ROLES)
 def api_manager_machines_search():
     q = (request.args.get("q") or "").strip()
     try:
@@ -3190,7 +3190,7 @@ def api_manager_machines_search():
 
 
 @workorders_bp.route("/manager/equipment-log")
-@require_roles(*MANAGER_ROLES)
+@require_roles(*OPERATOR_ROLES)
 def api_equipment_log():
     """Chronological history for one MachineCode."""
     code = (request.args.get("machine_code") or "").strip()
@@ -3505,43 +3505,112 @@ def api_operator_locations():
     try:
         conn = get_connection()
         cursor = conn.cursor()
+
+        # Service WOs with summary fields so operator gets an overview before tapping in.
         cursor.execute("""
-            SELECT MachineCode, MAX(MachineName) AS MachineName,
-                   COUNT(*) AS OpenJobOrders
+            SELECT MachineCode, MachineName, JobOrderID, DisplayID, PriorityCode,
+                   StatusCode, Diagnosis, ProposedFix, AttachedKBID, CreatedAt
             FROM WO_JobOrders
             WHERE AssignedTo = %s AND StatusCode IN (0, 1)
-            GROUP BY MachineCode
+            ORDER BY MachineCode, PriorityCode DESC, CreatedAt
         """, (user,))
-        service_map = {str(r[0]): {"name": r[1], "open_jobs": int(r[2])}
-                       for r in cursor.fetchall() if r[0] is not None}
+        service_rows = cursor.fetchall()
+
+        # Pre-fetch KB titles in one shot (small set)
+        kb_titles = {}
+        kb_ids = [r[8] for r in service_rows if r[8] is not None]
+        if kb_ids:
+            ph = ",".join(["%s"] * len(kb_ids))
+            cursor.execute(
+                f"SELECT KBID, Title FROM WO_KB_Entries WHERE KBID IN ({ph})",
+                tuple(kb_ids),
+            )
+            kb_titles = {int(r[0]): r[1] for r in cursor.fetchall()}
 
         cursor.execute("""
-            SELECT MachineCode, MAX(MachineName) AS MachineName,
-                   COUNT(*) AS OpenDeliveries
+            SELECT MachineCode, MachineName, DeliveryOrderID, Priority,
+                   Notes, CreatedAt
             FROM WO_DeliveryOrders
             WHERE AssignedTo = %s AND Status <> 'completed'
-            GROUP BY MachineCode
+            ORDER BY MachineCode, CreatedAt
         """, (user,))
-        delivery_map = {str(r[0]): {"name": r[1], "open_deliveries": int(r[2])}
-                        for r in cursor.fetchall() if r[0] is not None}
+        delivery_rows = cursor.fetchall()
+
+        # Per-delivery-order line totals (so the card can say "8 items")
+        do_ids = [r[2] for r in delivery_rows]
+        item_counts = {}
+        if do_ids:
+            ph = ",".join(["%s"] * len(do_ids))
+            cursor.execute(f"""
+                SELECT DeliveryOrderID, SUM(QtyOrdered) AS UnitsOrdered, COUNT(*) AS LineCount
+                FROM WO_DeliveryOrderLines
+                WHERE DeliveryOrderID IN ({ph})
+                GROUP BY DeliveryOrderID
+            """, tuple(do_ids))
+            item_counts = {int(r[0]): {"units": int(r[1] or 0), "lines": int(r[2] or 0)}
+                           for r in cursor.fetchall()}
 
         conn.close()
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
+    # Group everything by machine
+    by_code = {}
+    for r in service_rows:
+        code = str(r[0]) if r[0] is not None else None
+        if not code: continue
+        rec = by_code.setdefault(code, {"name": r[1], "services": [], "deliveries": []})
+        diag = (r[6] or "").strip()
+        fix  = (r[7] or "").strip()
+        kb_title = kb_titles.get(int(r[8])) if r[8] is not None else None
+        if kb_title:
+            summary = kb_title
+        elif diag:
+            summary = diag[:80] + ("…" if len(diag) > 80 else "")
+        elif fix:
+            summary = fix[:80] + ("…" if len(fix) > 80 else "")
+        else:
+            summary = "Service requested — details inside"
+        rec["services"].append({
+            "id":            int(r[2]),
+            "display_id":    r[3],
+            "priority_code": int(r[4]),
+            "priority_label": _label(PRIORITY, r[4]),
+            "status_code":   int(r[5]),
+            "status_label":  _label(JOBORDER_STATUS, r[5]),
+            "summary":       summary,
+        })
+
+    for r in delivery_rows:
+        code = str(r[0]) if r[0] is not None else None
+        if not code: continue
+        rec = by_code.setdefault(code, {"name": r[1], "services": [], "deliveries": []})
+        ic = item_counts.get(int(r[2]), {"units": 0, "lines": 0})
+        if ic["lines"]:
+            summary = f"{ic['lines']} item line{'s' if ic['lines'] != 1 else ''}, {ic['units']} unit{'s' if ic['units'] != 1 else ''} planned"
+        else:
+            summary = "Top-up scheduled — open to add items on site"
+        rec["deliveries"].append({
+            "id":         int(r[2]),
+            "priority":   r[3],
+            "summary":    summary,
+            "notes":      (r[4] or "")[:120],
+        })
+
     out = []
-    for code in sorted(set(service_map) | set(delivery_map)):
-        has_svc = code in service_map
-        has_del = code in delivery_map
+    for code in sorted(by_code):
+        rec = by_code[code]
+        has_svc = bool(rec["services"])
+        has_del = bool(rec["deliveries"])
         color = "both" if (has_svc and has_del) else ("red" if has_svc else "blue")
-        name = (service_map.get(code, {}).get("name")
-                or delivery_map.get(code, {}).get("name") or code)
         out.append({
             "machine_code": code,
-            "machine_name": name,
-            "color": color,
-            "open_service_count":  service_map.get(code, {}).get("open_jobs", 0),
-            "open_delivery_count": delivery_map.get(code, {}).get("open_deliveries", 0),
+            "machine_name": rec["name"] or code,
+            "color":        color,
+            "open_service_count":  len(rec["services"]),
+            "open_delivery_count": len(rec["deliveries"]),
+            "services":            rec["services"],
+            "deliveries":          rec["deliveries"],
         })
     return jsonify(out)
 
@@ -3584,6 +3653,7 @@ def api_operator_location_detail(code):
             ORDER BY PriorityCode DESC, CreatedAt
         """, (code, user))
         service_wos = []
+        rows_for_complaint_lookup = []
         for r in cursor.fetchall():
             wo = {
                 "id": r[0], "display_id": r[1], "complaint_id": r[2], "notes": r[3],
@@ -3597,6 +3667,9 @@ def api_operator_location_detail(code):
                 "technician_comments":  r[12],
                 "created_by": r[13], "created_at": _iso(r[14]),
                 "attached_kb": None,
+                "complaint_summary": None,
+                "complaint_reporter": None,
+                "complaint_urgency": None,
             }
             # Pull KB ref summary if attached
             if wo["attached_kb_id"]:
@@ -3613,6 +3686,18 @@ def api_operator_location_detail(code):
                         "root_cause": kr[4], "corrective_action": kr[5],
                         "preventive_action": kr[6], "verification_of_completion": kr[7],
                     }
+            # Pull the source complaint's verbatim issue (so operator gets the
+            # original report on the WO card without having to open the modal).
+            if wo["complaint_id"]:
+                cursor.execute("""
+                    SELECT Description, ReportedBy, PerceivedUrgency
+                    FROM WO_Complaints WHERE ComplaintID = %s
+                """, (wo["complaint_id"],))
+                cr = cursor.fetchone()
+                if cr:
+                    wo["complaint_summary"]  = cr[0]
+                    wo["complaint_reporter"] = cr[1]
+                    wo["complaint_urgency"]  = _label(PRIORITY, cr[2]) if cr[2] is not None else None
             service_wos.append(wo)
 
         # Open delivery WO for me (max 1)
@@ -3869,8 +3954,42 @@ def api_visit_update(vid):
                 tuple(params),
             )
 
-        # Upsert delivery lines (qty_delivered) — operator records actual qty
+        # Upsert delivery lines (qty_delivered) — operator records actual qty.
+        # If no linked delivery WO exists and the operator entered any qty,
+        # lazy-create an ad-hoc delivery WO so the replenishment is recorded
+        # in the normal delivery history.
         lines = data.get("delivery_lines") or []
+        non_zero_lines = [
+            ln for ln in lines
+            if (ln.get("qty_delivered") not in (None, "", 0, "0"))
+        ]
+        if non_zero_lines and linked_do is None:
+            # Look up machine name for the WO record
+            cursor.execute(
+                "SELECT MachineCode, MachineNameSnap FROM WO_VisitSessions WHERE VisitID=%s",
+                (vid,),
+            )
+            vrow = cursor.fetchone()
+            mcode = vrow[0]
+            mname = vrow[1] or mcode
+            cursor.execute("""
+                INSERT INTO WO_DeliveryOrders
+                    (MachineName, MachineCode, Notes,
+                     AssignedTo, Priority, Status, CreatedBy)
+                OUTPUT INSERTED.DeliveryOrderID
+                VALUES (%s, %s, %s,
+                        %s, 'normal', 'open', %s)
+            """, (mname, mcode,
+                  "Ad-hoc replenishment recorded by operator at site visit.",
+                  user, user))
+            linked_do = int(cursor.fetchone()[0])
+            cursor.execute(
+                "UPDATE WO_VisitSessions SET LinkedDeliveryOrderID = %s WHERE VisitID = %s",
+                (linked_do, vid),
+            )
+            _log_activity(cursor, "deliveryorder", linked_do, "adhoc_created",
+                          f"Ad-hoc delivery from visit {vid}", user)
+
         if lines and linked_do is not None:
             for ln in lines:
                 try:
@@ -3878,7 +3997,6 @@ def api_visit_update(vid):
                     qty = int(ln.get("qty_delivered") or 0)
                 except (TypeError, ValueError):
                     continue
-                # Try update first; insert if no row
                 cursor.execute("""
                     UPDATE WO_DeliveryOrderLines SET QtyDelivered = %s
                     WHERE DeliveryOrderID = %s AND ItemID = %s
