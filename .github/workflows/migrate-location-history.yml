@@ -1,0 +1,80 @@
+name: One-off — Location History Migration
+
+# Driven entirely by git (no UI clicks needed):
+#   * Push to branch `ops/loc-migration` with NO apply-request file  → PREVIEW (read-only).
+#   * Push the same branch containing a file `MIGRATION_APPLY_REQUEST` → APPLY
+#     (the file's contents are passed as --cutoffs overrides; may be empty).
+# Either way the report (MIGRATION_PREVIEW.md / MIGRATION_RESULT.md) is committed
+# back to the branch so it can be reviewed from the repo. Manual dispatch also kept.
+on:
+  push:
+    branches: [ops/loc-migration]
+    paths:
+      - migrate_location_history.py
+      - .github/workflows/migrate-location-history.yml
+      - MIGRATION_APPLY_REQUEST
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'preview or apply'
+        required: true
+        default: 'preview'
+        type: choice
+        options: [preview, apply]
+      cutoffs:
+        description: "Override cutoffs: code=YYYY-MM-DD[ HH:MM], comma-separated (SGT)."
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # commit the report back to the ops branch (never main)
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest   # Azure-hosted → reaches Azure SQL (Allow Azure services)
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install pymssql
+
+      - name: Decide mode + run
+        env:
+          DB_SERVER:   machineserver.database.windows.net
+          DB_NAME:     "Machine DispensedDrink"
+          DB_USER:     ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MODE="${{ github.event.inputs.mode }}"
+            CUT="${{ github.event.inputs.cutoffs }}"
+          elif [ -f MIGRATION_APPLY_REQUEST ]; then
+            MODE="apply"
+            CUT="$(cat MIGRATION_APPLY_REQUEST)"
+          else
+            MODE="preview"
+            CUT=""
+          fi
+          echo "Running mode=$MODE"
+          python migrate_location_history.py --mode "$MODE" --cutoffs "$CUT"
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-report
+          path: MIGRATION_*.md
+          if-no-files-found: ignore
+
+      - name: Commit report back to ops branch (best-effort, never blocks result)
+        if: always()
+        continue-on-error: true
+        run: |
+          git config user.name  "knm-migration-bot"
+          git config user.email "actions@github.com"
+          git add MIGRATION_*.md 2>/dev/null || true
+          git commit -m "migration report [skip ci]" || { echo "nothing to commit"; exit 0; }
+          git push origin HEAD:${{ github.ref_name }} || echo "push skipped"
