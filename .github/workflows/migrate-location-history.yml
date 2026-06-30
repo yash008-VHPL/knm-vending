@@ -61,14 +61,6 @@ jobs:
           echo "Running mode=$MODE"
           python migrate_location_history.py --mode "$MODE" --cutoffs "$CUT"
 
-      - name: Upload report artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: migration-report
-          path: MIGRATION_*.md
-          if-no-files-found: ignore
-
       - name: Commit report back to ops branch (best-effort, never blocks result)
         if: always()
         continue-on-error: true
