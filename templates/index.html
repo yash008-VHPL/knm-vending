@@ -849,18 +849,19 @@
             const data = await resp.json();
             if (data.error) return;
 
-            // Sales + Messages dropdowns (with "All" option already in HTML)
-            [['locationSelect', true], ['msgMachineSelect', true]].forEach(([id, hasAll]) => {
-                const sel = document.getElementById(id);
-                if (!sel) return;
-                while (sel.options.length > 1) sel.remove(1);
-                data.forEach(loc => {
-                    const opt = document.createElement('option');
-                    opt.value = loc.code;
-                    opt.textContent = loc.name;
-                    sel.appendChild(opt);
-                });
-            });
+            // Messages dropdown — still filters by machine code (with "All" option in HTML)
+            {
+                const sel = document.getElementById('msgMachineSelect');
+                if (sel) {
+                    while (sel.options.length > 1) sel.remove(1);
+                    data.forEach(loc => {
+                        const opt = document.createElement('option');
+                        opt.value = loc.code;
+                        opt.textContent = loc.name;
+                        sel.appendChild(opt);
+                    });
+                }
+            }
 
             // Topup dropdown (no "all" option — one machine required)
             const topupSel = document.getElementById('topupMachineSelect');
@@ -878,6 +879,28 @@
         } catch (e) { /* silently ignore */ }
     }
     loadLocations();
+
+    // ── Sales/Transactions location filter: by LOCATION NAME (incl. historical) ──
+    // Vends are attributed per-vend to the location live at vend time, so the
+    // filter must key on location name, not machine code. Includes places a
+    // machine used to be, so past locations remain searchable after a move.
+    async function loadLocationNames() {
+        try {
+            const resp = await fetch('/api/location-names');
+            const names = await resp.json();
+            if (!Array.isArray(names)) return;
+            const sel = document.getElementById('locationSelect');
+            if (!sel) return;
+            while (sel.options.length > 1) sel.remove(1);   // keep "All Locations"
+            names.forEach(n => {
+                const opt = document.createElement('option');
+                opt.value = n;
+                opt.textContent = n;
+                sel.appendChild(opt);
+            });
+        } catch (e) { /* silently ignore */ }
+    }
+    loadLocationNames();
 
     // ══════════════════════════════════════════
     // SALES
@@ -897,9 +920,9 @@
     }
 
     async function searchSales() {
-        const start   = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
-        const end     = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
-        const machine = document.getElementById('locationSelect').value;
+        const start    = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
+        const end      = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
+        const location = document.getElementById('locationSelect').value;
 
         if (!document.getElementById('startDate').value || !document.getElementById('endDate').value) {
             setStatus('Please enter a start and end date.', 'error', 'status');
@@ -914,7 +937,7 @@
 
         try {
             let url = `/api/dispenses?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
-            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
+            if (location) url += `&location=${encodeURIComponent(location)}`;
             const resp = await fetch(url);
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'status'); return; }
@@ -956,9 +979,9 @@
     }
 
     async function searchTransactions() {
-        const start   = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
-        const end     = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
-        const machine = document.getElementById('locationSelect').value;
+        const start    = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
+        const end      = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
+        const location = document.getElementById('locationSelect').value;
 
         if (!document.getElementById('startDate').value || !document.getElementById('endDate').value) {
             setStatus('Please enter a start and end date.', 'error', 'status');
@@ -973,12 +996,12 @@
 
         try {
             let url = `/api/transactions?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
-            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
+            if (location) url += `&location=${encodeURIComponent(location)}`;
             const resp = await fetch(url);
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'status'); return; }
             setStatus('', '', 'status');
-            renderTransactionResults(data.results, data.capped, machine);
+            renderTransactionResults(data.results, data.capped, location);
         } catch (e) {
             setStatus('Could not reach the server.', 'error', 'status');
         } finally {

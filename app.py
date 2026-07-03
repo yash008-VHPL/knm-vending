@@ -121,6 +121,53 @@ def from_ole_date(ole_value):
         return None
 
 
+# Singapore wall-clock (UTC+8) is the time-base of vend [Date Time] OLE floats.
+# Movement/admin events happen "now" — convert now→SGT→OLE so history cutoffs are
+# directly comparable to vend times. (See migration_location_history_*.sql.)
+SGT_OFFSET = timedelta(hours=8)
+
+def now_sgt_ole():
+    return to_ole_date(datetime.utcnow() + SGT_OFFSET)
+
+
+def mlh_record_change(cursor, machine_code, new_name, lat, lon, source,
+                      decommission=False, at_ole=None):
+    """Append an effective-dated location change to MachineLocationHistory so the
+    admin paths stay in sync with movement orders (no silent history gaps).
+
+    Closes the machine's current OPEN interval at `at_ole` (now, SGT) and — unless
+    decommissioning — opens a new open interval for `new_name`. Idempotent-ish: a
+    no-op name change (same name already open) is skipped. Best-effort: if the
+    history table does not exist yet the caller's main write still succeeds.
+    """
+    code = str(machine_code)
+    cut  = at_ole if at_ole is not None else now_sgt_ole()
+    try:
+        cursor.execute("""
+            SELECT TOP 1 HistoryID, LocationName
+            FROM MachineLocationHistory
+            WHERE MachineCode = %s AND ValidToOle IS NULL
+            ORDER BY ValidFromOle DESC
+        """, (code,))
+        cur_open = cursor.fetchone()
+        if not decommission and cur_open and cur_open[1] == new_name:
+            return  # already current — nothing to record
+        if cur_open:
+            cursor.execute(
+                "UPDATE MachineLocationHistory SET ValidToOle=%s WHERE HistoryID=%s",
+                (cut, cur_open[0]),
+            )
+        if not decommission:
+            cursor.execute("""
+                INSERT INTO MachineLocationHistory
+                    (MachineCode, LocationName, Latitude, Longitude, ValidFromOle, ValidToOle, Source)
+                VALUES (%s, %s, %s, %s, %s, NULL, %s)
+            """, (code, new_name, lat, lon, cut, source))
+    except Exception as e:
+        # history is additive; never block the primary MachineLookup write
+        print(f"[mlh_record_change] skipped for {code}: {e}")
+
+
 def get_connection():
     return pymssql.connect(
         server=config.DB_SERVER,
@@ -529,14 +576,44 @@ def get_locations():
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+@app.route("/api/location-names")
+@login_required
+def get_location_names():
+    """Distinct location names for the Sales/Transactions location filter — every
+    name a machine has EVER been at (from history) plus current names, so past
+    locations remain selectable after a relocation. Falls back to MachineLookup
+    if the history table does not exist yet."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                SELECT DISTINCT LocationName FROM MachineLocationHistory
+                WHERE LocationName IS NOT NULL AND LocationName <> '(decommissioned)'
+                UNION
+                SELECT DISTINCT MachineName FROM MachineLookup WHERE MachineName IS NOT NULL
+                ORDER BY LocationName
+            """)
+        except Exception:
+            # history table not migrated yet → current names only
+            conn.rollback() if hasattr(conn, "rollback") else None
+            cursor.execute("SELECT DISTINCT MachineName FROM MachineLookup WHERE MachineName IS NOT NULL ORDER BY MachineName")
+        names = [r[0] for r in cursor.fetchall()]
+        conn.close()
+        return jsonify(names)
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
 # ── Sales ──────────────────────────────────────────────────────────────────────
 
 @app.route("/api/dispenses")
 @login_required
 def get_dispenses():
-    start_str = request.args.get("start",   "").strip()
-    end_str   = request.args.get("end",     "").strip()
-    machine   = request.args.get("machine", "").strip()
+    start_str = request.args.get("start",    "").strip()
+    end_str   = request.args.get("end",      "").strip()
+    machine   = request.args.get("machine",  "").strip()
+    location  = request.args.get("location", "").strip()
 
     if not start_str or not end_str:
         return jsonify({"error": "Please provide both a start and end datetime."}), 400
@@ -553,7 +630,25 @@ def get_dispenses():
     start_ole = to_ole_date(start_dt)
     end_ole   = to_ole_date(end_dt)
 
-    machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s" if machine else ""
+    params = []
+    machine_filter = ""
+    if machine:
+        machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s"
+        params.append(machine)
+    location_join   = ""
+    location_filter = ""
+    if location:
+        location_join = """
+        OUTER APPLY (
+            SELECT TOP 1 h.LocationName
+            FROM MachineLocationHistory h
+            WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
+              AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
+              AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
+            ORDER BY h.ValidFromOle DESC
+        ) loc"""
+        location_filter = "AND loc.LocationName = %s"
+        params.append(location)
 
     query = f"""
         SELECT
@@ -570,15 +665,17 @@ def get_dispenses():
             FROM MasterCode
             GROUP BY ItemCode
         ) mc ON mdt.[Event Code] = mc.ItemCode
+        {location_join}
         WHERE CAST(mdt.[Date Time] AS float) >= {start_ole}
           AND CAST(mdt.[Date Time] AS float) <= {end_ole}
           AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
           {machine_filter}
+          {location_filter}
         GROUP BY mdt.[Event Code], mc.EventName
         ORDER BY DispenseCount DESC
     """
 
-    params = (machine,) if machine else ()
+    params = tuple(params)
 
     try:
         conn = get_connection()
@@ -597,10 +694,16 @@ def get_dispenses():
 @app.route("/api/transactions")
 @login_required
 def get_transactions():
-    """Individual vend events in reverse chronological order."""
-    start_str = request.args.get("start",   "").strip()
-    end_str   = request.args.get("end",     "").strip()
-    machine   = request.args.get("machine", "").strip()
+    """Individual vend events in reverse chronological order.
+
+    Location is resolved PER VEND from MachineLocationHistory (the location that
+    was live at vend time), so a relocation is a sharp cutoff with no fan-out.
+    Filter by `location` (location name, preferred) or legacy `machine` (code).
+    """
+    start_str = request.args.get("start",    "").strip()
+    end_str   = request.args.get("end",      "").strip()
+    machine   = request.args.get("machine",  "").strip()
+    location  = request.args.get("location", "").strip()
 
     if not start_str or not end_str:
         return jsonify({"error": "Please provide both a start and end datetime."}), 400
@@ -617,13 +720,24 @@ def get_transactions():
     start_ole = to_ole_date(start_dt)
     end_ole   = to_ole_date(end_dt)
 
-    machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s" if machine else ""
+    # Build filters + ordered params. start/end OLE are interpolated (numeric,
+    # not user-supplied); machine/location are parameterised.
+    params = []
+    machine_filter = ""
+    if machine:
+        machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s"
+        params.append(machine)
+    location_filter = ""
+    if location:
+        # filter on the RESOLVED location name (post per-vend resolution)
+        location_filter = "AND loc.LocationName = %s"
+        params.append(location)
 
     query = f"""
         SELECT TOP 2000
             CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
             mc.EventName                   AS ItemName,
-            ISNULL(ml.MachineName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
+            ISNULL(loc.LocationName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
         FROM [MasterData Table] mdt
         INNER JOIN (
             SELECT ItemCode,
@@ -634,17 +748,24 @@ def get_transactions():
             FROM MasterCode
             GROUP BY ItemCode
         ) mc ON mdt.[Event Code] = mc.ItemCode
-        LEFT JOIN MachineLookup ml
-            ON CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
+        OUTER APPLY (
+            SELECT TOP 1 h.LocationName
+            FROM MachineLocationHistory h
+            WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
+              AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
+              AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
+            ORDER BY h.ValidFromOle DESC
+        ) loc
         WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
           AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
           AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
           AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
           {machine_filter}
+          {location_filter}
         ORDER BY mdt.[Date Time] DESC
     """
 
-    params = (machine,) if machine else ()
+    params = tuple(params)
 
     try:
         conn   = get_connection()
@@ -1024,10 +1145,20 @@ def add_location():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO MachineLookup (MachineName, MachineCode, Latitude, Longitude) VALUES (%s, %s, %s, %s)",
-            (name, code, lat, lon),
-        )
+        # UPSERT: never create a second row for an existing MachineCode (that was
+        # the JOIN fan-out / "doubling" bug). Update in place if the code exists.
+        cursor.execute("SELECT COUNT(*) FROM MachineLookup WHERE MachineCode = %s", (code,))
+        if cursor.fetchone()[0]:
+            cursor.execute(
+                "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s, IsActive=1 WHERE MachineCode=%s",
+                (name, lat, lon, code),
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO MachineLookup (MachineName, MachineCode, Latitude, Longitude) VALUES (%s, %s, %s, %s)",
+                (name, code, lat, lon),
+            )
+        mlh_record_change(cursor, code, name, lat, lon, "admin")
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -1062,11 +1193,18 @@ def update_location(code):
                 "UPDATE MachineLookup SET MachineCode=%s, MachineName=%s, Latitude=%s, Longitude=%s WHERE MachineCode=%s",
                 (new_code, name, lat, lon, code),
             )
+            # carry history forward to the new code, then record the name as current
+            cursor.execute(
+                "UPDATE MachineLocationHistory SET MachineCode=%s WHERE MachineCode=%s",
+                (new_code, code),
+            )
+            mlh_record_change(cursor, new_code, name, lat, lon, "admin")
         else:
             cursor.execute(
                 "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s WHERE MachineCode=%s",
                 (name, lat, lon, code),
             )
+            mlh_record_change(cursor, code, name, lat, lon, "admin")
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -1080,6 +1218,9 @@ def delete_location(code):
     try:
         conn   = get_connection()
         cursor = conn.cursor()
+        # Close the open history interval (preserve the historical record) BEFORE
+        # removing the lookup row, so past vends still resolve to a location.
+        mlh_record_change(cursor, code, None, None, None, "admin", decommission=True)
         cursor.execute("DELETE FROM MachineLookup WHERE MachineCode = %s", (code,))
         if cursor.rowcount == 0:
             conn.close()
@@ -1118,16 +1259,27 @@ def internal_vend_counts():
     try:
         conn   = get_connection()
         cursor = conn.cursor()
+        # Per-vend location resolution (site-correct for NETS cross-check): a machine
+        # that moved mid-month splits into one row per (code, location-at-vend-time).
         cursor.execute(f"""
-            SELECT ml.MachineCode, ml.MachineName, COUNT(*) AS VendCount
+            SELECT CAST(mdt.[Machine Code] AS NVARCHAR(50)) AS MachineCode,
+                   loc.LocationName,
+                   COUNT(*) AS VendCount
             FROM [MasterData Table] mdt
-            INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
+            OUTER APPLY (
+                SELECT TOP 1 h.LocationName
+                FROM MachineLocationHistory h
+                WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
+                  AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
+                  AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
+                ORDER BY h.ValidFromOle DESC
+            ) loc
             WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
               AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
               AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
               AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
-            GROUP BY ml.MachineCode, ml.MachineName
-            ORDER BY ml.MachineName
+            GROUP BY CAST(mdt.[Machine Code] AS NVARCHAR(50)), loc.LocationName
+            ORDER BY loc.LocationName
         """)
         rows = cursor.fetchall()
         conn.close()
@@ -1148,18 +1300,24 @@ def march2026_vends():
         conn   = get_connection()
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT
-                ml.MachineCode,
-                ml.MachineName,
-                COUNT(*) AS VendCount
+            SELECT CAST(mdt.[Machine Code] AS NVARCHAR(50)) AS MachineCode,
+                   loc.LocationName,
+                   COUNT(*) AS VendCount
             FROM [MasterData Table] mdt
-            INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
+            OUTER APPLY (
+                SELECT TOP 1 h.LocationName
+                FROM MachineLocationHistory h
+                WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
+                  AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
+                  AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
+                ORDER BY h.ValidFromOle DESC
+            ) loc
             WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
               AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
               AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
               AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
-            GROUP BY ml.MachineCode, ml.MachineName
-            ORDER BY ml.MachineName
+            GROUP BY CAST(mdt.[Machine Code] AS NVARCHAR(50)), loc.LocationName
+            ORDER BY loc.LocationName
         """)
         rows = cursor.fetchall()
         conn.close()

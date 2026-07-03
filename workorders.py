@@ -2759,6 +2759,28 @@ def api_movement_complete(mid):
             SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
             WHERE MovementOrderID = %s
         """, (user, mid))
+
+        # ── Effective-dated location history (sharp cutoff at completion) ──────────
+        # Cutoff = now in SGT (UTC+8) as an OLE float, matching vend [Date Time].
+        # Close the machine's current OPEN interval, then (deploy/relocate) open a
+        # new one. Best-effort: never block the movement completion.
+        try:
+            cut_ole_sql = "CAST(CONVERT(datetime, DATEADD(HOUR, 8, SYSUTCDATETIME())) AS FLOAT) + 2.0"
+            cursor.execute(f"""
+                UPDATE MachineLocationHistory
+                SET ValidToOle = {cut_ole_sql}
+                WHERE MachineCode = %s AND ValidToOle IS NULL
+            """, (str(machine_code),))
+            if mtype in ("deploy", "relocate"):
+                cursor.execute(f"""
+                    INSERT INTO MachineLocationHistory
+                        (MachineCode, LocationName, Latitude, Longitude, ValidFromOle, ValidToOle, Source, MovementOrderID)
+                    VALUES (%s, %s, %s, %s, {cut_ole_sql}, NULL, 'movement', %s)
+                """, (str(machine_code), to_loc, to_lat, to_lon, mid))
+            # retrieve: leave the interval closed (machine decommissioned, no open row)
+        except Exception as he:
+            print(f"[movement_complete] history write skipped for {machine_code}: {he}")
+
         _log_activity(cursor, "movementorder", mid, "completed",
                       f"{mtype} applied to {machine_code}", user)
         conn.commit()
@@ -3350,6 +3372,29 @@ def api_equipment_log():
         _activity_in("joborder",      job_ids)
         _activity_in("deliveryorder", delivery_ids)
         _activity_in("movementorder", movement_ids)
+
+        # ── Location history (every place this machine has been) ──────────────────
+        location_history = []
+        try:
+            cursor.execute("""
+                SELECT LocationName, ValidFromOle, ValidToOle, Source
+                FROM MachineLocationHistory
+                WHERE MachineCode = %s
+                ORDER BY ValidFromOle DESC
+            """, (str(code),))
+            for r in cursor.fetchall():
+                vf = from_ole_date(r[1]) if r[1] not in (None, 0, 0.0) else None
+                vt = from_ole_date(r[2]) if r[2] is not None else None
+                location_history.append({
+                    "location":   r[0],
+                    "from":       vf.strftime("%Y-%m-%d %H:%M") if vf else "—",
+                    "to":         vt.strftime("%Y-%m-%d %H:%M") if vt else None,  # None = current
+                    "current":    r[2] is None and r[0] != '(decommissioned)',
+                    "source":     r[3],
+                })
+        except Exception as he:
+            print(f"[machine_history] location_history skipped: {he}")
+
         conn.close()
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
@@ -3371,6 +3416,7 @@ def api_equipment_log():
             "delivery_orders": len(delivery_ids),
             "movement_orders": len(movement_ids),
         },
+        "location_history": location_history,
         "events": events[:300],
     })
 

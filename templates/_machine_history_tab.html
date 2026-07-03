@@ -75,6 +75,22 @@
     .mh-evt .summary { font-size: 0.86rem; color: #374151; margin-top: 4px; line-height: 1.4; }
     .mh-evt .by { font-size: 0.74rem; color: #6b7280; margin-top: 3px; }
 
+    /* Location history timeline */
+    .mh-loc-wrap { margin: 4px 0 16px 0; }
+    .mh-loc-title { font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+        color: #6b7280; letter-spacing: 0.05em; margin-bottom: 8px; }
+    .mh-loc {
+        display: flex; gap: 10px; align-items: baseline;
+        padding: 8px 12px; border-left: 3px solid #6366f1; margin-bottom: 6px;
+        background: #f5f3ff; border-radius: 5px;
+    }
+    .mh-loc.current { border-left-color: #15803d; background: #f0fdf4; }
+    .mh-loc.decom   { border-left-color: #9ca3af; background: #f9fafb; }
+    .mh-loc .name { font-weight: 700; color: #111827; font-size: 0.9rem; }
+    .mh-loc .range { color: #6b7280; font-size: 0.78rem; margin-left: auto; font-family: ui-monospace, monospace; }
+    .mh-loc .badge { font-size: 0.64rem; font-weight: 700; text-transform: uppercase;
+        padding: 2px 7px; border-radius: 4px; background: #dcfce7; color: #15803d; }
+
     .mh-empty { text-align: center; color: #9ca3af; padding: 30px 10px; font-size: 0.88rem; }
     .mh-msg { padding: 10px 14px; border-radius: 6px; font-size: 0.84rem; margin-bottom: 12px; }
     .mh-msg.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
@@ -219,10 +235,27 @@
           +     '<div class="mh-stat"><div class="label">Last topup</div><div class="value" style="font-size:0.88rem">' + esc(fmtDT(m.last_topup)) + '</div></div>'
           +     '<div class="mh-stat"><div class="label">Vends since</div><div class="value">' + (m.vends_since_last_topup != null ? m.vends_since_last_topup : '—') + '</div></div>'
           +   '</div>'
+          +   renderLocationHistory(d.location_history || [])
           +   '<div class="mh-events">' + renderEvents(d.events || []) + '</div>'
           + '</div>';
         document.getElementById('mhDetail').style.display = 'block';
         document.getElementById('mhDetail').innerHTML = html;
+    }
+
+    function renderLocationHistory(hist){
+        if(!hist.length) return '';
+        var rows = hist.map(function(h){
+            var decom = (h.location === '(decommissioned)');
+            var cls = h.current ? 'current' : (decom ? 'decom' : '');
+            var range = esc(h.from) + ' → ' + (h.to ? esc(h.to) : 'present');
+            return ''
+              + '<div class="mh-loc ' + cls + '">'
+              +   '<span class="name">' + esc(h.location) + '</span>'
+              +   (h.current ? '<span class="badge">current</span>' : '')
+              +   '<span class="range">' + range + '</span>'
+              + '</div>';
+        }).join('');
+        return '<div class="mh-loc-wrap"><div class="mh-loc-title">Where this machine has been</div>' + rows + '</div>';
     }
 
     function renderEvents(events){

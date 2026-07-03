@@ -192,15 +192,26 @@ def fetch_db_counts(year: int, month: int) -> dict:
     conn   = pymssql.connect(server=DB_SERVER, user=DB_USER,
                              password=DB_PASSWORD, database=DB_NAME)
     cursor = conn.cursor()
+    # Resolve each vend to the location that was live AT VEND TIME (per-vend, via
+    # MachineLocationHistory) so a machine that moved mid-month splits its count
+    # across the correct locations — matching NETS, which is physical-site based.
     cursor.execute(f"""
-        SELECT ml.MachineName, COUNT(*) AS VendCount
+        SELECT loc.LocationName, COUNT(*) AS VendCount
         FROM [MasterData Table] mdt
-        INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
+        OUTER APPLY (
+            SELECT TOP 1 h.LocationName
+            FROM MachineLocationHistory h
+            WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
+              AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
+              AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
+            ORDER BY h.ValidFromOle DESC
+        ) loc
         WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
           AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
           AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
           AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
-        GROUP BY ml.MachineName
+          AND loc.LocationName IS NOT NULL
+        GROUP BY loc.LocationName
     """)
     rows = cursor.fetchall()
     conn.close()
