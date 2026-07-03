@@ -3206,7 +3206,9 @@ def api_manager_machines_search():
                 seen[code]["names"].append(r[0])
         out = [{"code": v["code"], "name": " / ".join(v["names"]) or v["code"]}
                for v in seen.values()]
-        return jsonify(out[:30])
+        # Machine History browses the full fleet (client-side search filters this
+        # list), so return all machines. Cap only when it's an actual typeahead query.
+        return jsonify(out[:50] if q else out)
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
