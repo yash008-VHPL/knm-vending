@@ -236,11 +236,50 @@
           +     '<div class="mh-stat"><div class="label">Vends since</div><div class="value">' + (m.vends_since_last_topup != null ? m.vends_since_last_topup : '—') + '</div></div>'
           +   '</div>'
           +   renderLocationHistory(d.location_history || [])
+          +   renderRecordMove(m.code)
           +   '<div class="mh-events">' + renderEvents(d.events || []) + '</div>'
           + '</div>';
         document.getElementById('mhDetail').style.display = 'block';
         document.getElementById('mhDetail').innerHTML = html;
     }
+
+    function renderRecordMove(code){
+        return ''
+          + '<div class="mh-loc-wrap" style="margin-top:12px">'
+          +   '<div class="mh-loc-title">Record a past move</div>'
+          +   '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">'
+          +     '<div><div style="font-size:.7rem;color:#6b7280;margin-bottom:2px">Previous location</div>'
+          +       '<input id="mhMovePrev" type="text" placeholder="e.g. Kranji Camp Blk 808" '
+          +         'style="padding:6px 8px;border:1px solid #d1d5db;border-radius:6px;min-width:230px"></div>'
+          +     '<div><div style="font-size:.7rem;color:#6b7280;margin-bottom:2px">Moved on (SGT)</div>'
+          +       '<input id="mhMoveDate" type="date" '
+          +         'style="padding:6px 8px;border:1px solid #d1d5db;border-radius:6px"></div>'
+          +     '<button id="mhAddMoveBtn" onclick="window.__mhAddMove(\'' + esc(code) + '\')" '
+          +       'style="padding:7px 14px;background:#1a56db;color:#fff;border:none;border-radius:6px;cursor:pointer">Add move</button>'
+          +   '</div>'
+          +   '<div style="font-size:.72rem;color:#6b7280;margin-top:5px">'
+          +     'Splits history: vends before this date read the previous location; from this date they read the current one.</div>'
+          + '</div>';
+    }
+
+    window.__mhAddMove = function(code){
+        var prev = (document.getElementById('mhMovePrev').value || '').trim();
+        var date = (document.getElementById('mhMoveDate').value || '').trim();
+        if(!prev || !date){ showMsg('Enter both a previous location and a move date.', 'error'); return; }
+        var btn = document.getElementById('mhAddMoveBtn');
+        if(btn){ if(btn.disabled) return; btn.disabled = true; btn.style.opacity = 0.6; }  // no double-submit
+        api('/api/wo/manager/machine/' + encodeURIComponent(code) + '/record-move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ previous_location: prev, moved_on: date })
+        }).then(function(){
+            showMsg('Move recorded — history updated.', 'loading');
+            window.__mhPick(code);   // reload detail → timeline refreshes
+        }).catch(function(e){
+            if(btn){ btn.disabled = false; btn.style.opacity = 1; }
+            showError(e);
+        });
+    };
 
     function renderLocationHistory(hist){
         if(!hist.length) return '';

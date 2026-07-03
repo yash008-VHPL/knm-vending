@@ -3213,6 +3213,93 @@ def api_manager_machines_search():
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+@workorders_bp.route("/manager/machine/<path:code>/record-move", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_record_move(code):
+    """Reusable: record that a machine was at a PREVIOUS location until a given date,
+    splitting its dated MachineLocationHistory so vends before the date read the old
+    location and vends from the date read whatever the timeline already shows.
+
+    Use this for machines that were moved via admin relabel (current location already
+    correct) — no per-machine SQL. Body:
+        previous_location : required (name the machine was at before the move)
+        moved_on          : required 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM' (SGT)
+        previous_lat/lon  : optional
+    """
+    data = request.get_json(silent=True) or {}
+    prev_loc = (data.get("previous_location") or "").strip()
+    moved_on = (data.get("moved_on") or "").strip()
+    if not prev_loc or not moved_on:
+        return jsonify({"error": "previous_location and moved_on are required."}), 400
+
+    def _f(v):
+        try:
+            return float(v) if v not in (None, "", "null") else None
+        except (TypeError, ValueError):
+            return None
+    prev_lat = _f(data.get("previous_lat"))
+    prev_lon = _f(data.get("previous_lon"))
+
+    dt = None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(moved_on, fmt); break
+        except ValueError:
+            continue
+    if dt is None:
+        return jsonify({"error": "moved_on must be YYYY-MM-DD or 'YYYY-MM-DD HH:MM' (SGT)."}), 400
+    cut = to_ole_date(dt)   # vend [Date Time] is an SGT OLE float; move date is SGT too
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        # Find the interval that CONTAINS the move date (usually the current open one).
+        cursor.execute("""
+            SELECT TOP 1 HistoryID, LocationName, ValidFromOle, ValidToOle
+            FROM MachineLocationHistory WITH (UPDLOCK, HOLDLOCK)
+            WHERE MachineCode = %s
+              AND %s >= ValidFromOle
+              AND (ValidToOle IS NULL OR %s < ValidToOle)
+            ORDER BY ValidFromOle DESC
+        """, (str(code), cut, cut))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "No location interval covers that date. Check the machine has a current location."}), 400
+        hid, cur_name, vfrom, vto = row
+        vfrom = vfrom if vfrom is not None else 0.0
+        if cut <= vfrom:
+            conn.close()
+            return jsonify({"error": "Move date must be AFTER the start of the covering interval."}), 400
+        if prev_loc == cur_name:
+            conn.close()
+            return jsonify({"error": f"Previous location is the same as the current one ({cur_name})."}), 400
+
+        # Split: the covering interval now starts at the move date; insert the old
+        # location for the period before it. One transaction; open-interval invariant
+        # preserved (we never touch ValidToOle of the covering row's open end).
+        cursor.execute("UPDATE MachineLocationHistory SET ValidFromOle = %s WHERE HistoryID = %s",
+                       (cut, hid))
+        cursor.execute("""
+            INSERT INTO MachineLocationHistory
+                (MachineCode, LocationName, Latitude, Longitude, ValidFromOle, ValidToOle, Source)
+            VALUES (%s, %s, %s, %s, %s, %s, 'record-move')
+        """, (str(code), prev_loc, prev_lat, prev_lon, vfrom, cut))
+        _log_activity(cursor, "machine", 0,
+                      "location-move-recorded",
+                      f"{code}: {prev_loc} until {dt:%Y-%m-%d %H:%M} → {cur_name}",
+                      get_current_user())
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()   # never leave the UPDATE half-applied
+        except Exception:
+            pass
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
 @workorders_bp.route("/manager/equipment-log")
 @require_roles(*OPERATOR_ROLES)
 def api_equipment_log():
