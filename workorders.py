@@ -2365,17 +2365,102 @@ def api_admin_delete_joborder(jid):
 @workorders_bp.route("/admin/movementorder/<int:mid>", methods=["DELETE"])
 @require_roles(ROLE_ADMIN)
 def api_admin_delete_movementorder(mid):
+    """Delete a movement order. If it was COMPLETED, first UNWIND its effects so
+    the machine and its dated history return to the pre-move state — makes testing
+    clean and lets you correct a wrongly-completed move. Only safe to undo the most
+    recent move for a machine (no later moves/edits layered on top)."""
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        cursor.execute("""
+            SELECT MovementType, MachineCode, FromLocation, FromLat, FromLon, StatusCode
+            FROM WO_MovementOrders WHERE MovementOrderID = %s
+        """, (mid,))
+        row = cursor.fetchone()
+
+        if row and int(row[5]) == 2:   # completed → revert its effects (fail-closed)
+            mtype, code, from_loc, from_lat, from_lon, _ = row
+            code = str(code)
+
+            # GUARD: only auto-undo the machine's MOST RECENT completed move. Undoing
+            # an older move would corrupt a history that later moves have built on.
+            cursor.execute("""
+                SELECT TOP 1 MovementOrderID FROM WO_MovementOrders
+                WHERE CAST(MachineCode AS NVARCHAR(50)) = %s AND StatusCode = 2
+                ORDER BY CompletedAt DESC, MovementOrderID DESC
+            """, (code,))
+            latest = cursor.fetchone()
+            if not latest or int(latest[0]) != mid:
+                conn.close()
+                return jsonify({"error": "This isn't the machine's most recent completed move — "
+                                         "undo the later move(s) first."}), 409
+
+            # 1. Undo the dated history split — branch on TYPE, never guess.
+            if mtype in ("deploy", "relocate"):
+                cursor.execute("""
+                    SELECT HistoryID, ValidFromOle FROM MachineLocationHistory
+                    WHERE MovementOrderID = %s AND ValidToOle IS NULL
+                """, (mid,))
+                hrow = cursor.fetchone()
+                if not hrow:
+                    conn.close()
+                    return jsonify({"error": "This move's history was already changed — "
+                                             "can't auto-undo; adjust history manually."}), 409
+                cut = hrow[1]
+                # delete the interval this move OPENED first (so there's never two open
+                # intervals — the filtered unique index is never violated),
+                cursor.execute("DELETE FROM MachineLocationHistory WHERE HistoryID = %s", (hrow[0],))
+                # then re-open the single interval it had CLOSED at the same cutoff
+                # (target by HistoryID so we can never re-open two rows).
+                cursor.execute("""
+                    SELECT TOP 1 HistoryID FROM MachineLocationHistory
+                    WHERE MachineCode = %s AND ValidToOle = %s ORDER BY ValidFromOle DESC
+                """, (code, cut))
+                prior = cursor.fetchone()
+                if prior:
+                    cursor.execute("UPDATE MachineLocationHistory SET ValidToOle = NULL WHERE HistoryID = %s",
+                                   (prior[0],))
+            else:   # retrieve: it only CLOSED the open interval (inserted nothing)
+                cursor.execute("""
+                    SELECT COUNT(*) FROM MachineLocationHistory
+                    WHERE MachineCode = %s AND ValidToOle IS NULL
+                """, (code,))
+                if cursor.fetchone()[0] != 0:
+                    conn.close()
+                    return jsonify({"error": "Unexpected open interval — can't auto-undo this retrieve."}), 409
+                cursor.execute("""
+                    SELECT TOP 1 HistoryID FROM MachineLocationHistory
+                    WHERE MachineCode = %s ORDER BY ValidToOle DESC
+                """, (code,))
+                rr = cursor.fetchone()
+                if rr:
+                    cursor.execute("UPDATE MachineLocationHistory SET ValidToOle = NULL WHERE HistoryID = %s",
+                                   (rr[0],))
+            # 2. Restore MachineLookup to the pre-move state.
+            if mtype == "relocate":
+                cursor.execute("""
+                    UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s, IsActive=1
+                    WHERE MachineCode=%s
+                """, (from_loc, from_lat, from_lon, code))
+            elif mtype == "deploy":
+                cursor.execute("UPDATE MachineLookup SET IsActive=0 WHERE MachineCode=%s", (code,))
+            elif mtype == "retrieve":
+                cursor.execute("""
+                    UPDATE MachineLookup
+                    SET IsActive=1, DecommissionedAt=NULL, DecommissionReason=NULL, MachineName=%s
+                    WHERE MachineCode=%s
+                """, (from_loc, code))
+
         cursor.execute(
-            "DELETE FROM WO_Activity WHERE ParentType='movementorder' AND ParentID=%s",
-            (mid,),
-        )
+            "DELETE FROM WO_Activity WHERE ParentType='movementorder' AND ParentID=%s", (mid,))
         cursor.execute("DELETE FROM WO_MovementOrders WHERE MovementOrderID=%s", (mid,))
         conn.commit()
         conn.close()
     except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
         return jsonify({"error": f"Delete failed: {str(e)}"}), 500
     return jsonify({"ok": True})
 
