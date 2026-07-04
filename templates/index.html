@@ -123,14 +123,20 @@
 
         select,
         input[type="text"],
+        input[type="search"],
+        input[type="number"],
         input[type="date"],
-        input[type="time"] {
+        input[type="time"],
+        input[type="datetime-local"] {
+            box-sizing: border-box;
+            height: 40px;               /* fixed so native select / date / time / search all line up */
             border: 1px solid #d1d5db;
             border-radius: 6px;
-            padding: 8px 12px;
+            padding: 0 12px;
             font-size: 0.875rem;
             color: #111827;
             background: white;
+            vertical-align: top;        /* consistent baseline when sat side by side */
         }
         select             { min-width: 180px; }
         input[type="text"] { width: 110px; }
@@ -138,8 +144,11 @@
 
         select:focus,
         input[type="text"]:focus,
+        input[type="search"]:focus,
+        input[type="number"]:focus,
         input[type="date"]:focus,
-        input[type="time"]:focus {
+        input[type="time"]:focus,
+        input[type="datetime-local"]:focus {
             outline: none;
             border-color: #1a56db;
             box-shadow: 0 0 0 3px rgba(26,86,219,0.15);
