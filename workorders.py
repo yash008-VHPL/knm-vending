@@ -2374,7 +2374,7 @@ def api_admin_delete_movementorder(mid):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT MovementType, MachineCode, FromLocation, FromLat, FromLon, StatusCode
-            FROM WO_MovementOrders WHERE MovementOrderID = %s
+            FROM WO_MovementOrders WITH (UPDLOCK, HOLDLOCK) WHERE MovementOrderID = %s
         """, (mid,))
         row = cursor.fetchone()
 
@@ -2394,6 +2394,19 @@ def api_admin_delete_movementorder(mid):
                 conn.close()
                 return jsonify({"error": "This isn't the machine's most recent completed move — "
                                          "undo the later move(s) first."}), 409
+
+            # GUARD: if this machine's history was hand-edited (record-move / historic /
+            # corrective), the move's interval may have been split — auto-undo could
+            # mis-locate it. Fail closed and require manual correction.
+            cursor.execute("""
+                SELECT COUNT(*) FROM MachineLocationHistory
+                WHERE MachineCode = %s AND Source IN ('record-move','historic','corrective')
+            """, (code,))
+            if cursor.fetchone()[0] > 0:
+                conn.close()
+                return jsonify({"error": "This machine has manually-recorded moves in its history, "
+                                         "so auto-undo is disabled to avoid corrupting it. Remove the "
+                                         "recorded move from the History card first, or adjust manually."}), 409
 
             # 1. Undo the dated history split — branch on TYPE, never guess.
             if mtype in ("deploy", "relocate"):

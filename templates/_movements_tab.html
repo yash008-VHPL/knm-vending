@@ -237,6 +237,11 @@
             if((m.status_code === 0 || m.status_code === 1) && canAct){
                 actions += '<button class="mv-btn-done" onclick="window.__mvComplete(' + m.id + ')">Complete &amp; apply</button>';
             }
+            if(state.bootstrap && state.bootstrap.role === 'admin'){
+                actions += '<button onclick="window.__mvDelete(' + m.id + ',' + m.status_code + ')" '
+                    + 'style="padding:5px 12px;background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;'
+                    + 'border-radius:6px;cursor:pointer;font-size:.82rem">Delete</button>';
+            }
             return ''
               + '<div class="mv-card">'
               +   '<div class="row">'
@@ -263,6 +268,19 @@
         postJSON('/api/wo/movementorders/' + id + '/status', { status_code: 1 })
             .then(window.__mvRefresh)
             .catch(function(e){ showMsg('Start failed: ' + esc(e.message), 'error'); });
+    };
+
+    var _mvDeleting = false;
+    window.__mvDelete = function(id, statusCode){
+        if(_mvDeleting) return;   // no double-submit
+        var msg = (statusCode === 2)
+            ? "Delete this COMPLETED movement?\n\nThis UNDOES the move: the machine returns to its previous location and the dated history split is removed. Only the machine's most recent completed move can be undone."
+            : "Delete this movement order?\n\nIt hasn't been completed, so nothing else changes.";
+        if(!confirm(msg)) return;
+        _mvDeleting = true;
+        api('/api/wo/admin/movementorder/' + id, { method: 'DELETE' })
+            .then(function(){ _mvDeleting = false; showMsg('Movement order deleted.', 'ok'); window.__mvRefresh(); })
+            .catch(function(e){ _mvDeleting = false; showMsg('Delete failed: ' + esc(e.message), 'error'); });
     };
 
     window.__mvComplete = function(id){
