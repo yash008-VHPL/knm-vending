@@ -130,6 +130,26 @@ def now_sgt_ole():
     return to_ole_date(datetime.utcnow() + SGT_OFFSET)
 
 
+def log_deletion(cursor, entity_type, entity_key, summary, snapshot, reversible, user):
+    """Record a deletion in WO_DeletedLog for audit + potential reversal. `snapshot`
+    is a JSON-serialisable dict/list capturing the deleted row(s) so it can be
+    restored/reviewed later. Runs on the caller's cursor/transaction so it commits
+    atomically with the delete. Best-effort — never blocks the delete itself."""
+    try:
+        cursor.execute("""
+            INSERT INTO WO_DeletedLog
+                (EntityType, EntityKey, Summary, Snapshot, Reversible, DeletedBy)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (entity_type,
+              (str(entity_key) if entity_key is not None else None),
+              (summary or "")[:500],
+              (json.dumps(snapshot, default=str) if snapshot is not None else None),
+              (1 if reversible else 0),
+              (user or "system")))
+    except Exception as e:
+        print(f"[log_deletion] skipped for {entity_type}/{entity_key}: {e}")
+
+
 def mlh_record_change(cursor, machine_code, new_name, lat, lon, source,
                       decommission=False, at_ole=None):
     """Append an effective-dated location change to MachineLocationHistory so the
@@ -984,6 +1004,11 @@ def delete_topup(code):
             conn.close()
             return jsonify({"error": "No topup recorded for this machine."}), 400
 
+        cursor.execute("""SELECT MachineName, LastTopupTimestamp, PreviousTopupTimestamp, CountBeforeLastTopup
+                          FROM MachineLookup WHERE MachineCode = %s""", (code,))
+        _t = cursor.fetchone()
+        snap = ({"MachineCode": code, "MachineName": _t[0], "LastTopupTimestamp": _t[1],
+                 "PreviousTopupTimestamp": _t[2], "CountBeforeLastTopup": _t[3]} if _t else None)
         # Revert: LastTopupTimestamp ← PreviousTopupTimestamp, clear the rest
         cursor.execute("""
             UPDATE MachineLookup
@@ -992,6 +1017,9 @@ def delete_topup(code):
                 CountBeforeLastTopup   = 0
             WHERE MachineCode = %s
         """, (code,))
+        log_deletion(cursor, "topup", code,
+                     f"Undid last top-up for {(snap or {}).get('MachineName') or code}",
+                     snap, False, get_current_user())
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -1218,6 +1246,10 @@ def delete_location(code):
     try:
         conn   = get_connection()
         cursor = conn.cursor()
+        # snapshot the lookup row for the audit log before we touch anything
+        cursor.execute("SELECT * FROM MachineLookup WHERE MachineCode = %s", (code,))
+        _srow = cursor.fetchone()
+        snap = {c[0]: v for c, v in zip(cursor.description, _srow)} if _srow else None
         # Close the open history interval (preserve the historical record) BEFORE
         # removing the lookup row, so past vends still resolve to a location.
         mlh_record_change(cursor, code, None, None, None, "admin", decommission=True)
@@ -1225,6 +1257,9 @@ def delete_location(code):
         if cursor.rowcount == 0:
             conn.close()
             return jsonify({"error": "Location not found."}), 404
+        log_deletion(cursor, "location", code,
+                     f"Location '{(snap or {}).get('MachineName') or code}' ({code})",
+                     snap, False, get_current_user())
         conn.commit()
         conn.close()
         return jsonify({"ok": True})

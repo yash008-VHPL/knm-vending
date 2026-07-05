@@ -235,7 +235,7 @@
           +     '<div class="mh-stat"><div class="label">Last topup</div><div class="value" style="font-size:0.88rem">' + esc(fmtDT(m.last_topup)) + '</div></div>'
           +     '<div class="mh-stat"><div class="label">Vends since</div><div class="value">' + (m.vends_since_last_topup != null ? m.vends_since_last_topup : '—') + '</div></div>'
           +   '</div>'
-          +   renderLocationHistory(d.location_history || [])
+          +   renderLocationHistory(d.location_history || [], m.code)
           +   renderRecordMove(m.code)
           +   '<div class="mh-events">' + renderEvents(d.events || []) + '</div>'
           + '</div>';
@@ -281,21 +281,34 @@
         });
     };
 
-    function renderLocationHistory(hist){
+    function renderLocationHistory(hist, code){
         if(!hist.length) return '';
         var rows = hist.map(function(h){
             var decom = (h.location === '(decommissioned)');
             var cls = h.current ? 'current' : (decom ? 'decom' : '');
             var range = esc(h.from) + ' → ' + (h.to ? esc(h.to) : 'present');
+            var del = (h.source === 'record-move' && h.history_id)
+                ? '<button title="Remove this recorded move" onclick="window.__mhDelMove(\'' + esc(code) + '\',' + h.history_id + ')" '
+                  + 'style="margin-left:8px;background:#fee2e2;color:#b91c1c;border:1px solid #fecaca;border-radius:5px;width:22px;height:22px;cursor:pointer;font-weight:700;line-height:1">&times;</button>'
+                : '';
             return ''
               + '<div class="mh-loc ' + cls + '">'
               +   '<span class="name">' + esc(h.location) + '</span>'
               +   (h.current ? '<span class="badge">current</span>' : '')
+              +   (h.source === 'record-move' ? '<span class="badge" style="background:#ede9fe;color:#5b21b6">recorded</span>' : '')
               +   '<span class="range">' + range + '</span>'
+              +   del
               + '</div>';
         }).join('');
         return '<div class="mh-loc-wrap"><div class="mh-loc-title">Where this machine has been</div>' + rows + '</div>';
     }
+
+    window.__mhDelMove = function(code, hid){
+        if(!confirm("Remove this recorded past move?\n\nThe history split is undone — the following period re-absorbs it. This is logged and can be restored from the Deleted log.")) return;
+        api('/api/wo/manager/machine/' + encodeURIComponent(code) + '/recorded-move/' + hid, { method: 'DELETE' })
+            .then(function(){ showMsg('Recorded move removed.', 'loading'); window.__mhPick(code); })
+            .catch(function(e){ showError(e); });
+    };
 
     function renderEvents(events){
         if(!events.length){

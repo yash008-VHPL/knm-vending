@@ -29,8 +29,9 @@ from flask import Blueprint, request, jsonify, Response
 # Reuse helpers from the existing vending app so auth and DB stay consistent.
 from app import (
     get_current_user, get_role, get_connection,
-    to_ole_date, from_ole_date,
+    to_ole_date, from_ole_date, log_deletion,
 )
+import json
 
 # SharePoint helper — module-level import; nothing executes here.
 import sharepoint_helper as sp
@@ -293,6 +294,20 @@ def init_workorders_db():
                 CreatedAt          DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
                 CompletedBy        NVARCHAR(255)  NULL,
                 CompletedAt        DATETIME2      NULL
+            )
+        """),
+        ("WO_DeletedLog", """
+            CREATE TABLE WO_DeletedLog (
+                LogID       INT IDENTITY(1,1) PRIMARY KEY,
+                EntityType  NVARCHAR(40)   NOT NULL,
+                EntityKey   NVARCHAR(100)  NULL,
+                Summary     NVARCHAR(500)  NULL,
+                Snapshot    NVARCHAR(MAX)  NULL,
+                Reversible  BIT            NOT NULL DEFAULT 0,
+                DeletedBy   NVARCHAR(255)  NOT NULL,
+                DeletedAt   DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
+                RestoredBy  NVARCHAR(255)  NULL,
+                RestoredAt  DATETIME2      NULL
             )
         """),
     ]
@@ -2181,8 +2196,19 @@ def api_kb_delete(kid):
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        snap = _row_snapshot(cursor, "SELECT * FROM WO_KB_Entries WHERE KBID=%s", (kid,))
+        tbs = []
+        cursor.execute("SELECT * FROM WO_KB_Tickboxes WHERE KBID=%s", (kid,))
+        _cols = [d[0] for d in cursor.description]
+        for r in cursor.fetchall():
+            tbs.append({c: v for c, v in zip(_cols, r)})
+        if snap is not None:
+            snap["_tickboxes"] = tbs
         cursor.execute("DELETE FROM WO_KB_Tickboxes WHERE KBID=%s", (kid,))
         cursor.execute("DELETE FROM WO_KB_Entries WHERE KBID=%s", (kid,))
+        log_deletion(cursor, "kb", kid,
+                     f"KB entry {(snap or {}).get('Title') or ('#'+str(kid))}",
+                     snap, False, get_current_user())
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -2332,13 +2358,27 @@ def _delete_sp_items(sp_ids):
             print(f"[admin_delete] SP delete failed for {sp_id}: {e}")
 
 
+def _row_snapshot(cursor, sql, params):
+    """Return the first matching row as a {column: value} dict (for the deletion log)."""
+    cursor.execute(sql, params)
+    row = cursor.fetchone()
+    if not row:
+        return None
+    cols = [d[0] for d in cursor.description]
+    return {c: v for c, v in zip(cols, row)}
+
+
 @workorders_bp.route("/admin/complaint/<int:cid>", methods=["DELETE"])
 @require_roles(ROLE_ADMIN)
 def api_admin_delete_complaint(cid):
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        snap = _row_snapshot(cursor, "SELECT * FROM WO_Complaints WHERE ComplaintID=%s", (cid,))
         sp_ids = _cascade_delete_complaint(cursor, cid)
+        log_deletion(cursor, "complaint", cid,
+                     f"Complaint {(snap or {}).get('DisplayID') or ('#' + str(cid))}",
+                     snap, False, get_current_user())
         conn.commit()
         conn.close()
     except Exception as e:
@@ -2353,7 +2393,11 @@ def api_admin_delete_joborder(jid):
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        snap = _row_snapshot(cursor, "SELECT * FROM WO_JobOrders WHERE JobOrderID=%s", (jid,))
         sp_ids = _cascade_delete_joborder(cursor, jid)
+        log_deletion(cursor, "joborder", jid,
+                     f"Work order {(snap or {}).get('DisplayID') or ('#' + str(jid))}",
+                     snap, False, get_current_user())
         conn.commit()
         conn.close()
     except Exception as e:
@@ -2464,6 +2508,11 @@ def api_admin_delete_movementorder(mid):
                     WHERE MachineCode=%s
                 """, (from_loc, code))
 
+        snap = _row_snapshot(cursor, "SELECT * FROM WO_MovementOrders WHERE MovementOrderID=%s", (mid,))
+        log_deletion(cursor, "movementorder", mid,
+                     f"Movement {(snap or {}).get('DisplayID') or ('#'+str(mid))}"
+                     + (" (completed move reverted on delete)" if row and int(row[5]) == 2 else ""),
+                     snap, False, get_current_user())
         cursor.execute(
             "DELETE FROM WO_Activity WHERE ParentType='movementorder' AND ParentID=%s", (mid,))
         cursor.execute("DELETE FROM WO_MovementOrders WHERE MovementOrderID=%s", (mid,))
@@ -2492,6 +2541,14 @@ def api_admin_wipe_all():
         cursor = conn.cursor()
         cursor.execute("SELECT SPItemID FROM WO_Images WHERE SPItemID IS NOT NULL")
         sp_ids = [r[0] for r in cursor.fetchall()]
+        counts = {}
+        for t in ("WO_Complaints", "WO_JobOrders", "WO_MovementOrders", "WO_Images", "WO_Activity"):
+            cursor.execute(f"SELECT COUNT(*) FROM {t}")
+            counts[t] = int(cursor.fetchone()[0])
+        log_deletion(cursor, "wipe-all", None,
+                     f"Wiped ALL WO data (include_kb={include_kb})",
+                     {"counts": counts, "include_kb": include_kb, "reset_counters": reset_counters},
+                     False, get_current_user())
         cursor.execute("DELETE FROM WO_Images")
         cursor.execute("DELETE FROM WO_Activity")
         cursor.execute("DELETE FROM WO_JobOrderTasks")
@@ -2510,6 +2567,121 @@ def api_admin_wipe_all():
         return jsonify({"error": f"Wipe failed: {str(e)}"}), 500
     _delete_sp_items(sp_ids)
     return jsonify({"ok": True, "sp_deleted": len(sp_ids)})
+
+
+@workorders_bp.route("/manager/machine/<path:code>/recorded-move/<int:hid>", methods=["DELETE"])
+@require_roles(*MANAGER_ROLES)
+def api_delete_recorded_move(code, hid):
+    """Remove a manually-recorded past move: delete its history interval and extend
+    the following interval back over the gap (re-absorb). Logged + reversible."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        snap = _row_snapshot(cursor,
+            "SELECT * FROM MachineLocationHistory WHERE HistoryID=%s AND MachineCode=%s AND Source='record-move'",
+            (hid, str(code)))
+        if not snap:
+            conn.close()
+            return jsonify({"error": "Recorded move not found (only manually-recorded moves can be removed here)."}), 404
+        absorb_start = snap["ValidFromOle"]
+        cut          = snap["ValidToOle"]
+        cursor.execute("""
+            SELECT TOP 1 HistoryID FROM MachineLocationHistory
+            WHERE MachineCode=%s AND ValidFromOle=%s ORDER BY ValidToOle
+        """, (str(code), cut))
+        nxt = cursor.fetchone()
+        if not nxt:
+            conn.close()
+            return jsonify({"error": "History changed since this move was recorded — can't safely remove it."}), 409
+        cursor.execute("UPDATE MachineLocationHistory SET ValidFromOle=%s WHERE HistoryID=%s",
+                       (absorb_start, nxt[0]))
+        cursor.execute("DELETE FROM MachineLocationHistory WHERE HistoryID=%s", (hid,))
+        log_deletion(cursor, "recorded-move", hid,
+                     f"{code}: removed recorded move '{snap.get('LocationName')}'",
+                     snap, True, get_current_user())
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return jsonify({"error": f"Delete failed: {str(e)}"}), 500
+
+
+@workorders_bp.route("/admin/deleted-log")
+@require_roles(ROLE_ADMIN)
+def api_deleted_log():
+    """Audit trail of every delete action, newest first."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT TOP 300 LogID, EntityType, EntityKey, Summary, Reversible,
+                   DeletedBy, DeletedAt, RestoredBy, RestoredAt
+            FROM WO_DeletedLog ORDER BY LogID DESC
+        """)
+        cols = [d[0] for d in cursor.description]
+        rows = [{c: v for c, v in zip(cols, r)} for r in cursor.fetchall()]
+        conn.close()
+        for o in rows:
+            o["DeletedAt"]  = _iso(o.get("DeletedAt"))
+            o["RestoredAt"] = _iso(o.get("RestoredAt"))
+            o["Reversible"] = bool(o.get("Reversible")) and not o.get("RestoredAt")
+        return jsonify(rows)
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/admin/deleted-log/<int:log_id>/restore", methods=["POST"])
+@require_roles(ROLE_ADMIN)
+def api_deleted_log_restore(log_id):
+    """One-click restore for reversible log entries (currently: recorded-move).
+    Other entity types keep their full snapshot in the log for manual restore."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT EntityType, Snapshot, Reversible, RestoredAt FROM WO_DeletedLog WHERE LogID=%s",
+                       (log_id,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close(); return jsonify({"error": "Log entry not found."}), 404
+        etype, snap_json, reversible, restored_at = row
+        if restored_at is not None:
+            conn.close(); return jsonify({"error": "Already restored."}), 409
+        if not reversible or not snap_json:
+            conn.close(); return jsonify({"error": "This entry can't be auto-restored; its snapshot is kept for manual restore."}), 400
+        snap = json.loads(snap_json)
+
+        if etype == "recorded-move":
+            code = str(snap["MachineCode"]); absorb_start = snap["ValidFromOle"]; cut = snap["ValidToOle"]
+            cursor.execute("""
+                SELECT TOP 1 HistoryID FROM MachineLocationHistory
+                WHERE MachineCode=%s AND ValidFromOle=%s ORDER BY ValidToOle
+            """, (code, absorb_start))
+            nxt = cursor.fetchone()
+            if not nxt:
+                conn.close(); return jsonify({"error": "History changed since deletion — can't auto-restore."}), 409
+            cursor.execute("UPDATE MachineLocationHistory SET ValidFromOle=%s WHERE HistoryID=%s", (cut, nxt[0]))
+            cursor.execute("""
+                INSERT INTO MachineLocationHistory
+                    (MachineCode, LocationName, Latitude, Longitude, ValidFromOle, ValidToOle, Source)
+                VALUES (%s, %s, %s, %s, %s, %s, 'record-move')
+            """, (code, snap["LocationName"], snap.get("Latitude"), snap.get("Longitude"), absorb_start, cut))
+        else:
+            conn.close(); return jsonify({"error": f"Restore not implemented for '{etype}'."}), 400
+
+        cursor.execute("UPDATE WO_DeletedLog SET RestoredBy=%s, RestoredAt=SYSUTCDATETIME(), Reversible=0 WHERE LogID=%s",
+                       (get_current_user(), log_id))
+        conn.commit(); conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return jsonify({"error": f"Restore failed: {str(e)}"}), 500
 
 
 # ── Images (SP-backed proxy) ──────────────────────────────────────────────────
@@ -3564,7 +3736,7 @@ def api_equipment_log():
         location_history = []
         try:
             cursor.execute("""
-                SELECT LocationName, ValidFromOle, ValidToOle, Source
+                SELECT LocationName, ValidFromOle, ValidToOle, Source, HistoryID
                 FROM MachineLocationHistory
                 WHERE MachineCode = %s
                 ORDER BY ValidFromOle DESC
@@ -3578,6 +3750,7 @@ def api_equipment_log():
                     "to":         vt.strftime("%Y-%m-%d %H:%M") if vt else None,  # None = current
                     "current":    r[2] is None and r[0] != '(decommissioned)',
                     "source":     r[3],
+                    "history_id": r[4],
                 })
         except Exception as he:
             print(f"[machine_history] location_history skipped: {he}")

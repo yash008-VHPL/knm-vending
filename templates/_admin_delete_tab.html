@@ -67,6 +67,7 @@
         <button class="ad-tab"        id="adTabWO"   onclick="window.__adSwitch('wo')">Work Orders</button>
         <button class="ad-tab"        id="adTabKB"   onclick="window.__adSwitch('kb')">KB Entries</button>
         <button class="ad-tab"        id="adTabNuke" onclick="window.__adSwitch('nuke')">Wipe All</button>
+        <button class="ad-tab"        id="adTabLog"  onclick="window.__adSwitch('log')">Deleted log</button>
     </div>
 
     <div id="adMsg"></div>
@@ -113,13 +114,49 @@
 
     window.__adSwitch = function(tab){
         document.querySelectorAll('.ad-tab').forEach(function(b){ b.classList.remove('active'); });
-        var btnMap = { compl:'adTabCompl', wo:'adTabWO', kb:'adTabKB', nuke:'adTabNuke' };
+        var btnMap = { compl:'adTabCompl', wo:'adTabWO', kb:'adTabKB', nuke:'adTabNuke', log:'adTabLog' };
         document.getElementById(btnMap[tab]).classList.add('active');
         state.currentTab = tab;
         if(tab === 'compl')      loadComplaints();
         else if(tab === 'wo')    loadWOs();
         else if(tab === 'kb')    loadKBs();
         else if(tab === 'nuke')  renderNuke();
+        else if(tab === 'log')   loadDeletedLog();
+    };
+
+    // ── Deleted log (audit trail of every delete) ──
+    function loadDeletedLog(){
+        showMsg('Loading…', 'loading');
+        api('/api/wo/admin/deleted-log').then(function(rows){
+            showMsg('', '');
+            if(!rows.length){
+                document.getElementById('adContent').innerHTML = '<div class="ad-empty">No deletions logged yet.</div>';
+                return;
+            }
+            document.getElementById('adContent').innerHTML = rows.map(function(l){
+                var action = l.RestoredAt
+                    ? '<span class="sub">restored ' + fmtDT(l.RestoredAt) + (l.RestoredBy ? ' by ' + esc(l.RestoredBy) : '') + '</span>'
+                    : (l.Reversible
+                        ? '<button class="ad-btn-del" style="background:#dcfce7;color:#166534;border-color:#bbf7d0" onclick="window.__adRestore(' + l.LogID + ')">Restore</button>'
+                        : '<span class="sub" style="color:#9ca3af">snapshot only</span>');
+                return ''
+                  + '<div class="ad-card">'
+                  +   '<div>'
+                  +     '<div class="id">' + esc(l.EntityType) + (l.EntityKey ? ' · ' + esc(l.EntityKey) : '') + '</div>'
+                  +     '<div class="title">' + esc(l.Summary || '') + '</div>'
+                  +     '<div class="sub">by ' + esc(l.DeletedBy) + ' · ' + fmtDT(l.DeletedAt) + '</div>'
+                  +   '</div>'
+                  +   action
+                  + '</div>';
+            }).join('');
+        }).catch(function(e){ showMsg(esc(e.message), 'error'); });
+    }
+
+    window.__adRestore = function(id){
+        if(!confirm('Restore this deleted item?')) return;
+        postJSON('/api/wo/admin/deleted-log/' + id + '/restore', {}).then(function(){
+            showMsg('Restored.', 'ok'); loadDeletedLog();
+        }).catch(function(e){ showMsg('Restore failed: ' + esc(e.message), 'error'); });
     };
 
     // ── Complaints ──
