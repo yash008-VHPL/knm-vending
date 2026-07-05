@@ -421,6 +421,10 @@
     {% if role == 'admin' %}
     <button class="tab-btn" style="color:#b91c1c" onclick="switchTab('admin_delete', this); if(window.__adInit) window.__adInit();">🗑 Test Cleanup</button>
     {% endif %}
+    {# ── Alpha App: admin only — opens the separate streamlined preview (read-only) ── #}
+    {% if role == 'admin' %}
+    <button class="tab-btn" style="color:#7c3aed" onclick="window.open('/alpha','_blank')">🧪 Alpha App</button>
+    {% endif %}
 </div>
 
 <div class="container">

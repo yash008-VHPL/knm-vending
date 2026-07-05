@@ -1487,6 +1487,14 @@ try:
 except Exception as e:
     print(f"[startup] init_workorders_db failed: {e}")
 
+# ── Alpha preview (additive, READ-ONLY) — streamlined UI at /alpha ─────────────
+# Admin-only "Alpha App" tab opens this. Wrapped so it can never break startup.
+try:
+    from alpha_preview import alpha_bp
+    app.register_blueprint(alpha_bp)
+except Exception as e:
+    print(f"[startup] alpha_preview blueprint not loaded: {e}")
+
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

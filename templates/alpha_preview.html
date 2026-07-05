@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KNM Ops — Streamlined Preview (read-only)</title>
+<style>
+  :root{
+    --blue:#1a56db;--blue-d:#163fa8;--ink:#1f2933;--mut:#6b7280;--line:#e5e7eb;
+    --bg:#f0f4f8;--card:#fff;--ok:#16a34a;--warn:#d97706;--bad:#b91c1c;
+    --green-bg:#dcfce7;--amber-bg:#fef3c7;--red-bg:#fee2e2;--chip:#eef2ff;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--ink);font-size:14px}
+  header{background:var(--blue);color:#fff;padding:10px 18px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  header .brand{font-weight:800}
+  header .brand small{display:block;font-weight:500;opacity:.8;font-size:.7rem}
+  .rolepick{display:flex;align-items:center;gap:8px;font-size:.78rem;flex-wrap:wrap}
+  .rolepick select{border-radius:7px;border:1px solid rgba(255,255,255,.4);background:rgba(255,255,255,.12);color:#fff;padding:5px 9px;font-weight:600}
+  .rolepick select option{color:#111}
+  .banner{padding:7px 18px;font-size:.78rem;font-weight:600;display:flex;gap:8px;align-items:center}
+  .banner.live{background:var(--green-bg);color:#14532d}
+  .banner.demo{background:var(--amber-bg);color:#7c2d12}
+  .banner b{font-weight:800}
+  nav.tabs{display:flex;gap:4px;background:#fafbff;border-bottom:1px solid var(--line);padding:6px 12px;flex-wrap:wrap;position:sticky;top:0;z-index:5}
+  nav.tabs button{background:none;border:none;border-bottom:3px solid transparent;padding:9px 14px;font-size:.9rem;font-weight:600;color:var(--mut);cursor:pointer;border-radius:7px 7px 0 0}
+  nav.tabs button.on{color:var(--blue);border-bottom-color:var(--blue);background:#fff}
+  main{max-width:1080px;margin:0 auto;padding:18px 16px 70px}
+  .screen-h{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+  .screen-h h2{font-size:1.2rem;font-weight:800}
+  .screen-h .crumb{font-size:.74rem;color:var(--mut)}
+  .btn{background:var(--blue);color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:.82rem;font-weight:600;cursor:pointer}
+  .btn:hover{background:var(--blue-d)}
+  .btn.ghost{background:#eef2ff;color:var(--blue)}
+  .btn.sm{padding:5px 10px;font-size:.74rem}
+  .btn.danger{background:#fee2e2;color:#b91c1c}
+  .btn:disabled{opacity:.45;cursor:not-allowed}
+  .subnav{display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap}
+  .subnav button{font-size:.78rem;font-weight:600;padding:6px 12px;border-radius:20px;background:#f1f5f9;color:#475569;border:none;cursor:pointer}
+  .subnav button.on{background:var(--blue);color:#fff}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.04);margin-bottom:14px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px}
+  .kpi{border:1px solid var(--line);border-radius:10px;padding:11px 13px;background:#fafbff}
+  .kpi b{font-size:1.5rem;display:block;line-height:1.1}
+  .kpi small{color:var(--mut)}
+  .rows{display:grid;gap:8px}
+  .row{display:flex;align-items:center;gap:11px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fff}
+  .row .grow{flex:1;min-width:0}
+  .row .grow b{display:block}
+  .row .meta{font-size:.76rem;color:var(--mut)}
+  .dot{width:11px;height:11px;border-radius:50%;flex:0 0 auto}
+  .dot.g{background:var(--ok)}.dot.y{background:var(--warn)}.dot.r{background:var(--bad)}
+  .tag{font-size:.66rem;font-weight:800;padding:2px 7px;border-radius:6px;white-space:nowrap}
+  .tag.svc{background:#fee2e2;color:#b91c1c}.tag.del{background:#dbeafe;color:#1d4ed8}
+  .tag.mov{background:#ede9fe;color:#6d28d9}.tag.done{background:#dcfce7;color:#15803d}
+  .tag.new{background:#fef3c7;color:#92400e}.tag.assigned{background:#e0e7ff;color:#3730a3}
+  label{display:block;font-size:.74rem;font-weight:700;color:var(--mut);margin:0 0 4px}
+  input,select,textarea{width:100%;border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:.85rem;font-family:inherit;background:#fff}
+  textarea{min-height:64px;resize:vertical}
+  .field{margin-bottom:11px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+  .empty{color:var(--mut);font-style:italic;text-align:center;padding:28px 0}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:10px 18px;border-radius:10px;font-size:.84rem;opacity:0;transition:opacity .25s;pointer-events:none;z-index:50}
+  .toast.show{opacity:1}
+  .drawer-bg{position:fixed;inset:0;background:rgba(0,0,0,.35);display:none;z-index:30}
+  .drawer-bg.show{display:block}
+  .drawer{position:fixed;top:0;right:0;height:100%;width:min(460px,94vw);background:#fff;box-shadow:-4px 0 18px rgba(0,0,0,.18);padding:18px;overflow:auto;transform:translateX(100%);transition:transform .25s;z-index:31}
+  .drawer.show{transform:translateX(0)}
+  .drawer h3{font-size:1.05rem;margin-bottom:4px}
+  .drawer .x{position:absolute;top:14px;right:16px;cursor:pointer;font-size:1.3rem;color:var(--mut);background:none;border:none}
+  .timeline{border-left:2px solid var(--line);margin-left:6px;padding-left:14px;display:grid;gap:10px}
+  .timeline div{font-size:.8rem}.timeline b{font-size:.7rem;color:var(--blue);display:block}
+  .pill{display:inline-block;font-size:.68rem;font-weight:700;padding:2px 8px;border-radius:20px;background:var(--chip);color:var(--blue)}
+  .note{font-size:.78rem;color:var(--mut);margin-top:10px}
+  .legacy-note{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:8px;padding:9px 12px;font-size:.78rem;margin-bottom:14px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">KNM Ops <small>streamlined — read-only preview</small></div>
+  <div class="rolepick">
+    <span>Signed in as</span>
+    <select id="rolesel"></select>
+  </div>
+</header>
+<div class="banner demo" id="banner">Loading…</div>
+
+<nav class="tabs" id="tabs"></nav>
+<main id="main"></main>
+
+<div class="drawer-bg" id="drawerbg" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer"><button class="x" onclick="closeDrawer()">×</button><div id="drawerc"></div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+/* Streamlined UI preview — fetches REAL rows from /alpha/api/bootstrap (read-only).
+   All write actions below mutate in-memory state only; nothing is sent to the DB. */
+
+const AREAS={fleet:"Fleet",machines:"Machines",service:"Service",plan:"Plan",admin:"Admin"};
+const ROLE_NAV={
+  operator:["service","machines"], customer_service:["service","machines"],
+  field_manager:["service","plan","fleet","machines"], dispatch:["plan","fleet","machines","service"],
+  sales:["fleet","service"], admin:["service","plan","fleet","machines","admin"]};
+const ROLE_HOME={operator:"service",customer_service:"service",field_manager:"service",dispatch:"plan",sales:"fleet",admin:"service"};
+const ROLE_LABEL={operator:"Operator (driver)",customer_service:"Customer Service",field_manager:"Field Manager",dispatch:"Dispatch",sales:"Sales",admin:"Admin"};
+
+let state={role:"customer_service",area:"service",sub:{},seq:{REP:9000},salesVends:null};
+let machines=[], work=[];
+const drivers=["driver.a@demo","driver.b@demo","driver.c@demo"]; // demo assignment targets
+const kb=[{id:"KB-12",sym:"No dispense after coin",root:"Jammed dispense motor",fix:"Clear jam, cycle motor, test 3 vends"},
+          {id:"KB-07",sym:"Card reader offline",root:"Loose data ribbon",fix:"Reseat ribbon, reboot reader"}];
+const driverName=e=>({"driver.a@demo":"Driver A","driver.b@demo":"Driver B","driver.c@demo":"Driver C"}[e]||e||"unassigned");
+
+const $=s=>document.querySelector(s);
+function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("show"),1900);}
+const tagFor=t=>({service:"svc",delivery:"del",movement:"mov"}[t]||"svc");
+const tagTxt=t=>(t||"").toUpperCase();
+const mByCode=c=>machines.find(m=>m.code===c);
+const wName=w=>{const m=mByCode(w.machine);return m?m.name:(w.machineName||w.machine);};
+function statusTag(w){return w.status==="new"?'<span class="tag new">NEW</span>':w.status==="assigned"?'<span class="tag assigned">ASSIGNED</span>':'<span class="tag done">DONE</span>';}
+
+function buildRolePicker(){
+  const sel=$("#rolesel");sel.innerHTML="";
+  Object.keys(ROLE_NAV).forEach(r=>{const o=document.createElement("option");o.value=r;o.textContent=ROLE_LABEL[r];if(r===state.role)o.selected=true;sel.appendChild(o);});
+  sel.onchange=()=>{state.role=sel.value;state.area=ROLE_HOME[state.role];state.sub={};render();toast("Switched to "+ROLE_LABEL[state.role]);};
+}
+function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
+  ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});}
+function render(){buildTabs();const m=$("#main");
+  m.innerHTML=({service:renderService,machines:renderMachines,fleet:renderFleet,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
+  document.querySelectorAll("[data-sub]").forEach(b=>{b.onclick=()=>{state.sub[state.area]=b.dataset.sub;render();};});}
+const subActive=(a,d)=>state.sub[a]||d;
+
+/* SERVICE */
+function renderService(){const r=state.role;let modes;
+  if(r==="operator")modes=[["myjobs","My Jobs"],["kb","Knowledge Base"]];
+  else if(r==="field_manager"||r==="admin")modes=[["triage","Triage board"],["kb","Knowledge Base"]];
+  else modes=[["report","Report a problem"],["mine","My reports"]];
+  const cur=subActive("service",modes[0][0]);
+  const body=({report:svcReport,mine:svcMine,triage:svcTriage,myjobs:svcMyJobs,kb:svcKB}[cur]||(()=>""))();
+  return `<div class="screen-h"><div><h2>Service</h2><div class="crumb">Report · Triage · Do — one work record across roles</div></div></div>
+   <div class="legacy-note">Replaces Fault Report + Tech Support + Work Orders + Manage KB; retires the legacy Work Orders app.</div>
+   <div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>${body}`;}
+function svcReport(){const opts=machines.filter(m=>m.active).map(m=>`<option value="${m.code}">${m.name}</option>`).join("");
+  return `<div class="card" style="max-width:560px">
+    <div class="field"><label>Machine</label><select id="rep_m">${opts}</select></div>
+    <div class="field"><label>What's wrong?</label><textarea id="rep_d" placeholder="Describe the fault…"></textarea></div>
+    <div class="grid2"><div class="field"><label>Priority</label><select id="rep_p"><option>normal</option><option>high</option><option>low</option></select></div>
+      <div class="field"><label>Photo (preview)</label><input value="📷 attach from phone" disabled></div></div>
+    <button class="btn" onclick="submitReport()">Submit report</button>
+    <p class="note">Preview only — the report appears on the manager's Triage board in this session but is <b>not</b> written to the database.</p></div>`;}
+function submitReport(){const code=$("#rep_m").value,desc=($("#rep_d").value||"").trim()||"(no description)",p=$("#rep_p").value;
+  const id="KNM-REP-"+String(++state.seq.REP);
+  work.unshift({id,type:"service",machine:code,machineName:null,desc,priority:p,status:"new",assignedTo:null,source:ROLE_LABEL[state.role]});
+  state.sub.service="mine";render();toast("Report "+id+" added (session only)");}
+function svcMine(){return listWork(work.filter(w=>w.status!=="done"),"No open reports.");}
+function svcTriage(){const news=work.filter(w=>w.status==="new"),prog=work.filter(w=>w.status==="assigned");
+  return `<div class="kpis"><div class="kpi"><b>${news.length}</b><small>new</small></div><div class="kpi"><b>${prog.length}</b><small>in progress</small></div><div class="kpi"><b>${work.filter(w=>w.status==="done").length}</b><small>done</small></div></div>
+    <h3 style="margin:4px 0 8px;font-size:.95rem">New — needs triage &amp; assignment</h3>
+    ${news.length?`<div class="rows">${news.map(triageRow).join("")}</div>`:'<p class="empty">Inbox clear 🎉</p>'}
+    <h3 style="margin:18px 0 8px;font-size:.95rem">In progress</h3>${prog.length?listWork(prog):'<p class="empty">Nothing assigned.</p>'}`;}
+function triageRow(w){const m=mByCode(w.machine);
+  return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${wName(w)} — ${w.desc}</b>
+    <div class="meta">${w.id} · ${w.source} · priority ${w.priority}</div></div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
+    <select id="as_${cssId(w.id)}" class="btn sm ghost" style="width:auto">${drivers.map(d=>`<option value="${d}">${driverName(d)}</option>`).join("")}</select>
+    <button class="btn sm" onclick="assign('${w.id}')">Assign</button></div>`;}
+function assign(id){const w=work.find(x=>x.id===id);const d=$("#as_"+cssId(id)).value;
+  w.status="assigned";w.assignedTo=d;render();toast(w.id+" assigned to "+driverName(d)+" (session only)");}
+function svcMyJobs(){const me="driver.a@demo";const mine=work.filter(w=>w.assignedTo===me&&w.status==="assigned");
+  return `<p class="note" style="margin:0 0 10px">Stops assigned to <b>${driverName(me)}</b> (demo operator). Service, delivery &amp; movement in one list.</p>
+   ${mine.length?`<div class="rows">${mine.map(jobRow).join("")}</div>`:'<p class="empty">No open stops assigned to the demo operator. Assign some in Triage (as Manager) to see them here.</p>'}`;}
+function jobRow(w){const m=mByCode(w.machine);
+  return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${wName(w)}</b><div class="meta">${w.desc} · ${w.id}</div></div>
+    <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span><button class="btn sm ghost" onclick="openJob('${w.id}')">Open</button></div>`;}
+function openJob(id){const w=work.find(x=>x.id===id);const m=mByCode(w.machine);
+  const kbLink=w.type==="service"?`<div class="card" style="background:#f8fafc"><b>KB-12</b> — No dispense after coin<div class="meta">Clear jam, cycle motor, test 3 vends</div></div>`:"";
+  const refill=w.type==="delivery"?`<div class="field"><label>Refill — units delivered (logs here, no separate Topups tab)</label><input id="job_units" type="number" value="40"></div>`:"";
+  drawer(`<h3>${wName(w)}</h3><span class="pill">${tagTxt(w.type)}</span> <span class="pill">${w.id}</span><p class="note">${w.desc}</p>${kbLink}${refill}
+    <div class="field"><label>Visit note</label><textarea placeholder="What did you do?"></textarea></div>
+    <button class="btn" onclick="completeJob('${w.id}')">Complete &amp; sign visit</button>
+    <p class="note">Preview: completing flips the machine green in this session only.</p>`);}
+function completeJob(id){const w=work.find(x=>x.id===id);const m=mByCode(w.machine);
+  w.status="done";if(m){if(w.type==="delivery"){m.vendsSince=0;m.lastRefill="just now";}m.status="g";}
+  closeDrawer();render();toast(w.id+" completed (session only)");}
+function svcKB(){return `<div class="rows">${kb.map(k=>`<div class="row"><div class="grow"><b>${k.id} — ${k.sym}</b><div class="meta">Root: ${k.root} · Fix: ${k.fix}</div></div>${(state.role==="field_manager"||state.role==="admin")?'<button class="btn sm ghost">Edit</button>':''}</div>`).join("")}</div><p class="note">CAR-format KB, inline from any job (was the Manage KB tab). Demo entries.</p>`;}
+function listWork(arr,empty){if(!arr.length)return `<p class="empty">${empty||"Nothing here."}</p>`;
+  return `<div class="rows">${arr.map(w=>{const m=mByCode(w.machine);return `<div class="row"><span class="dot ${m?m.status:'g'}"></span>
+    <div class="grow"><b>${wName(w)} — ${w.desc}</b><div class="meta">${w.id} · ${driverName(w.assignedTo)} · ${w.source}</div></div>
+    <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>${statusTag(w)}</div>`;}).join("")}</div>`;}
+
+/* MACHINES */
+function renderMachines(){const cur=subActive("machines","active");const list=machines.filter(m=>cur==="active"?m.active:!m.active);
+  const canEdit=["admin","dispatch","field_manager"].includes(state.role);
+  return `<div class="screen-h"><div><h2>Machines</h2><div class="crumb">One registry — Locations + Historic Locations + Machine History</div></div>${canEdit&&cur==="active"?'<button class="btn ghost">+ Add machine</button>':''}</div>
+    <div class="subnav"><button data-sub="active" class="${cur==='active'?'on':''}">Active (${machines.filter(m=>m.active).length})</button>
+      <button data-sub="decom" class="${cur==='decom'?'on':''}">Decommissioned (${machines.filter(m=>!m.active).length})</button></div>
+    <div class="rows">${list.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b>
+      <div class="meta">${m.code} · ${m.lat??'?'}, ${m.lon??'?'} · last refill ${m.lastRefill}</div></div>
+      <button class="btn sm ghost" onclick="openMachine('${m.code}')">Info · History${canEdit?' · Edit':''}</button></div>`).join("")}</div>${!list.length?'<p class="empty">None.</p>':''}`;}
+function openMachine(code){const m=mByCode(code);const wos=work.filter(w=>w.machine===code);
+  drawer(`<h3>${m.name}</h3><span class="pill">${m.code}</span> <span class="pill">${m.active?'active':'decommissioned'}</span>
+    <div class="grid2" style="margin-top:12px"><div class="field"><label>Name</label><input value="${m.name}"></div>
+      <div class="field"><label>Code</label><input value="${m.code}"></div><div class="field"><label>Lat</label><input value="${m.lat??''}"></div>
+      <div class="field"><label>Lon</label><input value="${m.lon??''}"></div></div>
+    <h3 style="font-size:.92rem;margin:8px 0 8px">History (work + visits)</h3>
+    <div class="timeline">${wos.length?wos.map(w=>`<div><b>${w.id} · ${tagTxt(w.type)} · ${w.status}</b>${w.desc}</div>`).join(""):'<div class="meta">No work recorded.</div>'}</div>
+    <p class="note">Info / History / status in one drawer. (Edits are preview-only.)</p>`);}
+
+/* FLEET */
+function renderFleet(){const cur=subActive("fleet","status");
+  const A=machines.filter(m=>m.active);const g=A.filter(m=>m.status==="g").length,y=A.filter(m=>m.status==="y").length,r=A.filter(m=>m.status==="r").length;
+  let body;
+  if(cur==="sales")body=`<div class="kpis"><div class="kpi"><b>${state.salesVends==null?'—':state.salesVends.toLocaleString()}</b><small>vends · 7d (live)</small></div><div class="kpi"><b>${A.length}</b><small>active machines</small></div></div><p class="note">7-day vend count is queried live (vend-code filter). Was the Sales tab.</p>`;
+  else if(cur==="events")body=`<div class="rows">${A.filter(m=>m.status!=="g").slice(0,12).map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.status==='r'?'silent past threshold':'recent error/exception'}</div></div></div>`).join("")||'<p class="empty">No active alerts.</p>'}</div><p class="note">Derived from heartbeat (was Messages tab).</p>`;
+  else if(cur==="refill")body=`<div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.vendsSince==null?'vends since refill: —':m.vendsSince+' vends since refill'} · last ${m.lastRefill}</div></div></div>`).join("")}</div><p class="note">Read-only refill status so Sales keeps top-up visibility. Logging happens in Plan / My Jobs.</p>`;
+  else body=`<div class="kpis"><div class="kpi"><b style="color:var(--ok)">${g}</b><small>🟢 online</small></div><div class="kpi"><b style="color:var(--warn)">${y}</b><small>🟡 warning</small></div><div class="kpi"><b style="color:var(--bad)">${r}</b><small>🔴 silent</small></div></div>
+    <div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.status==='r'?'silent — needs attention':m.status==='y'?'warning':'online'}</div></div>${m.status!=='g'?`<button class="btn sm ghost" onclick="fleetReport('${m.code}')">Report fault</button>`:''}</div>`).join("")}</div>
+    <p class="note">Live heartbeat (was Heartbeat tab). "Report fault" opens Service ▸ Report.</p>`;
+  return `<div class="screen-h"><div><h2>Fleet</h2><div class="crumb">Monitor — Sales + Messages + Heartbeat (+ refill status)</div></div></div>
+    <div class="subnav"><button data-sub="status" class="${cur==='status'?'on':''}">Live status</button><button data-sub="sales" class="${cur==='sales'?'on':''}">Sales</button>
+      <button data-sub="events" class="${cur==='events'?'on':''}">Event log</button><button data-sub="refill" class="${cur==='refill'?'on':''}">Refill status</button></div>${body}`;}
+function fleetReport(code){if(!ROLE_NAV[state.role].includes("service")){toast("This role has read-only Fleet.");return;}
+  state.area="service";state.sub.service=(state.role==="field_manager"||state.role==="admin")?"triage":"report";render();if($("#rep_m"))$("#rep_m").value=code;toast("Reporting fault on "+code);}
+
+/* PLAN */
+function renderPlan(){const open=work.filter(w=>w.status!=="done");const un=open.filter(w=>!w.assignedTo);
+  return `<div class="screen-h"><div><h2>Plan — today</h2><div class="crumb">Route &amp; schedule — Dispatch + Topups + Movements</div></div><button class="btn" onclick="autoPlan()">Auto-plan routes</button></div>
+    <div class="kpis"><div class="kpi"><b>${open.filter(w=>w.type==='delivery').length}</b><small>deliveries</small></div><div class="kpi"><b>${open.filter(w=>w.type==='service').length}</b><small>service</small></div>
+      <div class="kpi"><b>${open.filter(w=>w.type==='movement').length}</b><small>movements</small></div><div class="kpi"><b>${un.length}</b><small>unassigned</small></div></div>
+    <h3 style="font-size:.95rem;margin:4px 0 8px">Drivers &amp; load</h3>
+    <div class="rows">${drivers.map(d=>{const load=open.filter(w=>w.assignedTo===d);return `<div class="row"><div class="grow"><b>${driverName(d)}</b><div class="meta">${load.length} stop(s): ${load.map(w=>w.machine).join(", ")||"—"}</div></div><span class="pill">${load.length} stop${load.length!==1?'s':''}</span></div>`;}).join("")}</div>
+    <h3 style="font-size:.95rem;margin:18px 0 8px">Unassigned work</h3>${un.length?`<div class="rows">${un.map(triageRow).join("")}</div>`:'<p class="empty">All open work is assigned.</p>'}
+    <p class="note">Demo drivers + in-session assignment (read-only preview). A refill routes here and closes as a delivery stop — so the Topups tab disappears.</p>`;}
+function autoPlan(){const un=work.filter(w=>w.status!=="done"&&!w.assignedTo);if(!un.length){toast("Nothing to plan.");return;}
+  un.forEach((w,i)=>{w.assignedTo=drivers[i%drivers.length];w.status="assigned";});render();toast("Auto-planned "+un.length+" stop(s) (session only)");}
+
+/* ADMIN */
+function renderAdmin(){const cur=subActive("admin","cleanup");let body;
+  if(cur==="items")body=`<div class="rows"><div class="row"><div class="grow"><b>Kopi-O sachet</b><div class="meta">unit: sachet · 18g</div></div><button class="btn sm ghost">Edit</button></div>
+    <div class="row"><div class="grow"><b>Cup pack (12oz)</b><div class="meta">unit: sleeve · 50</div></div><button class="btn sm ghost">Edit</button></div></div><p class="note">Delivery item catalogue (config) — admin only. Demo.</p>`;
+  else body=`<div class="card" style="border-color:#fecaca"><b style="color:#b91c1c">Cascade-delete test data</b>
+    <p class="note">Destructive. Guarded — never one-click. (Disabled in this read-only preview.)</p>
+    <div class="field" style="max-width:240px;margin-top:10px"><label>Type DELETE to enable</label><input id="del_confirm" oninput="checkDel()" placeholder="DELETE"></div>
+    <button class="btn danger" id="del_btn" disabled onclick="toast('Disabled in read-only preview')">Run cleanup</button></div>`;
+  return `<div class="screen-h"><div><h2>Admin</h2><div class="crumb">Maintenance &amp; config — admin only</div></div></div>
+    <div class="subnav"><button data-sub="cleanup" class="${cur==='cleanup'?'on':''}">Data cleanup</button><button data-sub="items" class="${cur==='items'?'on':''}">Delivery items</button></div>${body}`;}
+function checkDel(){$("#del_btn").disabled=$("#del_confirm").value.trim()!=="DELETE";}
+
+/* drawer */
+function drawer(h){$("#drawerc").innerHTML=h;$("#drawer").classList.add("show");$("#drawerbg").classList.add("show");}
+function closeDrawer(){$("#drawer").classList.remove("show");$("#drawerbg").classList.remove("show");}
+const cssId=s=>String(s).replace(/[^a-zA-Z0-9_-]/g,"_");
+
+/* DEMO fallback seed (used only if /alpha/api/bootstrap is unreachable) */
+function demoSeed(){
+  machines=[{code:"DM-01",name:"Demo Machine 01 — Ubi",lat:1.333,lon:103.901,status:"r",active:true,vendsSince:0,lastRefill:"6d ago"},
+    {code:"DM-02",name:"Demo Machine 02 — Changi",lat:1.356,lon:103.987,status:"y",active:true,vendsSince:480,lastRefill:"4d ago"},
+    {code:"DM-03",name:"Demo Machine 03 — Tampines",lat:1.353,lon:103.945,status:"g",active:true,vendsSince:120,lastRefill:"1d ago"},
+    {code:"DM-09",name:"Demo Machine 09 — Bishan",lat:1.351,lon:103.848,status:"g",active:false,vendsSince:0,lastRefill:"—"}];
+  work=[{id:"KNM-REP-0001",type:"service",machine:"DM-01",machineName:null,desc:"No dispense — complaint",priority:"high",status:"new",assignedTo:null,source:"Customer Service"},
+    {id:"KNM-REP-0002",type:"delivery",machine:"DM-02",machineName:null,desc:"Refill / delivery",priority:"normal",status:"assigned",assignedTo:"driver.a@demo",source:"Delivery"}];
+}
+function setBanner(h){const b=$("#banner");
+  if(h&&h.live){b.className="banner live";b.innerHTML=`🟢 <b>LIVE DB</b> — read-only · ${h.counts?h.counts.machines+" machines, "+h.counts.work+" work items":""} pulled from Azure SQL. Actions are session-only.`;}
+  else{b.className="banner demo";b.innerHTML=`🟡 <b>DEMO DATA</b> — ${h?h.reason:"backend unreachable"}. Showing synthetic seed.`;}
+}
+
+/* boot */
+async function boot(){
+  buildRolePicker();state.area=ROLE_HOME[state.role];
+  try{
+    const res=await fetch("/alpha/api/bootstrap");const d=await res.json();
+    machines=(d.machines||[]).map(m=>({vendsSince:null,...m}));
+    work=d.work||[];
+    state.salesVends=d.health?d.health.salesVends:null;
+    if(!machines.length){demoSeed();setBanner({live:false,reason:"no rows returned"});}
+    else setBanner(d.health);
+  }catch(e){demoSeed();setBanner({live:false,reason:String(e)});}
+  render();
+}
+boot();
+</script>
+</body>
+</html>
