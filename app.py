@@ -675,7 +675,22 @@ def get_dispenses():
             mdt.[Event Code]    AS EventCode,
             mc.EventName        AS SKUName,
             COUNT(*)            AS DispenseCount
-        FROM [MasterData Table] mdt
+        FROM (
+            SELECT [Machine Code], [Event Code], [Date Time]
+            FROM (
+                SELECT [Machine Code], [Event Code], [Date Time],
+                       ROW_NUMBER() OVER (
+                           PARTITION BY CAST([Machine Code] AS NVARCHAR(50)),
+                                        CAST([Event Code]  AS NVARCHAR(20)),
+                                        CAST([Date Time]   AS FLOAT)
+                           ORDER BY (SELECT NULL)
+                       ) AS _rn
+                FROM [MasterData Table]
+                WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
+                  AND CAST([Date Time] AS FLOAT) <= {end_ole}
+            ) _d
+            WHERE _d._rn = 1
+        ) mdt
         INNER JOIN (
             SELECT ItemCode,
                 COALESCE(
@@ -758,7 +773,22 @@ def get_transactions():
             CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
             mc.EventName                   AS ItemName,
             ISNULL(loc.LocationName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
-        FROM [MasterData Table] mdt
+        FROM (
+            SELECT [Machine Code], [Event Code], [Date Time]
+            FROM (
+                SELECT [Machine Code], [Event Code], [Date Time],
+                       ROW_NUMBER() OVER (
+                           PARTITION BY CAST([Machine Code] AS NVARCHAR(50)),
+                                        CAST([Event Code]  AS NVARCHAR(20)),
+                                        CAST([Date Time]   AS FLOAT)
+                           ORDER BY (SELECT NULL)
+                       ) AS _rn
+                FROM [MasterData Table]
+                WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
+                  AND CAST([Date Time] AS FLOAT) <= {end_ole}
+            ) _d
+            WHERE _d._rn = 1
+        ) mdt
         INNER JOIN (
             SELECT ItemCode,
                 COALESCE(
