@@ -1,0 +1,501 @@
+-- ─────────────────────────────────────────────────────────────────────────────
+-- KNM Vending Dashboard — Fault Report + Tech Support migration
+-- Date     : 2026-06-03
+-- Author   : Yash Bhawe
+-- Target   : Azure SQL — database "Machine DispensedDrink"
+-- Idempotent: every statement is safe to re-run.
+-- Rollback : see ROLLBACK section at bottom.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+SET XACT_ABORT ON;
+SET NOCOUNT ON;
+GO
+
+-- ============================================================================
+-- 1. WO_Complaints  — additive columns + Status type change
+-- ============================================================================
+-- 1a. Add new columns (NULL first, then default/backfill, then NOT NULL where needed)
+
+IF COL_LENGTH('dbo.WO_Complaints', 'FirstReportedAt') IS NULL
+    ALTER TABLE dbo.WO_Complaints ADD FirstReportedAt DATETIME2 NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_Complaints', 'ReportedBy') IS NULL
+    ALTER TABLE dbo.WO_Complaints ADD ReportedBy NVARCHAR(255) NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_Complaints', 'EventCode') IS NULL
+    ALTER TABLE dbo.WO_Complaints ADD EventCode INT NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_Complaints', 'PerceivedUrgency') IS NULL
+    ALTER TABLE dbo.WO_Complaints ADD PerceivedUrgency TINYINT NOT NULL
+        CONSTRAINT DF_WOC_PerceivedUrgency DEFAULT 1;  -- 1 = normal
+GO
+
+IF COL_LENGTH('dbo.WO_Complaints', 'DisplayID') IS NULL
+    ALTER TABLE dbo.WO_Complaints ADD DisplayID NVARCHAR(30) NULL;  -- backfill below, then NOT NULL
+GO
+
+-- 1b. CHECK constraint: EventCode must be 6xxxxx (complaints) or NULL
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE name = 'CK_WOC_EventCode_Range'
+)
+    ALTER TABLE dbo.WO_Complaints
+        ADD CONSTRAINT CK_WOC_EventCode_Range
+        CHECK (EventCode IS NULL OR (EventCode BETWEEN 600000 AND 699999));
+GO
+
+-- 1c. CHECK constraint: PerceivedUrgency 0..2
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE name = 'CK_WOC_PerceivedUrgency_Range'
+)
+    ALTER TABLE dbo.WO_Complaints
+        ADD CONSTRAINT CK_WOC_PerceivedUrgency_Range
+        CHECK (PerceivedUrgency BETWEEN 0 AND 2);
+GO
+
+-- 1d. Status: NVARCHAR(20) → TINYINT
+-- Strategy: add new column StatusCode, migrate values, drop old, rename.
+-- Use a parallel column to make the change atomic and rollback-safe.
+
+IF COL_LENGTH('dbo.WO_Complaints', 'StatusCode') IS NULL
+BEGIN
+    ALTER TABLE dbo.WO_Complaints ADD StatusCode TINYINT NULL;
+END
+GO
+
+-- Backfill StatusCode from existing Status text
+UPDATE dbo.WO_Complaints
+SET StatusCode = CASE
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'open'        THEN 0   -- fresh
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'in_progress' THEN 1   -- assigned
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'closed'      THEN 2
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'completed'   THEN 2
+    ELSE 0
+END
+WHERE StatusCode IS NULL;
+GO
+
+-- Make NOT NULL + default
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('dbo.WO_Complaints') AND name = 'StatusCode' AND is_nullable = 1
+)
+BEGIN
+    ALTER TABLE dbo.WO_Complaints ALTER COLUMN StatusCode TINYINT NOT NULL;
+    ALTER TABLE dbo.WO_Complaints
+        ADD CONSTRAINT DF_WOC_StatusCode DEFAULT 0 FOR StatusCode;
+END
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints
+    WHERE name = 'CK_WOC_StatusCode_Range'
+)
+    ALTER TABLE dbo.WO_Complaints
+        ADD CONSTRAINT CK_WOC_StatusCode_Range
+        CHECK (StatusCode BETWEEN 0 AND 2);
+GO
+
+-- NOTE: Old text column "Status" is RETAINED until cutover. The app reads from
+-- StatusCode going forward; Status remains as a rollback safety net. A later
+-- migration drops Status once stable. See ROLLBACK section.
+
+-- 1e. Index on StatusCode for list filtering
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WOC_StatusCode')
+    CREATE INDEX IX_WOC_StatusCode ON dbo.WO_Complaints (StatusCode, SubmittedAt DESC);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WOC_EventCode')
+    CREATE INDEX IX_WOC_EventCode ON dbo.WO_Complaints (EventCode);
+GO
+
+-- 1f. Backfill DisplayID for existing rows (best-effort using SubmittedAt)
+--     Format: KNM-CMP-NNNN-YYMM  (NNNN is per-month sequential)
+
+;WITH numbered AS (
+    SELECT
+        ComplaintID,
+        SubmittedAt,
+        FORMAT(SubmittedAt, 'yyMM') AS YYMM,
+        ROW_NUMBER() OVER (PARTITION BY FORMAT(SubmittedAt, 'yyMM')
+                           ORDER BY SubmittedAt, ComplaintID) AS Seq
+    FROM dbo.WO_Complaints
+    WHERE DisplayID IS NULL
+)
+UPDATE c
+SET DisplayID = CONCAT('KNM-CMP-', RIGHT('0000' + CAST(numbered.Seq AS VARCHAR(10)), 4), '-', numbered.YYMM)
+FROM dbo.WO_Complaints c
+JOIN numbered ON c.ComplaintID = numbered.ComplaintID;
+GO
+
+-- Now NOT NULL + unique
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('dbo.WO_Complaints') AND name = 'DisplayID' AND is_nullable = 1
+)
+    ALTER TABLE dbo.WO_Complaints ALTER COLUMN DisplayID NVARCHAR(30) NOT NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_WOC_DisplayID')
+    CREATE UNIQUE INDEX UX_WOC_DisplayID ON dbo.WO_Complaints (DisplayID);
+GO
+
+
+-- ============================================================================
+-- 2. WO_JobOrders  — additive columns + Status / Priority type changes
+-- ============================================================================
+
+IF COL_LENGTH('dbo.WO_JobOrders', 'EventCode') IS NULL
+    ALTER TABLE dbo.WO_JobOrders ADD EventCode INT NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_JobOrders', 'Diagnosis') IS NULL
+    ALTER TABLE dbo.WO_JobOrders ADD Diagnosis NVARCHAR(MAX) NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_JobOrders', 'ProposedFix') IS NULL
+    ALTER TABLE dbo.WO_JobOrders ADD ProposedFix NVARCHAR(MAX) NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_JobOrders', 'LastBlockReason') IS NULL
+    ALTER TABLE dbo.WO_JobOrders ADD LastBlockReason NVARCHAR(MAX) NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_JobOrders', 'DisplayID') IS NULL
+    ALTER TABLE dbo.WO_JobOrders ADD DisplayID NVARCHAR(30) NULL;
+GO
+
+-- CHECK: EventCode must be 8xxxxx (repairs) or NULL
+IF NOT EXISTS (
+    SELECT 1 FROM sys.check_constraints WHERE name = 'CK_WOJO_EventCode_Range'
+)
+    ALTER TABLE dbo.WO_JobOrders
+        ADD CONSTRAINT CK_WOJO_EventCode_Range
+        CHECK (EventCode IS NULL OR (EventCode BETWEEN 800000 AND 899999));
+GO
+
+-- StatusCode (TINYINT replaces text Status)
+IF COL_LENGTH('dbo.WO_JobOrders', 'StatusCode') IS NULL
+    ALTER TABLE dbo.WO_JobOrders ADD StatusCode TINYINT NULL;
+GO
+
+UPDATE dbo.WO_JobOrders
+SET StatusCode = CASE
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'open'             THEN 0   -- assigned
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'in_progress'      THEN 0   -- treat as assigned for the new 3-state model
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'needs_assistance' THEN 1
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'completed'        THEN 2
+    WHEN LOWER(LTRIM(RTRIM(Status))) = 'closed'           THEN 2
+    ELSE 0
+END
+WHERE StatusCode IS NULL;
+GO
+
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('dbo.WO_JobOrders') AND name = 'StatusCode' AND is_nullable = 1
+)
+BEGIN
+    ALTER TABLE dbo.WO_JobOrders ALTER COLUMN StatusCode TINYINT NOT NULL;
+    ALTER TABLE dbo.WO_JobOrders
+        ADD CONSTRAINT DF_WOJO_StatusCode DEFAULT 0 FOR StatusCode;
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_WOJO_StatusCode_Range')
+    ALTER TABLE dbo.WO_JobOrders
+        ADD CONSTRAINT CK_WOJO_StatusCode_Range
+        CHECK (StatusCode BETWEEN 0 AND 2);
+GO
+
+-- PriorityCode (TINYINT replaces text Priority)
+IF COL_LENGTH('dbo.WO_JobOrders', 'PriorityCode') IS NULL
+    ALTER TABLE dbo.WO_JobOrders ADD PriorityCode TINYINT NULL;
+GO
+
+UPDATE dbo.WO_JobOrders
+SET PriorityCode = CASE
+    WHEN LOWER(LTRIM(RTRIM(Priority))) = 'low'    THEN 0
+    WHEN LOWER(LTRIM(RTRIM(Priority))) = 'normal' THEN 1
+    WHEN LOWER(LTRIM(RTRIM(Priority))) = 'high'   THEN 2
+    ELSE 1
+END
+WHERE PriorityCode IS NULL;
+GO
+
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('dbo.WO_JobOrders') AND name = 'PriorityCode' AND is_nullable = 1
+)
+BEGIN
+    ALTER TABLE dbo.WO_JobOrders ALTER COLUMN PriorityCode TINYINT NOT NULL;
+    ALTER TABLE dbo.WO_JobOrders
+        ADD CONSTRAINT DF_WOJO_PriorityCode DEFAULT 1 FOR PriorityCode;
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_WOJO_PriorityCode_Range')
+    ALTER TABLE dbo.WO_JobOrders
+        ADD CONSTRAINT CK_WOJO_PriorityCode_Range
+        CHECK (PriorityCode BETWEEN 0 AND 2);
+GO
+
+-- Indexes
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WOJO_StatusCode')
+    CREATE INDEX IX_WOJO_StatusCode ON dbo.WO_JobOrders (StatusCode, CreatedAt DESC);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WOJO_EventCode')
+    CREATE INDEX IX_WOJO_EventCode ON dbo.WO_JobOrders (EventCode);
+GO
+
+-- Backfill DisplayID — format: KNM-WkO-NNNN-YYMM
+;WITH numbered AS (
+    SELECT
+        JobOrderID,
+        CreatedAt,
+        FORMAT(CreatedAt, 'yyMM') AS YYMM,
+        ROW_NUMBER() OVER (PARTITION BY FORMAT(CreatedAt, 'yyMM')
+                           ORDER BY CreatedAt, JobOrderID) AS Seq
+    FROM dbo.WO_JobOrders
+    WHERE DisplayID IS NULL
+)
+UPDATE j
+SET DisplayID = CONCAT('KNM-WkO-', RIGHT('0000' + CAST(numbered.Seq AS VARCHAR(10)), 4), '-', numbered.YYMM)
+FROM dbo.WO_JobOrders j
+JOIN numbered ON j.JobOrderID = numbered.JobOrderID;
+GO
+
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('dbo.WO_JobOrders') AND name = 'DisplayID' AND is_nullable = 1
+)
+    ALTER TABLE dbo.WO_JobOrders ALTER COLUMN DisplayID NVARCHAR(30) NOT NULL;
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_WOJO_DisplayID')
+    CREATE UNIQUE INDEX UX_WOJO_DisplayID ON dbo.WO_JobOrders (DisplayID);
+GO
+
+
+-- ============================================================================
+-- 3. WO_Images  — SharePoint columns + nullable ImageData
+-- ============================================================================
+
+IF COL_LENGTH('dbo.WO_Images', 'SPItemID') IS NULL
+    ALTER TABLE dbo.WO_Images ADD SPItemID NVARCHAR(255) NULL;
+GO
+
+IF COL_LENGTH('dbo.WO_Images', 'SPWebURL') IS NULL
+    ALTER TABLE dbo.WO_Images ADD SPWebURL NVARCHAR(1024) NULL;
+GO
+
+-- Make ImageData nullable so new rows can store SP refs only
+IF EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID('dbo.WO_Images') AND name = 'ImageData' AND is_nullable = 0
+)
+    ALTER TABLE dbo.WO_Images ALTER COLUMN ImageData VARBINARY(MAX) NULL;
+GO
+
+-- Stage values now include: 'before','during','after','task_done','task_blocked'
+-- (Not enforced via CHECK to avoid breaking any existing rows. App-level enum.)
+
+
+-- ============================================================================
+-- 4. WO_JobOrderTasks  — NEW (per-WO tickbox checklist)
+-- ============================================================================
+
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'WO_JobOrderTasks'
+)
+    CREATE TABLE dbo.WO_JobOrderTasks (
+        TaskID        INT IDENTITY(1,1) PRIMARY KEY,
+        JobOrderID    INT             NOT NULL,
+        SeqNum        INT             NOT NULL,
+        Label         NVARCHAR(500)   NOT NULL,
+        Done          BIT             NOT NULL DEFAULT 0,
+        BlockedNote   NVARCHAR(MAX)   NULL,
+        CompletedBy   NVARCHAR(255)   NULL,
+        CompletedAt   DATETIME2       NULL,
+        CONSTRAINT FK_WOJOTask_JobOrder
+            FOREIGN KEY (JobOrderID) REFERENCES dbo.WO_JobOrders(JobOrderID)
+    );
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WOJOTask_JobOrder')
+    CREATE INDEX IX_WOJOTask_JobOrder ON dbo.WO_JobOrderTasks (JobOrderID, SeqNum);
+GO
+
+
+-- ============================================================================
+-- 5. WO_KB_Entries  +  WO_KB_Tickboxes  — NEW (knowledge base)
+-- ============================================================================
+
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'WO_KB_Entries'
+)
+    CREATE TABLE dbo.WO_KB_Entries (
+        KBID          INT IDENTITY(1,1) PRIMARY KEY,
+        EventCode     INT             NULL,   -- 6xxxxx or 8xxxxx (or NULL = generic)
+        Title         NVARCHAR(255)   NOT NULL,
+        Diagnosis     NVARCHAR(MAX)   NULL,
+        SuggestedFix  NVARCHAR(MAX)   NULL,
+        UseCount      INT             NOT NULL DEFAULT 0,
+        CreatedBy     NVARCHAR(255)   NOT NULL,
+        CreatedAt     DATETIME2       NOT NULL DEFAULT SYSUTCDATETIME(),
+        UpdatedBy     NVARCHAR(255)   NULL,
+        UpdatedAt     DATETIME2       NULL,
+        CONSTRAINT CK_WOKB_EventCode_Range
+            CHECK (EventCode IS NULL
+                OR EventCode BETWEEN 600000 AND 699999
+                OR EventCode BETWEEN 800000 AND 899999)
+    );
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WOKB_EventCode')
+    CREATE INDEX IX_WOKB_EventCode ON dbo.WO_KB_Entries (EventCode, UseCount DESC);
+GO
+
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'WO_KB_Tickboxes'
+)
+    CREATE TABLE dbo.WO_KB_Tickboxes (
+        TBID    INT IDENTITY(1,1) PRIMARY KEY,
+        KBID    INT             NOT NULL,
+        SeqNum  INT             NOT NULL,
+        Label   NVARCHAR(500)   NOT NULL,
+        CONSTRAINT FK_WOKBTB_KB
+            FOREIGN KEY (KBID) REFERENCES dbo.WO_KB_Entries(KBID) ON DELETE CASCADE
+    );
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_WOKBTB_KB')
+    CREATE INDEX IX_WOKBTB_KB ON dbo.WO_KB_Tickboxes (KBID, SeqNum);
+GO
+
+
+-- ============================================================================
+-- 6. WO_Counters  — NEW (per-month DisplayID counter)
+-- ============================================================================
+-- Used by the app to atomically allocate NNNN for KNM-CMP- and KNM-WkO-
+
+IF NOT EXISTS (
+    SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = 'WO_Counters'
+)
+    CREATE TABLE dbo.WO_Counters (
+        Kind      NVARCHAR(10)  NOT NULL,   -- 'CMP' or 'WkO'
+        YYMM      CHAR(4)       NOT NULL,   -- e.g. '2606'
+        NextSeq   INT           NOT NULL,
+        CONSTRAINT PK_WO_Counters PRIMARY KEY (Kind, YYMM)
+    );
+GO
+
+-- Seed counters from existing backfilled DisplayIDs so new inserts don't collide
+;WITH cmp_max AS (
+    SELECT RIGHT(DisplayID, 4) AS YYMM,
+           MAX(CAST(SUBSTRING(DisplayID, 9, 4) AS INT)) AS MaxSeq
+    FROM dbo.WO_Complaints
+    WHERE DisplayID LIKE 'KNM-CMP-____-____'
+    GROUP BY RIGHT(DisplayID, 4)
+)
+MERGE dbo.WO_Counters AS tgt
+USING (SELECT 'CMP' AS Kind, YYMM, MaxSeq + 1 AS NextSeq FROM cmp_max) AS src
+   ON tgt.Kind = src.Kind AND tgt.YYMM = src.YYMM
+WHEN NOT MATCHED THEN
+    INSERT (Kind, YYMM, NextSeq) VALUES (src.Kind, src.YYMM, src.NextSeq);
+GO
+
+;WITH wko_max AS (
+    SELECT RIGHT(DisplayID, 4) AS YYMM,
+           MAX(CAST(SUBSTRING(DisplayID, 9, 4) AS INT)) AS MaxSeq
+    FROM dbo.WO_JobOrders
+    WHERE DisplayID LIKE 'KNM-WkO-____-____'
+    GROUP BY RIGHT(DisplayID, 4)
+)
+MERGE dbo.WO_Counters AS tgt
+USING (SELECT 'WkO' AS Kind, YYMM, MaxSeq + 1 AS NextSeq FROM wko_max) AS src
+   ON tgt.Kind = src.Kind AND tgt.YYMM = src.YYMM
+WHEN NOT MATCHED THEN
+    INSERT (Kind, YYMM, NextSeq) VALUES (src.Kind, src.YYMM, src.NextSeq);
+GO
+
+
+-- ============================================================================
+-- VERIFICATION (run after migration; review row counts / null counts)
+-- ============================================================================
+
+SELECT
+    'WO_Complaints'  AS TableName,
+    COUNT(*)         AS RowCount,
+    SUM(CASE WHEN DisplayID  IS NULL THEN 1 ELSE 0 END) AS NullDisplayID,
+    SUM(CASE WHEN StatusCode IS NULL THEN 1 ELSE 0 END) AS NullStatusCode
+FROM dbo.WO_Complaints
+UNION ALL
+SELECT
+    'WO_JobOrders',
+    COUNT(*),
+    SUM(CASE WHEN DisplayID    IS NULL THEN 1 ELSE 0 END),
+    SUM(CASE WHEN StatusCode   IS NULL THEN 1 ELSE 0 END)
+FROM dbo.WO_JobOrders
+UNION ALL
+SELECT 'WO_Images',           COUNT(*), 0, 0 FROM dbo.WO_Images
+UNION ALL
+SELECT 'WO_JobOrderTasks',    COUNT(*), 0, 0 FROM dbo.WO_JobOrderTasks
+UNION ALL
+SELECT 'WO_KB_Entries',       COUNT(*), 0, 0 FROM dbo.WO_KB_Entries
+UNION ALL
+SELECT 'WO_KB_Tickboxes',     COUNT(*), 0, 0 FROM dbo.WO_KB_Tickboxes
+UNION ALL
+SELECT 'WO_Counters',         COUNT(*), 0, 0 FROM dbo.WO_Counters;
+GO
+
+
+-- ============================================================================
+-- ROLLBACK (manual — run only if needed)
+-- ============================================================================
+/*
+-- Status / Priority: drop the new TINYINT columns; app reverts to reading Status text.
+ALTER TABLE dbo.WO_Complaints DROP CONSTRAINT IF EXISTS DF_WOC_StatusCode;
+ALTER TABLE dbo.WO_Complaints DROP CONSTRAINT IF EXISTS CK_WOC_StatusCode_Range;
+DROP INDEX IF EXISTS IX_WOC_StatusCode ON dbo.WO_Complaints;
+ALTER TABLE dbo.WO_Complaints DROP COLUMN IF EXISTS StatusCode;
+
+ALTER TABLE dbo.WO_JobOrders DROP CONSTRAINT IF EXISTS DF_WOJO_StatusCode;
+ALTER TABLE dbo.WO_JobOrders DROP CONSTRAINT IF EXISTS CK_WOJO_StatusCode_Range;
+ALTER TABLE dbo.WO_JobOrders DROP CONSTRAINT IF EXISTS DF_WOJO_PriorityCode;
+ALTER TABLE dbo.WO_JobOrders DROP CONSTRAINT IF EXISTS CK_WOJO_PriorityCode_Range;
+DROP INDEX IF EXISTS IX_WOJO_StatusCode ON dbo.WO_JobOrders;
+ALTER TABLE dbo.WO_JobOrders DROP COLUMN IF EXISTS StatusCode;
+ALTER TABLE dbo.WO_JobOrders DROP COLUMN IF EXISTS PriorityCode;
+
+-- Added columns:
+ALTER TABLE dbo.WO_Complaints DROP COLUMN IF EXISTS FirstReportedAt;
+ALTER TABLE dbo.WO_Complaints DROP COLUMN IF EXISTS ReportedBy;
+ALTER TABLE dbo.WO_Complaints DROP COLUMN IF EXISTS EventCode;
+ALTER TABLE dbo.WO_Complaints DROP COLUMN IF EXISTS PerceivedUrgency;
+ALTER TABLE dbo.WO_Complaints DROP COLUMN IF EXISTS DisplayID;
+
+ALTER TABLE dbo.WO_JobOrders DROP COLUMN IF EXISTS EventCode;
+ALTER TABLE dbo.WO_JobOrders DROP COLUMN IF EXISTS Diagnosis;
+ALTER TABLE dbo.WO_JobOrders DROP COLUMN IF EXISTS ProposedFix;
+ALTER TABLE dbo.WO_JobOrders DROP COLUMN IF EXISTS LastBlockReason;
+ALTER TABLE dbo.WO_JobOrders DROP COLUMN IF EXISTS DisplayID;
+
+ALTER TABLE dbo.WO_Images DROP COLUMN IF EXISTS SPItemID;
+ALTER TABLE dbo.WO_Images DROP COLUMN IF EXISTS SPWebURL;
+-- Note: ImageData remains nullable; restore NOT NULL only after blob-only rows are purged.
+
+-- New tables:
+DROP TABLE IF EXISTS dbo.WO_KB_Tickboxes;
+DROP TABLE IF EXISTS dbo.WO_KB_Entries;
+DROP TABLE IF EXISTS dbo.WO_JobOrderTasks;
+DROP TABLE IF EXISTS dbo.WO_Counters;
+*/

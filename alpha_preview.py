@@ -1,27 +1,33 @@
 """
-Alpha preview (ADDITIVE, READ-ONLY) — streamlined UI mounted at /alpha
-=====================================================================
-Serves the proposed 5-area streamlined UI using REAL data from the SAME database
-the live app already reads. It is mounted as a Flask Blueprint inside the existing
-app so it reuses the app's DB connectivity and Easy Auth — no new web app, no new
+Alpha app — streamlined UI mounted at /alpha (LIVE ACTIONS)
+===========================================================
+Serves the 5-area streamlined UI using REAL data from the SAME database the live
+app already reads. Mounted as a Flask Blueprint inside the existing app so it
+reuses the app's DB connectivity and Easy Auth — no new web app, no new
 credentials, no new database.
 
-SAFETY:
-  * Strictly READ-ONLY: every DB statement here is a SELECT. No INSERT/UPDATE/DELETE/DDL.
-  * All UI actions (report/assign/complete) mutate in-memory JS only — never the DB.
-  * Fully self-contained: importing this module only defines routes; it never runs
-    DB work at import time, so it cannot affect app startup. Registration in app.py
-    is wrapped in try/except as an extra guard.
-  * Behind the app's existing Easy Auth (AAD) like every other route — not public.
+Since 2026-07-20 the buttons are WIRED: the front-end calls the EXISTING
+production work-order API (/api/wo/*) for report / assign / complete /
+auto-plan, so every action goes through the same validation, role checks,
+activity log, top-up sync and movement location-cutover logic as the main
+dashboard. This module itself remains SELECT-only — all writes happen in
+workorders.py endpoints.
 
-Routes:  GET /alpha              -> the streamlined UI
-          GET /alpha/api/bootstrap -> {health, machines, work}
+  * Fully self-contained: importing this module only defines routes; it never
+    runs DB work at import time. Registration in app.py is wrapped in
+    try/except as an extra guard.
+  * Behind the app's existing Easy Auth (AAD) like every other route.
+
+Routes:  GET /alpha                -> the streamlined UI
+          GET /alpha/api/bootstrap  -> {health, machines, work, user}
 """
 
+import base64
+import json as _json
 from datetime import datetime, timedelta
 
 import pymssql
-from flask import Blueprint, jsonify, render_template
+from flask import Blueprint, jsonify, render_template, request
 
 import config  # reuse the live app's DB creds
 
@@ -36,6 +42,39 @@ HEARTBEAT_THRESHOLD_MINUTES = 225
 JOBORDER_STATUS = {0: "assigned", 1: "needs_assistance", 2: "pending_review", 3: "closed"}
 MOVEMENT_STATUS = {0: "scheduled", 1: "in_progress", 2: "completed"}
 PRIORITY        = {0: "low", 1: "normal", 2: "high"}
+
+
+def _current_principal():
+    b64 = request.headers.get("X-MS-CLIENT-PRINCIPAL", "")
+    if not b64:
+        return None
+    try:
+        return _json.loads(base64.b64decode(b64).decode("utf-8"))
+    except Exception:
+        return None
+
+
+def _current_user():
+    p = _current_principal()
+    if p:
+        for c in p.get("claims", []):
+            if c.get("typ") == "preferred_username":
+                return (c.get("val") or "").strip().lower()
+    return (getattr(config, "DEV_USER_EMAIL", "") or "").strip().lower()
+
+
+def _current_roles():
+    out = []
+    p = _current_principal()
+    if p:
+        for c in p.get("claims", []):
+            if c.get("typ") == "roles":
+                v = (c.get("val") or "").strip().lower()
+                if v and v not in out:
+                    out.append(v)
+    if not out and getattr(config, "DEV_ROLE", ""):
+        out = [config.DEV_ROLE.strip().lower()]
+    return out
 
 
 def _conn():
@@ -101,10 +140,13 @@ def _apply_heartbeat(cur, machines):
 def _fetch_sales(cur):
     start = _to_ole(datetime.utcnow() - timedelta(days=7))
     cur.execute("""
-        SELECT COUNT(*) FROM [MasterData Table] mdt
-        WHERE CAST(mdt.[Date Time] AS FLOAT) >= %s
-          AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
-          AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%%'
+        SELECT COUNT(*) FROM (
+            SELECT DISTINCT mdt.[Machine Code], CAST(mdt.[Date Time] AS FLOAT) AS t
+            FROM [MasterData Table] mdt
+            WHERE CAST(mdt.[Date Time] AS FLOAT) >= %s
+              AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+              AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%%'
+        ) _v
     """, (start,))
     r = cur.fetchone()
     return int(r[0]) if r and r[0] is not None else None
@@ -119,7 +161,8 @@ def _fetch_work(cur):
         for cid, disp, desc, src, mname, mcode, jid in cur.fetchall():
             if jid:
                 continue
-            work.append({"id": disp or f"CMP-{cid}", "type": "service",
+            work.append({"id": disp or f"CMP-{cid}", "kind": "complaint", "rid": int(cid),
+                         "type": "service",
                          "machine": str(mcode) if mcode else "?", "machineName": mname,
                          "desc": (desc or "(no description)")[:140], "priority": "normal",
                          "status": "new", "assignedTo": None, "source": src or "Complaint"})
@@ -131,8 +174,12 @@ def _fetch_work(cur):
                        FROM WO_JobOrders ORDER BY CreatedAt DESC, JobOrderID DESC""")
         for jid, disp, mname, mcode, asg, pc, sc, diag in cur.fetchall():
             lbl = JOBORDER_STATUS.get(int(sc) if sc is not None else 0, "assigned")
-            status = "done" if lbl == "closed" else ("assigned" if asg else "new")
-            work.append({"id": disp or f"JOB-{jid}", "type": "service",
+            # pending_review = operator finished; treat as done in this UI so a
+            # completed job doesn't bounce back into My Jobs (manager still
+            # closes it via review in the main dashboard).
+            status = "done" if lbl in ("closed", "pending_review") else ("assigned" if asg else "new")
+            work.append({"id": disp or f"JOB-{jid}", "kind": "joborder", "rid": int(jid),
+                         "type": "service",
                          "machine": str(mcode) if mcode else "?", "machineName": mname,
                          "desc": (diag or "Service job order")[:140],
                          "priority": PRIORITY.get(int(pc) if pc is not None else 1, "normal"),
@@ -145,7 +192,8 @@ def _fetch_work(cur):
                        FROM WO_DeliveryOrders ORDER BY CreatedAt DESC, DeliveryOrderID DESC""")
         for did, mname, mcode, asg, pri, st in cur.fetchall():
             done = (st or "").lower() == "completed"
-            work.append({"id": f"DEL-{did}", "type": "delivery",
+            work.append({"id": f"DEL-{did}", "kind": "delivery", "rid": int(did),
+                         "type": "delivery",
                          "machine": str(mcode) if mcode else "?", "machineName": mname,
                          "desc": "Refill / delivery", "priority": (pri or "normal").lower(),
                          "status": "done" if done else ("assigned" if asg else "new"),
@@ -161,7 +209,8 @@ def _fetch_work(cur):
             desc = f"{(mtype or 'move').title()}"
             if frm or to:
                 desc += f": {frm or '?'} → {to or '?'}"
-            work.append({"id": disp or f"MOV-{mid}", "type": "movement",
+            work.append({"id": disp or f"MOV-{mid}", "kind": "movement", "rid": int(mid),
+                         "type": "movement",
                          "machine": str(mcode) if mcode else "?", "machineName": None,
                          "desc": desc[:140], "priority": "normal",
                          "status": "done" if lbl == "completed" else ("assigned" if asg else "new"),
@@ -173,7 +222,8 @@ def _fetch_work(cur):
 
 @alpha_bp.route("/alpha")
 def alpha_index():
-    return render_template("alpha_preview.html")
+    return render_template("alpha_preview.html",
+                           username=_current_user(), roles=_current_roles())
 
 
 @alpha_bp.route("/alpha/api/bootstrap")

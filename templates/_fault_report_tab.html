@@ -151,10 +151,17 @@
         opts.headers = opts.headers || {};
         opts.headers['Accept'] = 'application/json';
         return fetch(url, opts).then(function(r){
-            return r.json().then(function(d){
+            return r.text().then(function(txt){
+                var d;
+                try { d = txt ? JSON.parse(txt) : {}; }
+                catch(e){
+                    throw new Error('Server returned non-JSON (status ' + r.status + '): ' + (txt || '').slice(0, 200));
+                }
                 if(!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
                 return d;
             });
+        }, function(networkErr){
+            throw new Error('Network error — could not reach the server. (' + (networkErr && networkErr.message || networkErr) + ')');
         });
     }
     function postJSON(url, body, method){

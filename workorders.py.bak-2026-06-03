@@ -1,0 +1,1444 @@
+"""KNM Work Orders module — Flask Blueprint added alongside the vending
+dashboard. Everything in this file is additive:
+
+  • New tables prefixed WO_* — does not touch MachineLookup, MasterData
+    Table or MasterCode.
+  • Own permission helpers — does not alter existing role decorators.
+  • All routes mounted under /api/wo/* — no collision with existing routes.
+
+Tabs in the new "Work Orders" UI:
+  Tab 1 Complaint Submission — any signed-in user with any role.
+  Tab 2 Field Ops             — operator / field_manager / admin.
+  Tab 3 Work Order Assignment — field_manager / admin.
+  Tab 4 Manager View          — field_manager / admin.
+"""
+from functools import wraps
+from datetime import datetime
+import base64
+
+from flask import Blueprint, request, jsonify, Response
+
+# Reuse helpers from the existing vending app so auth and DB stay consistent.
+from app import (
+    get_current_user, get_role, get_connection,
+    to_ole_date, from_ole_date,
+)
+
+workorders_bp = Blueprint("workorders", __name__)
+
+
+# ── Roles ──────────────────────────────────────────────────────────────────────
+
+ROLE_ADMIN         = "admin"
+ROLE_OPERATOR      = "operator"
+ROLE_FIELD_MANAGER = "field_manager"
+
+OPERATOR_ROLES = {ROLE_OPERATOR, ROLE_FIELD_MANAGER, ROLE_ADMIN}
+MANAGER_ROLES  = {ROLE_FIELD_MANAGER, ROLE_ADMIN}
+
+
+# ── 8 standard delivery items (names provided by Yash; placeholder for now) ───
+
+DELIVERY_ITEMS = [
+    "Item 1", "Item 2", "Item 3", "Item 4",
+    "Item 5", "Item 6", "Item 7", "Item 8",
+]
+
+
+# ── Auth helpers (API-style: JSON 401/403, never redirect) ────────────────────
+
+def api_login_required(f):
+    """Any signed-in user with any app role can access — Tab 1 Complaint."""
+    @wraps(f)
+    def inner(*args, **kwargs):
+        email = get_current_user()
+        if not email:
+            return jsonify({"error": "Not signed in."}), 401
+        if not get_role(email):
+            return jsonify({"error": "You are not authorised to use this app."}), 403
+        return f(*args, **kwargs)
+    return inner
+
+
+def require_roles(*roles):
+    allowed = set(roles)
+
+    def deco(f):
+        @wraps(f)
+        def inner(*args, **kwargs):
+            email = get_current_user()
+            if not email:
+                return jsonify({"error": "Not signed in."}), 401
+            if get_role(email) not in allowed:
+                return jsonify({"error": "You do not have permission for this action."}), 403
+            return f(*args, **kwargs)
+        return inner
+    return deco
+
+
+# ── Schema (idempotent; runs on app startup) ──────────────────────────────────
+
+def init_workorders_db():
+    """Drop stale V1 tables and create the WO_* tables. Safe to run every start."""
+    legacy_drop = [
+        "IF OBJECT_ID('dbo.WorkOrderActivity', 'U') IS NOT NULL DROP TABLE dbo.WorkOrderActivity",
+        "IF OBJECT_ID('dbo.WorkOrderImages',   'U') IS NOT NULL DROP TABLE dbo.WorkOrderImages",
+        "IF OBJECT_ID('dbo.WorkOrders',        'U') IS NOT NULL DROP TABLE dbo.WorkOrders",
+    ]
+
+    tables = [
+        ("WO_Complaints", """
+            CREATE TABLE WO_Complaints (
+                ComplaintID       INT IDENTITY(1,1) PRIMARY KEY,
+                Description       NVARCHAR(MAX)  NOT NULL,
+                Source            NVARCHAR(20)   NOT NULL DEFAULT 'self',
+                ImpactDescription NVARCHAR(MAX)  NULL,
+                ImpactAmount      DECIMAL(18,2)  NULL,
+                MachineName       NVARCHAR(255)  NULL,
+                MachineCode       NVARCHAR(50)   NULL,
+                Status            NVARCHAR(20)   NOT NULL DEFAULT 'open',
+                JobOrderID        INT            NULL,
+                SubmitterEmail    NVARCHAR(255)  NOT NULL,
+                SubmittedAt       DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME()
+            )
+        """),
+        ("WO_JobOrders", """
+            CREATE TABLE WO_JobOrders (
+                JobOrderID        INT IDENTITY(1,1) PRIMARY KEY,
+                ComplaintID       INT            NULL,
+                MachineName       NVARCHAR(255)  NOT NULL,
+                MachineCode       NVARCHAR(50)   NULL,
+                Notes             NVARCHAR(MAX)  NULL,
+                AssignedTo        NVARCHAR(255)  NULL,
+                Priority          NVARCHAR(10)   NOT NULL DEFAULT 'normal',
+                Status            NVARCHAR(20)   NOT NULL DEFAULT 'open',
+                Report            NVARCHAR(MAX)  NULL,
+                RootCause         NVARCHAR(MAX)  NULL,
+                CorrectiveAction  NVARCHAR(MAX)  NULL,
+                PreventiveAction  NVARCHAR(MAX)  NULL,
+                CreatedBy         NVARCHAR(255)  NOT NULL,
+                CreatedAt         DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
+                CompletedBy       NVARCHAR(255)  NULL,
+                CompletedAt       DATETIME2      NULL
+            )
+        """),
+        ("WO_DeliveryOrders", """
+            CREATE TABLE WO_DeliveryOrders (
+                DeliveryOrderID   INT IDENTITY(1,1) PRIMARY KEY,
+                MachineName       NVARCHAR(255)  NOT NULL,
+                MachineCode       NVARCHAR(50)   NULL,
+                Notes             NVARCHAR(MAX)  NULL,
+                AssignedTo        NVARCHAR(255)  NULL,
+                Priority          NVARCHAR(10)   NOT NULL DEFAULT 'normal',
+                Status            NVARCHAR(20)   NOT NULL DEFAULT 'open',
+                Item1Qty          INT            NOT NULL DEFAULT 0,
+                Item2Qty          INT            NOT NULL DEFAULT 0,
+                Item3Qty          INT            NOT NULL DEFAULT 0,
+                Item4Qty          INT            NOT NULL DEFAULT 0,
+                Item5Qty          INT            NOT NULL DEFAULT 0,
+                Item6Qty          INT            NOT NULL DEFAULT 0,
+                Item7Qty          INT            NOT NULL DEFAULT 0,
+                Item8Qty          INT            NOT NULL DEFAULT 0,
+                RecipientName     NVARCHAR(255)  NULL,
+                CreatedBy         NVARCHAR(255)  NOT NULL,
+                CreatedAt         DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME(),
+                CompletedBy       NVARCHAR(255)  NULL,
+                CompletedAt       DATETIME2      NULL
+            )
+        """),
+        ("WO_Images", """
+            CREATE TABLE WO_Images (
+                ImageID      INT IDENTITY(1,1) PRIMARY KEY,
+                ParentType   NVARCHAR(20)   NOT NULL,
+                ParentID     INT            NOT NULL,
+                Stage        NVARCHAR(20)   NOT NULL,
+                ImageData    VARBINARY(MAX) NOT NULL,
+                ContentType  NVARCHAR(100)  NOT NULL,
+                FileName     NVARCHAR(255)  NULL,
+                UploadedBy   NVARCHAR(255)  NOT NULL,
+                UploadedAt   DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME()
+            )
+        """),
+        ("WO_Activity", """
+            CREATE TABLE WO_Activity (
+                ActivityID   INT IDENTITY(1,1) PRIMARY KEY,
+                ParentType   NVARCHAR(20)   NOT NULL,
+                ParentID     INT            NOT NULL,
+                Action       NVARCHAR(50)   NOT NULL,
+                Detail       NVARCHAR(MAX)  NULL,
+                ByUser       NVARCHAR(255)  NOT NULL,
+                AtTime       DATETIME2      NOT NULL DEFAULT SYSUTCDATETIME()
+            )
+        """),
+    ]
+    indexes = [
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WOImg_Parent') "
+        "CREATE INDEX IX_WOImg_Parent ON WO_Images (ParentType, ParentID)",
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WOAct_Parent') "
+        "CREATE INDEX IX_WOAct_Parent ON WO_Activity (ParentType, ParentID)",
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WOJO_Assigned') "
+        "CREATE INDEX IX_WOJO_Assigned ON WO_JobOrders (AssignedTo, Status)",
+        "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='IX_WODO_Assigned') "
+        "CREATE INDEX IX_WODO_Assigned ON WO_DeliveryOrders (AssignedTo, Status)",
+    ]
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    for stmt in legacy_drop:
+        try:
+            cursor.execute(stmt)
+            conn.commit()
+        except Exception as e:
+            print(f"[init_workorders_db] legacy drop skipped: {e}")
+    for name, create_sql in tables:
+        try:
+            cursor.execute(f"""
+                IF NOT EXISTS (
+                    SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_NAME = '{name}'
+                )
+                {create_sql}
+            """)
+            conn.commit()
+        except Exception as e:
+            print(f"[init_workorders_db] create {name} failed: {e}")
+    for idx_sql in indexes:
+        try:
+            cursor.execute(idx_sql)
+            conn.commit()
+        except Exception as e:
+            print(f"[init_workorders_db] index skipped: {e}")
+    conn.close()
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def _iso(dt):
+    if not dt:
+        return None
+    return dt.replace(microsecond=0).isoformat() + "Z"
+
+
+def _log_activity(cursor, parent_type, parent_id, action, detail, user):
+    cursor.execute(
+        "INSERT INTO WO_Activity (ParentType, ParentID, Action, Detail, ByUser) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (parent_type, parent_id, action, detail, user),
+    )
+
+
+def _images_for(cursor, parent_type, parent_id, stage=None):
+    if stage:
+        cursor.execute(
+            "SELECT ImageID, Stage, ContentType, FileName, UploadedBy, UploadedAt "
+            "FROM WO_Images WHERE ParentType=%s AND ParentID=%s AND Stage=%s "
+            "ORDER BY UploadedAt, ImageID",
+            (parent_type, parent_id, stage),
+        )
+    else:
+        cursor.execute(
+            "SELECT ImageID, Stage, ContentType, FileName, UploadedBy, UploadedAt "
+            "FROM WO_Images WHERE ParentType=%s AND ParentID=%s "
+            "ORDER BY UploadedAt, ImageID",
+            (parent_type, parent_id),
+        )
+    return [{
+        "id": r[0], "stage": r[1], "content_type": r[2],
+        "file_name": r[3], "uploaded_by": r[4], "uploaded_at": _iso(r[5]),
+    } for r in cursor.fetchall()]
+
+
+def _activity_for(cursor, parent_type, parent_id):
+    cursor.execute(
+        "SELECT Action, Detail, ByUser, AtTime FROM WO_Activity "
+        "WHERE ParentType=%s AND ParentID=%s ORDER BY AtTime DESC, ActivityID DESC",
+        (parent_type, parent_id),
+    )
+    return [{
+        "action": r[0], "detail": r[1], "by": r[2], "at": _iso(r[3]),
+    } for r in cursor.fetchall()]
+
+
+def _decode_data_url(data_url):
+    """('data:image/jpeg;base64,XXXX', ...) -> (bytes, content_type)."""
+    if not isinstance(data_url, str) or not data_url.startswith("data:"):
+        return None, None
+    try:
+        header, b64 = data_url.split(",", 1)
+        content_type = header.split(";")[0].replace("data:", "").strip() or "image/jpeg"
+        if not content_type.startswith("image/"):
+            return None, None
+        return base64.b64decode(b64), content_type
+    except Exception:
+        return None, None
+
+
+# ── Bootstrap data ─────────────────────────────────────────────────────────────
+
+@workorders_bp.route("/bootstrap")
+@api_login_required
+def api_bootstrap():
+    """Tells the UI who the user is, what role, what tabs to show, and the delivery item labels."""
+    email = get_current_user()
+    role  = get_role(email)
+    return jsonify({
+        "user":  email,
+        "role":  role,
+        "can_field_ops":   role in OPERATOR_ROLES,
+        "can_manage":      role in MANAGER_ROLES,
+        "delivery_items":  DELIVERY_ITEMS,
+    })
+
+
+# ── Machines (reuses MachineLookup) ────────────────────────────────────────────
+
+@workorders_bp.route("/machines")
+@api_login_required
+def api_wo_machines():
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT MachineName, MachineCode FROM MachineLookup ORDER BY MachineName")
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([
+            {"name": r[0], "code": (str(r[1]) if r[1] is not None else None)}
+            for r in rows if r[0]
+        ])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Complaints ─────────────────────────────────────────────────────────────────
+
+@workorders_bp.route("/complaints", methods=["POST"])
+@api_login_required
+def api_complaint_create():
+    data = request.get_json(silent=True) or {}
+    desc = (data.get("description") or "").strip()
+    if not desc:
+        return jsonify({"error": "Please describe the complaint."}), 400
+    source = (data.get("source") or "self").strip().lower()
+    if source not in ("self", "customer_chat"):
+        source = "self"
+    impact_desc = (data.get("impact_description") or "").strip() or None
+    impact_amt_raw = data.get("impact_amount")
+    impact_amt = None
+    if impact_amt_raw not in (None, "", "null"):
+        try:
+            impact_amt = float(impact_amt_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Impact amount must be a number."}), 400
+    machine_name = (data.get("machine_name") or "").strip() or None
+    machine_code = (data.get("machine_code") or "").strip() or None
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO WO_Complaints
+                (Description, Source, ImpactDescription, ImpactAmount,
+                 MachineName, MachineCode, SubmitterEmail)
+            OUTPUT INSERTED.ComplaintID
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (desc, source, impact_desc, impact_amt, machine_name, machine_code, user))
+        new_id = cursor.fetchone()[0]
+        _log_activity(cursor, "complaint", new_id, "submitted", "Complaint submitted", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/complaints")
+@api_login_required
+def api_complaint_list():
+    """?scope=mine|all  ?status=open|closed|all"""
+    scope  = (request.args.get("scope") or "mine").strip().lower()
+    status = (request.args.get("status") or "all").strip().lower()
+    user   = get_current_user()
+
+    where, params = [], []
+    if scope == "mine":
+        where.append("SubmitterEmail = %s")
+        params.append(user)
+    if status in ("open", "in_progress", "closed"):
+        where.append("Status = %s")
+        params.append(status)
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"""
+        SELECT TOP 200 ComplaintID, Description, Source, ImpactDescription, ImpactAmount,
+               MachineName, MachineCode, Status, JobOrderID,
+               SubmitterEmail, SubmittedAt,
+               (SELECT COUNT(*) FROM WO_Images WHERE ParentType='complaint'
+                   AND ParentID = wc.ComplaintID) AS ImgCount
+        FROM WO_Complaints wc
+        {where_sql}
+        ORDER BY SubmittedAt DESC, ComplaintID DESC
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([{
+            "id": r[0], "description": r[1], "source": r[2],
+            "impact_description": r[3],
+            "impact_amount": float(r[4]) if r[4] is not None else None,
+            "machine_name": r[5], "machine_code": r[6],
+            "status": r[7], "job_order_id": r[8],
+            "submitter": r[9], "submitted_at": _iso(r[10]),
+            "image_count": int(r[11]),
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/complaints/<int:cid>")
+@api_login_required
+def api_complaint_detail(cid):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT ComplaintID, Description, Source, ImpactDescription, ImpactAmount,
+                   MachineName, MachineCode, Status, JobOrderID,
+                   SubmitterEmail, SubmittedAt
+            FROM WO_Complaints WHERE ComplaintID = %s
+        """, (cid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Complaint not found."}), 404
+        images   = _images_for(cursor, "complaint", cid)
+        activity = _activity_for(cursor, "complaint", cid)
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+    return jsonify({
+        "id": row[0], "description": row[1], "source": row[2],
+        "impact_description": row[3],
+        "impact_amount": float(row[4]) if row[4] is not None else None,
+        "machine_name": row[5], "machine_code": row[6],
+        "status": row[7], "job_order_id": row[8],
+        "submitter": row[9], "submitted_at": _iso(row[10]),
+        "images": images, "activity": activity,
+    })
+
+
+# ── Job Orders ─────────────────────────────────────────────────────────────────
+
+@workorders_bp.route("/joborders", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_joborder_create():
+    """Field manager creates a job order — optionally from a complaint."""
+    data = request.get_json(silent=True) or {}
+    complaint_id = data.get("complaint_id")
+    machine_name = (data.get("machine_name") or "").strip()
+    machine_code = (data.get("machine_code") or "").strip() or None
+    notes        = (data.get("notes") or "").strip() or None
+    assigned     = (data.get("assigned_to") or "").strip().lower() or None
+    priority     = (data.get("priority") or "normal").strip().lower()
+    if priority not in ("low", "normal", "high"):
+        priority = "normal"
+
+    if complaint_id:
+        try:
+            complaint_id = int(complaint_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid complaint id."}), 400
+
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        # If created from a complaint, pull machine info from there if not supplied
+        if complaint_id:
+            cursor.execute(
+                "SELECT MachineName, MachineCode FROM WO_Complaints WHERE ComplaintID = %s",
+                (complaint_id,),
+            )
+            crow = cursor.fetchone()
+            if not crow:
+                conn.close()
+                return jsonify({"error": "Complaint not found."}), 404
+            if not machine_name and crow[0]:
+                machine_name = crow[0]
+            if not machine_code and crow[1]:
+                machine_code = crow[1]
+
+        if not machine_name:
+            conn.close()
+            return jsonify({"error": "Machine name is required."}), 400
+
+        cursor.execute("""
+            INSERT INTO WO_JobOrders
+                (ComplaintID, MachineName, MachineCode, Notes,
+                 AssignedTo, Priority, CreatedBy)
+            OUTPUT INSERTED.JobOrderID
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (complaint_id, machine_name, machine_code, notes,
+              assigned, priority, user))
+        new_id = cursor.fetchone()[0]
+        _log_activity(cursor, "joborder", new_id, "created",
+                      f"Job order created for {machine_name}", user)
+        if assigned:
+            _log_activity(cursor, "joborder", new_id, "assigned",
+                          f"Assigned to {assigned}", user)
+        if complaint_id:
+            cursor.execute(
+                "UPDATE WO_Complaints SET JobOrderID = %s, Status = 'in_progress' "
+                "WHERE ComplaintID = %s",
+                (new_id, complaint_id),
+            )
+            _log_activity(cursor, "complaint", complaint_id, "linked",
+                          f"Linked to job order #{new_id}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/joborders")
+@api_login_required
+def api_joborder_list():
+    """?tab=mine|open|completed|all  &assigned_to=<email>"""
+    tab = (request.args.get("tab") or "mine").strip().lower()
+    assigned_to = (request.args.get("assigned_to") or "").strip().lower() or None
+    user = get_current_user()
+    role = get_role(user)
+
+    where, params = [], []
+    if tab == "mine":
+        # Operator's own list
+        where.append("AssignedTo = %s")
+        params.append(user)
+        where.append("Status <> 'completed'")
+    elif tab == "open":
+        where.append("Status <> 'completed'")
+    elif tab == "completed":
+        where.append("Status = 'completed'")
+    elif tab == "unassigned":
+        where.append("AssignedTo IS NULL")
+        where.append("Status <> 'completed'")
+    # "all" => no status/assignment filter
+    if assigned_to and role in MANAGER_ROLES:
+        where.append("AssignedTo = %s")
+        params.append(assigned_to)
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"""
+        SELECT TOP 300
+            jo.JobOrderID, jo.ComplaintID, jo.MachineName, jo.MachineCode,
+            jo.AssignedTo, jo.Priority, jo.Status, jo.CreatedBy, jo.CreatedAt,
+            jo.CompletedAt,
+            (SELECT COUNT(*) FROM WO_Images WHERE ParentType='joborder'
+                AND ParentID = jo.JobOrderID) AS ImgCount
+        FROM WO_JobOrders jo
+        {where_sql}
+        ORDER BY
+            CASE jo.Priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+            jo.CreatedAt DESC
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([{
+            "id": r[0], "complaint_id": r[1], "machine_name": r[2],
+            "machine_code": r[3], "assigned_to": r[4], "priority": r[5],
+            "status": r[6], "created_by": r[7], "created_at": _iso(r[8]),
+            "completed_at": _iso(r[9]), "image_count": int(r[10]),
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/joborders/<int:jid>")
+@api_login_required
+def api_joborder_detail(jid):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT JobOrderID, ComplaintID, MachineName, MachineCode, Notes,
+                   AssignedTo, Priority, Status,
+                   Report, RootCause, CorrectiveAction, PreventiveAction,
+                   CreatedBy, CreatedAt, CompletedBy, CompletedAt
+            FROM WO_JobOrders WHERE JobOrderID = %s
+        """, (jid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Job order not found."}), 404
+
+        complaint = None
+        if row[1]:
+            cursor.execute("""
+                SELECT ComplaintID, Description, Source, ImpactDescription, ImpactAmount,
+                       SubmitterEmail, SubmittedAt
+                FROM WO_Complaints WHERE ComplaintID = %s
+            """, (row[1],))
+            crow = cursor.fetchone()
+            if crow:
+                complaint = {
+                    "id": crow[0], "description": crow[1], "source": crow[2],
+                    "impact_description": crow[3],
+                    "impact_amount": float(crow[4]) if crow[4] is not None else None,
+                    "submitter": crow[5], "submitted_at": _iso(crow[6]),
+                    "images": _images_for(cursor, "complaint", crow[0]),
+                }
+
+        images = _images_for(cursor, "joborder", jid)
+        activity = _activity_for(cursor, "joborder", jid)
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    return jsonify({
+        "id": row[0], "complaint_id": row[1], "machine_name": row[2],
+        "machine_code": row[3], "notes": row[4], "assigned_to": row[5],
+        "priority": row[6], "status": row[7],
+        "report": row[8], "root_cause": row[9],
+        "corrective_action": row[10], "preventive_action": row[11],
+        "created_by": row[12], "created_at": _iso(row[13]),
+        "completed_by": row[14], "completed_at": _iso(row[15]),
+        "complaint": complaint,
+        "images": images, "activity": activity,
+    })
+
+
+@workorders_bp.route("/joborders/<int:jid>", methods=["PATCH"])
+@require_roles(*OPERATOR_ROLES)
+def api_joborder_update(jid):
+    """Operator (or manager/admin) fills Report / Root Cause / Corrective / Preventive."""
+    data = request.get_json(silent=True) or {}
+    fields = {}
+    for k_in, k_db in (("report", "Report"), ("root_cause", "RootCause"),
+                       ("corrective_action", "CorrectiveAction"),
+                       ("preventive_action", "PreventiveAction")):
+        if k_in in data:
+            v = data.get(k_in)
+            fields[k_db] = (v.strip() or None) if isinstance(v, str) else v
+    if not fields:
+        return jsonify({"error": "Nothing to update."}), 400
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT Status, AssignedTo FROM WO_JobOrders WHERE JobOrderID = %s", (jid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Job order not found."}), 404
+        # operators may only edit their own assignments; managers/admins may edit any
+        role = get_role(user)
+        if role == ROLE_OPERATOR and (row[1] or "").lower() != user:
+            conn.close()
+            return jsonify({"error": "You can only edit job orders assigned to you."}), 403
+
+        set_clause = ", ".join(f"{col} = %s" for col in fields)
+        params = list(fields.values())
+        # Auto-advance status open -> in_progress on first repair edit
+        if row[0] == "open":
+            set_clause += ", Status = 'in_progress'"
+        params.append(jid)
+        cursor.execute(f"UPDATE WO_JobOrders SET {set_clause} WHERE JobOrderID = %s", tuple(params))
+        _log_activity(cursor, "joborder", jid, "report_updated",
+                      "Operator updated report fields", user)
+        if row[0] == "open":
+            _log_activity(cursor, "joborder", jid, "status_change",
+                          "Status -> in_progress", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/joborders/<int:jid>/assign", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_joborder_assign(jid):
+    """Manager assigns / reassigns to an operator (by email)."""
+    data = request.get_json(silent=True) or {}
+    assigned = (data.get("assigned_to") or "").strip().lower() or None
+    priority = data.get("priority")
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT AssignedTo, Priority FROM WO_JobOrders WHERE JobOrderID = %s", (jid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Job order not found."}), 404
+        sets, params = ["AssignedTo = %s"], [assigned]
+        if priority and priority in ("low", "normal", "high"):
+            sets.append("Priority = %s")
+            params.append(priority)
+        params.append(jid)
+        cursor.execute(f"UPDATE WO_JobOrders SET {', '.join(sets)} WHERE JobOrderID = %s", tuple(params))
+        detail = f"Assigned to {assigned or '(unassigned)'}"
+        if priority:
+            detail += f"; priority -> {priority}"
+        _log_activity(cursor, "joborder", jid, "assigned", detail, user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/joborders/<int:jid>/status", methods=["POST"])
+@require_roles(*OPERATOR_ROLES)
+def api_joborder_status(jid):
+    data = request.get_json(silent=True) or {}
+    new_status = (data.get("status") or "").strip().lower()
+    if new_status not in ("open", "in_progress", "completed"):
+        return jsonify({"error": "Invalid status."}), 400
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT AssignedTo, ComplaintID FROM WO_JobOrders WHERE JobOrderID = %s", (jid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Job order not found."}), 404
+        role = get_role(user)
+        if role == ROLE_OPERATOR and (row[0] or "").lower() != user:
+            conn.close()
+            return jsonify({"error": "You can only change status on your own job orders."}), 403
+
+        if new_status == "completed":
+            cursor.execute(
+                "UPDATE WO_JobOrders SET Status='completed', CompletedBy=%s, "
+                "CompletedAt=SYSUTCDATETIME() WHERE JobOrderID = %s",
+                (user, jid),
+            )
+            _log_activity(cursor, "joborder", jid, "completed", "Job order completed", user)
+            if row[1]:
+                cursor.execute("UPDATE WO_Complaints SET Status='closed' WHERE ComplaintID = %s",
+                               (row[1],))
+                _log_activity(cursor, "complaint", row[1], "closed",
+                              f"Job order #{jid} completed", user)
+        else:
+            cursor.execute(
+                "UPDATE WO_JobOrders SET Status=%s, CompletedBy=NULL, CompletedAt=NULL "
+                "WHERE JobOrderID = %s",
+                (new_status, jid),
+            )
+            _log_activity(cursor, "joborder", jid, "status_change",
+                          f"Status -> {new_status}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Delivery Orders ────────────────────────────────────────────────────────────
+
+def _sync_topup(cursor, machine_code):
+    """Replicates the vending dashboard's log_topup behaviour. Returns a status string."""
+    now_ole = to_ole_date(datetime.utcnow())
+    cursor.execute(
+        "SELECT LastTopupTimestamp FROM MachineLookup WHERE MachineCode = %s",
+        (machine_code,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return "Machine code not found in vending data — topup not synced."
+    current_ole = row[0]
+    if current_ole is not None:
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM [MasterData Table]
+            WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
+              AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
+              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
+              AND CAST([Date Time] AS FLOAT) >= {float(current_ole)}
+        """, (machine_code,))
+    else:
+        cursor.execute("""
+            SELECT COUNT(*) FROM [MasterData Table]
+            WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
+              AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
+              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
+        """, (machine_code,))
+    vends_since = int(cursor.fetchone()[0])
+    cursor.execute(f"""
+        UPDATE MachineLookup
+        SET PreviousTopupTimestamp = LastTopupTimestamp,
+            LastTopupTimestamp     = {now_ole},
+            CountBeforeLastTopup   = %s
+        WHERE MachineCode = %s
+    """, (vends_since, machine_code))
+    return f"Topup logged ({vends_since} vends since previous topup)."
+
+
+@workorders_bp.route("/deliveryorders", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_delivery_create():
+    data = request.get_json(silent=True) or {}
+    machine_name = (data.get("machine_name") or "").strip()
+    machine_code = (data.get("machine_code") or "").strip() or None
+    notes        = (data.get("notes") or "").strip() or None
+    assigned     = (data.get("assigned_to") or "").strip().lower() or None
+    priority     = (data.get("priority") or "normal").strip().lower()
+    if priority not in ("low", "normal", "high"):
+        priority = "normal"
+    if not machine_name:
+        return jsonify({"error": "Machine name is required."}), 400
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO WO_DeliveryOrders
+                (MachineName, MachineCode, Notes, AssignedTo, Priority, CreatedBy)
+            OUTPUT INSERTED.DeliveryOrderID
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (machine_name, machine_code, notes, assigned, priority, user))
+        new_id = cursor.fetchone()[0]
+        _log_activity(cursor, "deliveryorder", new_id, "created",
+                      f"Delivery order created for {machine_name}", user)
+        if assigned:
+            _log_activity(cursor, "deliveryorder", new_id, "assigned",
+                          f"Assigned to {assigned}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/deliveryorders")
+@api_login_required
+def api_delivery_list():
+    tab = (request.args.get("tab") or "mine").strip().lower()
+    user = get_current_user()
+    role = get_role(user)
+
+    where, params = [], []
+    if tab == "mine":
+        where.append("AssignedTo = %s")
+        params.append(user)
+        where.append("Status <> 'completed'")
+    elif tab == "open":
+        where.append("Status <> 'completed'")
+    elif tab == "completed":
+        where.append("Status = 'completed'")
+    elif tab == "unassigned":
+        where.append("AssignedTo IS NULL")
+        where.append("Status <> 'completed'")
+
+    where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+    sql = f"""
+        SELECT TOP 300 DeliveryOrderID, MachineName, MachineCode, AssignedTo,
+               Priority, Status, CreatedBy, CreatedAt, CompletedAt
+        FROM WO_DeliveryOrders
+        {where_sql}
+        ORDER BY
+            CASE Priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+            CreatedAt DESC
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(sql, tuple(params))
+        rows = cursor.fetchall()
+        conn.close()
+        return jsonify([{
+            "id": r[0], "machine_name": r[1], "machine_code": r[2],
+            "assigned_to": r[3], "priority": r[4], "status": r[5],
+            "created_by": r[6], "created_at": _iso(r[7]),
+            "completed_at": _iso(r[8]),
+        } for r in rows])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/deliveryorders/<int:did>")
+@api_login_required
+def api_delivery_detail(did):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DeliveryOrderID, MachineName, MachineCode, Notes, AssignedTo,
+                   Priority, Status,
+                   Item1Qty, Item2Qty, Item3Qty, Item4Qty,
+                   Item5Qty, Item6Qty, Item7Qty, Item8Qty,
+                   RecipientName, CreatedBy, CreatedAt, CompletedBy, CompletedAt
+            FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s
+        """, (did,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Delivery order not found."}), 404
+        activity = _activity_for(cursor, "deliveryorder", did)
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    items = []
+    for i in range(8):
+        items.append({
+            "index": i + 1,
+            "label": DELIVERY_ITEMS[i],
+            "quantity": int(row[7 + i] or 0),
+        })
+    return jsonify({
+        "id": row[0], "machine_name": row[1], "machine_code": row[2],
+        "notes": row[3], "assigned_to": row[4], "priority": row[5],
+        "status": row[6], "items": items,
+        "recipient_name": row[15],
+        "created_by": row[16], "created_at": _iso(row[17]),
+        "completed_by": row[18], "completed_at": _iso(row[19]),
+        "activity": activity,
+    })
+
+
+@workorders_bp.route("/deliveryorders/<int:did>", methods=["PATCH"])
+@require_roles(*OPERATOR_ROLES)
+def api_delivery_update(did):
+    """Operator updates the 8 quantities (and optionally recipient name)."""
+    data = request.get_json(silent=True) or {}
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT AssignedTo, Status FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s",
+            (did,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Delivery order not found."}), 404
+        role = get_role(user)
+        if role == ROLE_OPERATOR and (row[0] or "").lower() != user:
+            conn.close()
+            return jsonify({"error": "You can only update your own delivery orders."}), 403
+
+        quantities = data.get("quantities") or []
+        if not isinstance(quantities, list) or len(quantities) != 8:
+            return jsonify({"error": "Provide all 8 item quantities."}), 400
+        clean = []
+        for q in quantities:
+            try:
+                v = int(q)
+            except (TypeError, ValueError):
+                return jsonify({"error": "Quantities must be whole numbers."}), 400
+            if v < 0 or v > 20:
+                return jsonify({"error": "Each quantity must be between 0 and 20."}), 400
+            clean.append(v)
+        recipient = (data.get("recipient_name") or "").strip()[:255] or None
+
+        cursor.execute("""
+            UPDATE WO_DeliveryOrders
+            SET Item1Qty=%s, Item2Qty=%s, Item3Qty=%s, Item4Qty=%s,
+                Item5Qty=%s, Item6Qty=%s, Item7Qty=%s, Item8Qty=%s,
+                RecipientName=%s
+            WHERE DeliveryOrderID = %s
+        """, (*clean, recipient, did))
+        _log_activity(cursor, "deliveryorder", did, "updated",
+                      "Quantities / recipient updated", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/deliveryorders/<int:did>/complete", methods=["POST"])
+@require_roles(*OPERATOR_ROLES)
+def api_delivery_complete(did):
+    """Mark delivery as complete; syncs topup on MachineLookup if there's a machine code."""
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT AssignedTo, MachineCode, RecipientName FROM WO_DeliveryOrders "
+            "WHERE DeliveryOrderID = %s",
+            (did,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Delivery order not found."}), 404
+        role = get_role(user)
+        if role == ROLE_OPERATOR and (row[0] or "").lower() != user:
+            conn.close()
+            return jsonify({"error": "You can only complete your own delivery orders."}), 403
+        if not row[2]:
+            conn.close()
+            return jsonify({"error": "Add the recipient name (typed signature) before completing."}), 400
+
+        cursor.execute("""
+            UPDATE WO_DeliveryOrders
+            SET Status='completed', CompletedBy=%s, CompletedAt=SYSUTCDATETIME()
+            WHERE DeliveryOrderID = %s
+        """, (user, did))
+        _log_activity(cursor, "deliveryorder", did, "completed",
+                      f"Signed for by {row[2]}", user)
+        topup_note = None
+        if row[1]:
+            topup_note = _sync_topup(cursor, str(row[1]))
+            _log_activity(cursor, "deliveryorder", did, "topup_synced", topup_note, user)
+        else:
+            topup_note = "No machine code on file — topup not synced to vending data."
+            _log_activity(cursor, "deliveryorder", did, "topup_sync_skipped", topup_note, user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "topup_note": topup_note})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/deliveryorders/<int:did>/assign", methods=["POST"])
+@require_roles(*MANAGER_ROLES)
+def api_delivery_assign(did):
+    data = request.get_json(silent=True) or {}
+    assigned = (data.get("assigned_to") or "").strip().lower() or None
+    priority = data.get("priority")
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1 FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s", (did,))
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({"error": "Delivery order not found."}), 404
+        sets, params = ["AssignedTo = %s"], [assigned]
+        if priority and priority in ("low", "normal", "high"):
+            sets.append("Priority = %s")
+            params.append(priority)
+        params.append(did)
+        cursor.execute(
+            f"UPDATE WO_DeliveryOrders SET {', '.join(sets)} WHERE DeliveryOrderID = %s",
+            tuple(params),
+        )
+        detail = f"Assigned to {assigned or '(unassigned)'}"
+        if priority:
+            detail += f"; priority -> {priority}"
+        _log_activity(cursor, "deliveryorder", did, "assigned", detail, user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Assignment helpers (Tab 3) ─────────────────────────────────────────────────
+
+@workorders_bp.route("/assignment/delivery-candidates")
+@require_roles(*MANAGER_ROLES)
+def api_assign_delivery_candidates():
+    """Locations sorted by dispenses-since-last-topup, most-needing-topup first."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                ml.MachineName, ml.MachineCode, ml.LastTopupTimestamp,
+                (
+                    SELECT COUNT(*) FROM [MasterData Table] mdt
+                    WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
+                      AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+                      AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+                      AND (ml.LastTopupTimestamp IS NULL
+                           OR CAST(mdt.[Date Time] AS FLOAT) >= ml.LastTopupTimestamp)
+                ) AS VendsSince
+            FROM MachineLookup ml
+            WHERE ml.MachineCode IS NOT NULL
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            last_dt = from_ole_date(r[2])
+            out.append({
+                "machine_name": r[0],
+                "machine_code": str(r[1]) if r[1] is not None else None,
+                "last_topup":   last_dt.strftime("%Y-%m-%d %H:%M") if last_dt else None,
+                "vends_since":  int(r[3]) if r[3] is not None else 0,
+            })
+        out.sort(key=lambda x: x["vends_since"], reverse=True)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/assignment/joborder-candidates")
+@require_roles(*MANAGER_ROLES)
+def api_assign_joborder_candidates():
+    """Locations sorted by open complaint count, most-complaints first."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT ml.MachineName, ml.MachineCode,
+                   ISNULL((
+                       SELECT COUNT(*) FROM WO_Complaints c
+                       WHERE c.Status <> 'closed'
+                         AND (
+                             (c.MachineCode IS NOT NULL AND c.MachineCode = ml.MachineCode)
+                             OR (c.MachineCode IS NULL AND c.MachineName = ml.MachineName)
+                         )
+                   ), 0) AS OpenComplaints
+            FROM MachineLookup ml
+        """)
+        rows = cursor.fetchall()
+        conn.close()
+        out = [{
+            "machine_name": r[0],
+            "machine_code": str(r[1]) if r[1] is not None else None,
+            "open_complaints": int(r[2]),
+        } for r in rows]
+        out.sort(key=lambda x: x["open_complaints"], reverse=True)
+        return jsonify(out)
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Manager view (Tab 4) ───────────────────────────────────────────────────────
+
+@workorders_bp.route("/manager/overview")
+@require_roles(*MANAGER_ROLES)
+def api_manager_overview():
+    """All open job + delivery orders grouped by operator, for re-prioritisation/reassignment."""
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT JobOrderID, MachineName, AssignedTo, Priority, Status, CreatedAt
+            FROM WO_JobOrders WHERE Status <> 'completed'
+            ORDER BY
+                CASE Priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                CreatedAt
+        """)
+        jobs = [{
+            "id": r[0], "machine_name": r[1], "assigned_to": r[2],
+            "priority": r[3], "status": r[4], "created_at": _iso(r[5]),
+        } for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT DeliveryOrderID, MachineName, AssignedTo, Priority, Status, CreatedAt
+            FROM WO_DeliveryOrders WHERE Status <> 'completed'
+            ORDER BY
+                CASE Priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
+                CreatedAt
+        """)
+        deliveries = [{
+            "id": r[0], "machine_name": r[1], "assigned_to": r[2],
+            "priority": r[3], "status": r[4], "created_at": _iso(r[5]),
+        } for r in cursor.fetchall()]
+        conn.close()
+        return jsonify({"job_orders": jobs, "delivery_orders": deliveries})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ── Equipment log card (manager) ───────────────────────────────────────────────
+
+@workorders_bp.route("/manager/machines")
+@require_roles(*MANAGER_ROLES)
+def api_manager_machines_search():
+    """Search MachineLookup by code or name substring. Returns up to 30 hits.
+    De-duplicates by MachineCode (the seed has duplicate code+name rows)."""
+    q = (request.args.get("q") or "").strip()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        if q:
+            cursor.execute("""
+                SELECT MachineName, MachineCode
+                FROM MachineLookup
+                WHERE MachineCode IS NOT NULL
+                  AND (MachineName LIKE %s OR CAST(MachineCode AS NVARCHAR(50)) LIKE %s)
+                ORDER BY MachineName
+            """, (f"%{q}%", f"%{q}%"))
+        else:
+            cursor.execute("""
+                SELECT MachineName, MachineCode FROM MachineLookup
+                WHERE MachineCode IS NOT NULL ORDER BY MachineName
+            """)
+        rows = cursor.fetchall()
+        conn.close()
+        seen = {}
+        for r in rows:
+            code = str(r[1]) if r[1] is not None else None
+            if not code:
+                continue
+            if code not in seen:
+                seen[code] = {"code": code, "names": []}
+            if r[0] and r[0] not in seen[code]["names"]:
+                seen[code]["names"].append(r[0])
+        out = [{"code": v["code"], "name": " / ".join(v["names"]) or v["code"]}
+               for v in seen.values()]
+        return jsonify(out[:30])
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/manager/equipment-log")
+@require_roles(*MANAGER_ROLES)
+def api_equipment_log():
+    """Chronological history for one MachineCode — complaints, job orders,
+    delivery orders, all status changes, plus current topup snapshot."""
+    code = (request.args.get("machine_code") or "").strip()
+    if not code:
+        return jsonify({"error": "machine_code is required."}), 400
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT MachineName, Latitude, Longitude,
+                   LastTopupTimestamp, PreviousTopupTimestamp, CountBeforeLastTopup
+            FROM MachineLookup WHERE MachineCode = %s
+        """, (code,))
+        ml_rows = cursor.fetchall()
+        if not ml_rows:
+            conn.close()
+            return jsonify({"error": "Machine not found in MachineLookup."}), 404
+
+        machine_names = sorted({r[0] for r in ml_rows if r[0]})
+        last_topup    = from_ole_date(ml_rows[0][3])
+        prev_topup    = from_ole_date(ml_rows[0][4])
+        vends_before  = int(ml_rows[0][5]) if ml_rows[0][5] is not None else None
+
+        events = []
+
+        cursor.execute("""
+            SELECT ComplaintID, Description, Source, ImpactDescription, ImpactAmount,
+                   Status, SubmitterEmail, SubmittedAt, JobOrderID
+            FROM WO_Complaints WHERE MachineCode = %s
+        """, (code,))
+        complaint_ids = []
+        for r in cursor.fetchall():
+            complaint_ids.append(r[0])
+            summary = (r[1] or "")[:120]
+            if r[4] is not None:
+                summary += f" (impact ${float(r[4]):.2f})"
+            events.append({
+                "at": _iso(r[7]), "type": "complaint", "id": r[0],
+                "action": "submitted", "by": r[6], "summary": summary,
+                "status": r[5], "linked_job_order": r[8],
+            })
+
+        cursor.execute("""
+            SELECT JobOrderID, ComplaintID, AssignedTo, Priority, Status,
+                   CreatedBy, CreatedAt, CompletedBy, CompletedAt, Notes
+            FROM WO_JobOrders WHERE MachineCode = %s
+        """, (code,))
+        job_ids = []
+        for r in cursor.fetchall():
+            job_ids.append(r[0])
+            link = f" (from complaint #{r[1]})" if r[1] else ""
+            events.append({
+                "at": _iso(r[6]), "type": "joborder", "id": r[0],
+                "action": "created", "by": r[5],
+                "summary": f"Assigned to {r[2] or 'unassigned'} ({r[3]} priority){link}",
+                "status": r[4],
+            })
+            if r[8]:
+                events.append({
+                    "at": _iso(r[8]), "type": "joborder", "id": r[0],
+                    "action": "completed", "by": r[7],
+                    "summary": "Completed", "status": "completed",
+                })
+
+        cursor.execute("""
+            SELECT DeliveryOrderID, AssignedTo, Priority, Status,
+                   CreatedBy, CreatedAt, CompletedBy, CompletedAt, RecipientName
+            FROM WO_DeliveryOrders WHERE MachineCode = %s
+        """, (code,))
+        delivery_ids = []
+        for r in cursor.fetchall():
+            delivery_ids.append(r[0])
+            events.append({
+                "at": _iso(r[5]), "type": "deliveryorder", "id": r[0],
+                "action": "created", "by": r[4],
+                "summary": f"Assigned to {r[1] or 'unassigned'} ({r[2]} priority)",
+                "status": r[3],
+            })
+            if r[7]:
+                events.append({
+                    "at": _iso(r[7]), "type": "deliveryorder", "id": r[0],
+                    "action": "completed", "by": r[6],
+                    "summary": f"Signed for by {r[8] or '—'}",
+                    "status": "completed",
+                })
+
+        def _activity_in(parent_type, ids):
+            if not ids:
+                return
+            placeholders = ", ".join(["%s"] * len(ids))
+            cursor.execute(f"""
+                SELECT ParentID, Action, Detail, ByUser, AtTime
+                FROM WO_Activity
+                WHERE ParentType = %s AND ParentID IN ({placeholders})
+                  AND Action NOT IN ('created', 'submitted', 'completed')
+            """, (parent_type,) + tuple(ids))
+            for r in cursor.fetchall():
+                events.append({
+                    "at": _iso(r[4]), "type": parent_type, "id": r[0],
+                    "action": r[1], "by": r[3],
+                    "summary": r[2] or r[1],
+                })
+
+        _activity_in("complaint",     complaint_ids)
+        _activity_in("joborder",      job_ids)
+        _activity_in("deliveryorder", delivery_ids)
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+    events.sort(key=lambda e: e.get("at") or "", reverse=True)
+
+    return jsonify({
+        "machine": {
+            "code": code,
+            "names": machine_names,
+            "last_topup":              _iso(last_topup),
+            "previous_topup":          _iso(prev_topup),
+            "vends_before_last_topup": vends_before,
+        },
+        "counts": {
+            "complaints":      len(complaint_ids),
+            "job_orders":      len(job_ids),
+            "delivery_orders": len(delivery_ids),
+        },
+        "events": events[:300],
+    })
+
+
+# ── Images (unified upload/serve/delete) ──────────────────────────────────────
+
+def _verify_parent(cursor, parent_type, parent_id):
+    table = {"complaint": "WO_Complaints",
+             "joborder":  "WO_JobOrders"}.get(parent_type)
+    if not table:
+        return False
+    id_col = {"complaint": "ComplaintID", "joborder": "JobOrderID"}[parent_type]
+    cursor.execute(f"SELECT 1 FROM {table} WHERE {id_col} = %s", (parent_id,))
+    return cursor.fetchone() is not None
+
+
+@workorders_bp.route("/images", methods=["POST"])
+@api_login_required
+def api_image_upload():
+    """Body: {parent_type, parent_id, stage, data_url, file_name}.
+
+    Permissions:
+      complaint/submission  — any signed-in user (the submitter or anyone helping triage)
+      joborder/report       — operator/field_manager/admin
+    """
+    data = request.get_json(silent=True) or {}
+    parent_type = (data.get("parent_type") or "").strip().lower()
+    try:
+        parent_id = int(data.get("parent_id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid parent id."}), 400
+    stage = (data.get("stage") or "").strip().lower() or (
+        "submission" if parent_type == "complaint" else "report")
+    file_name = (data.get("file_name") or "").strip()[:255] or None
+
+    if parent_type not in ("complaint", "joborder"):
+        return jsonify({"error": "Invalid parent type."}), 400
+
+    if parent_type == "joborder":
+        # Only operator+ can upload repair photos.
+        role = get_role(get_current_user())
+        if role not in OPERATOR_ROLES:
+            return jsonify({"error": "Only operators and managers can add repair photos."}), 403
+
+    raw, content_type = _decode_data_url(data.get("data_url") or "")
+    if raw is None:
+        return jsonify({"error": "Invalid image data."}), 400
+    if len(raw) > 6 * 1024 * 1024:
+        return jsonify({"error": "Image is too large (6 MB max after compression)."}), 400
+
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        if not _verify_parent(cursor, parent_type, parent_id):
+            conn.close()
+            return jsonify({"error": "Parent record not found."}), 404
+        cursor.execute("""
+            INSERT INTO WO_Images
+                (ParentType, ParentID, Stage, ImageData, ContentType, FileName, UploadedBy)
+            OUTPUT INSERTED.ImageID
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """, (parent_type, parent_id, stage, raw, content_type, file_name, user))
+        img_id = cursor.fetchone()[0]
+        _log_activity(cursor, parent_type, parent_id, "image_added",
+                      f"{stage.capitalize()} photo added", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": img_id})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/images/<int:image_id>")
+@api_login_required
+def api_image_get(image_id):
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT ImageData, ContentType FROM WO_Images WHERE ImageID = %s",
+            (image_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+    if not row:
+        return jsonify({"error": "Image not found."}), 404
+    data = row[0]
+    if isinstance(data, str):
+        data = data.encode("latin-1")
+    return Response(
+        bytes(data),
+        mimetype=(row[1] or "image/jpeg"),
+        headers={"Cache-Control": "private, max-age=86400"},
+    )
+
+
+@workorders_bp.route("/images/<int:image_id>", methods=["DELETE"])
+@api_login_required
+def api_image_delete(image_id):
+    user = get_current_user()
+    role = get_role(user)
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT ParentType, ParentID, UploadedBy FROM WO_Images WHERE ImageID = %s",
+            (image_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Image not found."}), 404
+        if role not in MANAGER_ROLES and (row[2] or "").lower() != user:
+            conn.close()
+            return jsonify({"error": "You can only delete photos you uploaded."}), 403
+        cursor.execute("DELETE FROM WO_Images WHERE ImageID = %s", (image_id,))
+        _log_activity(cursor, row[0], row[1], "image_removed", "Photo removed", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {str(e)}"}), 500

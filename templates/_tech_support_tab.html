@@ -212,6 +212,35 @@
     .ts-oneoff .later  { background: #fef3c7; color: #92400e; }
     .ts-oneoff .close  { background: #15803d; color: white; }
 
+    /* Combobox (typeahead / searchable dropdown) */
+    .ts-cbx { position: relative; }
+    .ts-cbx input {
+        width: 100%; padding: 8px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+        font-family: inherit; font-size: 0.88rem;
+    }
+    .ts-cbx .picked {
+        display: flex; gap: 8px; align-items: center;
+        padding: 7px 10px; background: #f0fdf4; border: 1px solid #bbf7d0;
+        border-radius: 6px; font-size: 0.86rem; color: #15803d;
+    }
+    .ts-cbx .picked .clr {
+        background: #15803d; color: white; border: none; padding: 2px 8px;
+        border-radius: 4px; font-size: 0.74rem; font-weight: 700; cursor: pointer;
+    }
+    .ts-cbx-list {
+        display: none; position: absolute; top: 100%; left: 0; right: 0; z-index: 50;
+        background: white; border: 1px solid #d1d5db; border-radius: 6px;
+        max-height: 220px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        margin-top: 2px;
+    }
+    .ts-cbx-list.open { display: block; }
+    .ts-cbx-opt {
+        padding: 7px 11px; cursor: pointer; font-size: 0.86rem; border-bottom: 1px solid #f3f4f6;
+    }
+    .ts-cbx-opt:hover, .ts-cbx-opt.hover { background: #eff6ff; }
+    .ts-cbx-opt .meta { font-size: 0.72rem; color: #6b7280; margin-top: 2px; }
+    .ts-cbx-empty { padding: 10px 11px; color: #9ca3af; font-size: 0.84rem; }
+
     /* Create-WO modal (reuses .ts-prompt-box pattern, bigger) */
     .ts-wo-modal {
         display: none; position: fixed; inset: 0; background: rgba(17,24,39,0.6);
@@ -876,17 +905,16 @@
           +   '<div class="fld"><label>Customer urgency</label><input type="text" readonly value="' + esc(c.perceived_urgency_label) + '"></div>'
           + '</div>'
           + '<div class="fld"><label>Priority</label><select id="tsWOPriority"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>'
-          + '<div class="ts-wo-kb" id="tsWOKBPanel" style="display:block">'
-          +   '<div style="font-size:0.74rem;font-weight:700;text-transform:uppercase;color:#1e40af;letter-spacing:0.05em;margin-bottom:6px">📖 Knowledge Base — attach one to this WO (driver will see it)</div>'
-          +   '<input type="search" id="tsWOKBFilter" placeholder="Search KB titles…" oninput="window.__tsKBRender()" style="width:100%;padding:6px 9px;border:1px solid #bfdbfe;border-radius:5px;font-size:0.82rem;margin-bottom:6px">'
-          +   '<div id="tsWOKBList" style="max-height:240px;overflow-y:auto"><div class="ts-wo-kb-empty">Loading KB…</div></div>'
+          + '<div class="fld">'
+          +   '<label>📖 Reference KB to attach (optional — driver sees this on the WO)</label>'
+          +   '<div id="tsWOKBCbx"></div>'
           + '</div>'
           + '<div class="fld"><label>Diagnosis</label><textarea id="tsWODiag" placeholder="What you think is wrong"></textarea></div>'
           + '<div class="fld"><label>Proposed fix</label><textarea id="tsWOFix" placeholder="What the operator should do"></textarea></div>'
           + '<div class="fld"><label>Notes (internal)</label><textarea id="tsWONotes" placeholder="Anything else"></textarea></div>'
           + '<div class="fld"><label>Assigned to (technician)</label>'
-          +   '<select id="tsWOAssigned"><option value="">— Loading technicians… —</option></select>'
-          +   '<div style="font-size:0.74rem;color:#6b7280;margin-top:4px">Pulled from AAD Operator role. <a href="#" onclick="window.__tsRefreshTechs();return false;">Refresh</a></div>'
+          +   '<div id="tsWOAssignedCbx"></div>'
+          +   '<div style="font-size:0.74rem;color:#6b7280;margin-top:4px">Pulled from AAD Operator role. <a href="#" onclick="window.__tsRefreshTechs();return false;">Refresh list</a></div>'
           + '</div>'
           + '<div class="fld">'
           +   '<label>Tickbox checklist (operator works through these)</label>'
@@ -905,94 +933,147 @@
         state.draftComplaint = null;
     };
 
-    // ── Technician dropdown (AAD-backed) ──
-    function loadTechniciansInto(selectEl, currentValue){
+    // ── Technician picker (AAD-backed combobox) ──
+    function loadTechniciansInto(currentValue){
+        var host = document.getElementById('tsWOAssignedCbx');
+        if(!host) return;
         api('/api/wo/technicians').then(function(d){
             var techs = (d && d.technicians) || [];
             var apiErr = d && d.error;
-            var opts = '<option value="">— Unassigned —</option>';
-            if(!techs.length){
-                if(apiErr){
-                    opts += '<option value="" disabled>⚠ ' + esc(apiErr) + '</option>';
-                } else {
-                    opts += '<option value="" disabled>(no users with Operator role found — check AAD assignments)</option>';
-                }
-            } else {
-                opts += techs.map(function(t){
-                    var selected = (currentValue || '').toLowerCase() === t.email.toLowerCase() ? ' selected' : '';
-                    return '<option value="' + esc(t.email) + '"' + selected + '>' + esc(t.display_name) + ' &lt;' + esc(t.email) + '&gt;</option>';
-                }).join('');
+            if(apiErr && !techs.length){
+                host.innerHTML = '<div style="color:#b91c1c;font-size:0.82rem">⚠ ' + esc(apiErr) + '</div>';
+                return;
             }
-            selectEl.innerHTML = opts;
+            mountCombobox(host,
+                techs.map(function(t){
+                    return { value: t.email, label: t.display_name, sublabel: t.email };
+                }),
+                techs.length ? 'Type technician name or email…' : 'No Operator-role users in AAD',
+                currentValue,
+                function(){ /* selected; value is host._chosen */ }
+            );
         }).catch(function(e){
-            selectEl.innerHTML = '<option value="">⚠ ' + esc(e.message) + '</option>';
+            host.innerHTML = '<div style="color:#b91c1c;font-size:0.82rem">⚠ ' + esc(e.message) + '</div>';
         });
     }
-    // Call after the form is rendered
+    // Wrap renderCreateWOForm to also load technicians
     var _origRenderCreateWOForm = renderCreateWOForm;
     renderCreateWOForm = function(c){
         _origRenderCreateWOForm(c);
-        loadTechniciansInto(document.getElementById('tsWOAssigned'), null);
+        loadTechniciansInto(null);
     };
 
     window.__tsRefreshTechs = function(){
         postJSON('/api/wo/technicians/refresh', {}).then(function(){
-            var sel = document.getElementById('tsWOAssigned');
-            if(sel) loadTechniciansInto(sel, sel.value);
+            var host = document.getElementById('tsWOAssignedCbx');
+            loadTechniciansInto(host && host._chosen);
         }).catch(function(){});
     };
 
+    // ── Generic combobox (typeahead) helper ──
+    // host: DOM element to render into
+    // items: [{value, label, sublabel?}]
+    // placeholder: text
+    // onChange: function(value|null)
+    function mountCombobox(host, items, placeholder, currentValue, onChange){
+        host._items   = items || [];
+        host._chosen  = currentValue || null;
+        host._onChange = onChange;
+        host._placeholder = placeholder;
+        renderCombobox(host);
+    }
+    function renderCombobox(host){
+        var chosenItem = host._chosen
+            ? host._items.find(function(i){ return i.value === host._chosen; })
+            : null;
+        if(chosenItem){
+            host.innerHTML = ''
+              + '<div class="ts-cbx"><div class="picked">'
+              +   '<span style="flex:1">✓ ' + esc(chosenItem.label) + '</span>'
+              +   '<button class="clr" onclick="window.__tsCbxClear(\'' + host.id + '\')">Clear</button>'
+              + '</div></div>';
+        } else {
+            host.innerHTML = ''
+              + '<div class="ts-cbx">'
+              +   '<input type="text" autocomplete="off" placeholder="' + esc(host._placeholder || 'Type to search…') + '"'
+              +     ' oninput="window.__tsCbxFilter(\'' + host.id + '\', this.value)"'
+              +     ' onfocus="window.__tsCbxFilter(\'' + host.id + '\', this.value)"'
+              +     ' onblur="setTimeout(function(){window.__tsCbxBlur(\'' + host.id + '\');}, 150)">'
+              +   '<div class="ts-cbx-list" id="' + host.id + '_list"></div>'
+              + '</div>';
+        }
+    }
+    window.__tsCbxFilter = function(hostId, q){
+        var host = document.getElementById(hostId);
+        if(!host) return;
+        var ql = (q || '').toLowerCase();
+        var matches = host._items.filter(function(it){
+            return !ql || (it.label || '').toLowerCase().indexOf(ql) >= 0
+                       || (it.sublabel || '').toLowerCase().indexOf(ql) >= 0;
+        }).slice(0, 20);
+        var list = document.getElementById(hostId + '_list');
+        if(!matches.length){
+            list.innerHTML = '<div class="ts-cbx-empty">' + (host._items.length ? 'No matches.' : 'No items available.') + '</div>';
+        } else {
+            list.innerHTML = matches.map(function(it){
+                return ''
+                  + '<div class="ts-cbx-opt" onmousedown="window.__tsCbxPick(\'' + hostId + '\', \'' + esc(String(it.value)) + '\')">'
+                  +   '<div>' + esc(it.label) + '</div>'
+                  +   (it.sublabel ? '<div class="meta">' + esc(it.sublabel) + '</div>' : '')
+                  + '</div>';
+            }).join('');
+        }
+        list.classList.add('open');
+    };
+    window.__tsCbxBlur = function(hostId){
+        var list = document.getElementById(hostId + '_list');
+        if(list) list.classList.remove('open');
+    };
+    window.__tsCbxPick = function(hostId, value){
+        var host = document.getElementById(hostId);
+        if(!host) return;
+        // Coerce to int when item.value is numeric
+        var match = host._items.find(function(i){ return String(i.value) === String(value); });
+        host._chosen = match ? match.value : value;
+        renderCombobox(host);
+        if(typeof host._onChange === 'function') host._onChange(host._chosen);
+    };
+    window.__tsCbxClear = function(hostId){
+        var host = document.getElementById(hostId);
+        if(!host) return;
+        host._chosen = null;
+        renderCombobox(host);
+        if(typeof host._onChange === 'function') host._onChange(null);
+    };
+
+    // ── KB picker uses the combobox ──
     window.__tsKBLookup = function(){
-        // Load ALL KB entries when WO form opens (event code is now system-assigned later).
         api('/api/wo/kb').then(function(arr){
             state.kbSuggestions = arr || [];
-            window.__tsKBRender();
+            var host = document.getElementById('tsWOKBCbx');
+            if(!host) return;
+            mountCombobox(host,
+                state.kbSuggestions.map(function(k){
+                    return {
+                        value: k.id,
+                        label: k.title,
+                        sublabel: (k.event_code ? 'event ' + k.event_code + ' · ' : '')
+                                + 'used ' + k.use_count + 'x · ' + (k.tickboxes || []).length + ' steps',
+                    };
+                }),
+                state.kbSuggestions.length ? 'Type to search KB titles…' : 'No KB entries yet (add them in Manage KB)',
+                state.attachedKBID,
+                function(kbId){ state.attachedKBID = kbId || null; }
+            );
         }).catch(function(e){
-            document.getElementById('tsWOKBList').innerHTML =
-                '<div class="ts-wo-kb-empty">Failed to load KB: ' + esc(e.message) + '</div>';
+            var host = document.getElementById('tsWOKBCbx');
+            if(host) host.innerHTML = '<div style="color:#b91c1c;font-size:0.82rem">Failed to load KB: ' + esc(e.message) + '</div>';
         });
     };
 
-    window.__tsKBRender = function(){
-        var arr = state.kbSuggestions || [];
-        var filt = (document.getElementById('tsWOKBFilter') ? document.getElementById('tsWOKBFilter').value : '').toLowerCase();
-        var rows = arr.filter(function(k){
-            if(!filt) return true;
-            var hay = ((k.title || '') + ' ' + (k.symptom || '') + ' ' + (k.diagnostic_confirmation || '') + ' ' + (k.corrective_action || '')).toLowerCase();
-            return hay.indexOf(filt) >= 0;
-        });
-        var list = document.getElementById('tsWOKBList');
-        if(!rows.length){
-            list.innerHTML = '<div class="ts-wo-kb-empty">' + (arr.length === 0 ? 'No KB entries yet. Add some in the Manage KB tab.' : 'No matches.') + '</div>';
-            return;
-        }
-        list.innerHTML = rows.map(function(k){
-            var origIdx = arr.indexOf(k);
-            var attached = state.attachedKBID === k.id;
-            return ''
-              + '<div class="ts-wo-kb-item"' + (attached ? ' style="border-color:#15803d;background:#f0fdf4"' : '') + '>'
-              +   '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center">'
-              +     '<div style="flex:1;cursor:pointer" onclick="window.__tsKBApply(' + origIdx + ')">'
-              +       '<div class="ttl">' + esc(k.title) + (attached ? ' ✓' : '') + '</div>'
-              +       '<div class="meta">'
-              +         (k.event_code ? 'event ' + k.event_code + ' · ' : '')
-              +         'used ' + k.use_count + 'x · ' + (k.tickboxes||[]).length + ' tickboxes'
-              +       '</div>'
-              +     '</div>'
-              +     '<button onclick="window.__tsKBAttach(' + origIdx + ')" style="padding:4px 10px;border-radius:5px;border:1px solid ' + (attached ? '#15803d;background:#15803d;color:white' : '#cbd5e1;background:white;color:#374151') + ';font-size:0.74rem;font-weight:700;cursor:pointer">'
-              +       (attached ? '✓ Attached' : '📎 Attach to WO')
-              +     '</button>'
-              +   '</div>'
-              + '</div>';
-        }).join('');
-    };
-
-    window.__tsKBAttach = function(idx){
-        var k = (state.kbSuggestions || [])[idx];
-        if(!k) return;
-        state.attachedKBID = (state.attachedKBID === k.id) ? null : k.id;
-        window.__tsKBRender();
-    };
+    // Legacy alias used by older calls
+    window.__tsKBRender = function(){};
+    window.__tsKBAttach = function(){};
 
     window.__tsKBApply = function(idx){
         var k = (state.kbSuggestions || [])[idx];
@@ -1046,6 +1127,11 @@
         ).filter(function(x){ return !!x; });
 
         // Event code: system-default to 800000 (catch-all). Auto-categorization later.
+        var assignedHost = document.getElementById('tsWOAssignedCbx');
+        var assignedEmail = assignedHost && assignedHost._chosen ? assignedHost._chosen : null;
+        var kbHost = document.getElementById('tsWOKBCbx');
+        var attachedKb = kbHost && kbHost._chosen ? kbHost._chosen : (state.attachedKBID || null);
+
         var body = {
             complaint_id:    c.id,
             machine_name:    c.machine_name,
@@ -1053,10 +1139,10 @@
             diagnosis:       document.getElementById('tsWODiag').value.trim()  || null,
             proposed_fix:    document.getElementById('tsWOFix').value.trim()   || null,
             notes:           document.getElementById('tsWONotes').value.trim() || null,
-            assigned_to:     document.getElementById('tsWOAssigned').value.trim() || null,
+            assigned_to:     assignedEmail,
             priority:        parseInt(document.getElementById('tsWOPriority').value, 10),
             event_code:      800000,
-            attached_kb_id:  state.attachedKBID || null,
+            attached_kb_id:  attachedKb,
             tasks:           tickboxes,
         };
         postJSON('/api/wo/joborders', body).then(function(res){

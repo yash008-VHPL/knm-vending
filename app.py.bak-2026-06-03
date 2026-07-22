@@ -31,39 +31,13 @@ def get_current_user():
     return config.DEV_USER_EMAIL.strip().lower() if config.DEV_USER_EMAIL else ""
 
 
-def get_all_roles(email=None):
-    """Return all roles claims for the signed-in user. May contain duplicates
-    or empties; caller can clean as needed."""
-    out = []
+def get_role(email=None):
     principal = _decode_principal()
     if principal:
         for claim in principal.get("claims", []):
             if claim.get("typ") == "roles":
-                v = (claim.get("val") or "").strip().lower()
-                if v and v not in out:
-                    out.append(v)
-    if not out and config.DEV_ROLE:
-        out = [config.DEV_ROLE.strip().lower()]
-    return out
-
-
-def get_role(email=None):
-    """Return the active role for the current request.
-    Honors a 'knm_active_role' cookie ONLY if its value is among the user's
-    actual role claims; otherwise falls back to the first claim.
-    """
-    roles = get_all_roles(email)
-    if not roles:
-        return None
-    # Cookie-based override for multi-role users
-    try:
-        wanted = (request.cookies.get("knm_active_role") or "").strip().lower()
-    except RuntimeError:
-        # No request context (e.g. unit tests); ignore cookie
-        wanted = ""
-    if wanted and wanted in roles:
-        return wanted
-    return roles[0]
+                return claim.get("val", "").strip().lower()
+    return config.DEV_ROLE.strip().lower() if config.DEV_ROLE else None
 
 
 def login_required(f):
@@ -121,91 +95,6 @@ def from_ole_date(ole_value):
         return None
 
 
-# Singapore wall-clock (UTC+8) is the time-base of vend [Date Time] OLE floats.
-# Movement/admin events happen "now" — convert now→SGT→OLE so history cutoffs are
-# directly comparable to vend times. (See migration_location_history_*.sql.)
-SGT_OFFSET = timedelta(hours=8)
-
-def now_sgt_ole():
-    return to_ole_date(datetime.utcnow() + SGT_OFFSET)
-
-
-def log_deletion(cursor, entity_type, entity_key, summary, snapshot, reversible, user):
-    """Record a deletion in WO_DeletedLog for audit + potential reversal. `snapshot`
-    is a JSON-serialisable dict/list capturing the deleted row(s) so it can be
-    restored/reviewed later. Runs on the caller's cursor/transaction so it commits
-    atomically with the delete. Best-effort — never blocks the delete itself."""
-    try:
-        cursor.execute("""
-            INSERT INTO WO_DeletedLog
-                (EntityType, EntityKey, Summary, Snapshot, Reversible, DeletedBy)
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (entity_type,
-              (str(entity_key) if entity_key is not None else None),
-              (summary or "")[:500],
-              (json.dumps(snapshot, default=str) if snapshot is not None else None),
-              (1 if reversible else 0),
-              (user or "system")))
-    except Exception as e:
-        print(f"[log_deletion] skipped for {entity_type}/{entity_key}: {e}")
-
-
-def mlh_record_change(cursor, machine_code, new_name, lat, lon, source,
-                      decommission=False, at_ole=None):
-    """Append an effective-dated location change to MachineLocationHistory so the
-    admin paths stay in sync with movement orders (no silent history gaps).
-
-    Closes the machine's current OPEN interval at `at_ole` (now, SGT) and — unless
-    decommissioning — opens a new open interval for `new_name`. Idempotent-ish: a
-    no-op name change (same name already open) is skipped. Best-effort: if the
-    history table does not exist yet the caller's main write still succeeds.
-    """
-    code = str(machine_code)
-    cut  = at_ole if at_ole is not None else now_sgt_ole()
-    try:
-        cursor.execute("""
-            SELECT TOP 1 HistoryID, LocationName
-            FROM MachineLocationHistory
-            WHERE MachineCode = %s AND ValidToOle IS NULL
-            ORDER BY ValidFromOle DESC
-        """, (code,))
-        cur_open = cursor.fetchone()
-        if not decommission and cur_open and cur_open[1] == new_name:
-            return  # already current — nothing to record
-        if cur_open:
-            cursor.execute(
-                "UPDATE MachineLocationHistory SET ValidToOle=%s WHERE HistoryID=%s",
-                (cut, cur_open[0]),
-            )
-        if not decommission:
-            cursor.execute("""
-                INSERT INTO MachineLocationHistory
-                    (MachineCode, LocationName, Latitude, Longitude, ValidFromOle, ValidToOle, Source)
-                VALUES (%s, %s, %s, %s, %s, NULL, %s)
-            """, (code, new_name, lat, lon, cut, source))
-    except Exception as e:
-        # history is additive; never block the primary MachineLookup write
-        print(f"[mlh_record_change] skipped for {code}: {e}")
-
-
-def mlh_rename_open(cursor, machine_code, new_name, lat, lon):
-    """RENAME semantics: the machine did NOT move — the label for its current
-    site was corrected/changed. Rewrites the OPEN interval's name in place so
-    history stays continuous (no fake cutover; searches by the new name span
-    the whole stay). Returns the number of rows updated (0 = no open interval).
-    """
-    try:
-        cursor.execute("""
-            UPDATE MachineLocationHistory
-            SET LocationName = %s, Latitude = %s, Longitude = %s
-            WHERE MachineCode = %s AND ValidToOle IS NULL
-        """, (new_name, lat, lon, str(machine_code)))
-        return cursor.rowcount
-    except Exception as e:
-        print(f"[mlh_rename_open] skipped for {machine_code}: {e}")
-        return 0
-
-
 def get_connection():
     return pymssql.connect(
         server=config.DB_SERVER,
@@ -239,40 +128,6 @@ def init_db():
                 ALTER TABLE MachineLookup ADD [{col}] {dtype} NULL
             """)
             conn.commit()
-        # Canonical de-duplicated vend feed. The machines/gateway sometimes write the
-        # same physical vend more than once — occasionally under a DIFFERENT event
-        # code at the exact same instant — so dedup keys on (machine, timestamp)
-        # ONLY, never on the event code. One machine cannot dispense two drinks in
-        # the same ~0.1s tick. ORDER BY [Event Code] makes the surviving row
-        # deterministic. dbo.VendEvents is the canonical reference for ad-hoc /
-        # reporting SQL; the app's hot-path queries embed the SAME dedup inline
-        # (with date filters inside the window subquery) so predicates apply
-        # before the window function.
-        cursor.execute("""
-            IF NOT EXISTS (SELECT 1 FROM sys.indexes
-                           WHERE name = 'IX_MasterData_Machine_Time'
-                             AND object_id = OBJECT_ID('[MasterData Table]'))
-            CREATE NONCLUSTERED INDEX IX_MasterData_Machine_Time
-                ON [MasterData Table] ([Machine Code], [Date Time])
-                INCLUDE ([Event Code])
-        """)
-        conn.commit()
-        cursor.execute("""
-            CREATE OR ALTER VIEW dbo.VendEvents AS
-            SELECT [Machine Code], [Event Code], [Date Time]
-            FROM (
-                SELECT [Machine Code], [Event Code], [Date Time],
-                       ROW_NUMBER() OVER (
-                           PARTITION BY [Machine Code], CAST([Date Time] AS FLOAT)
-                           ORDER BY [Event Code] ASC
-                       ) AS _rn
-                FROM [MasterData Table]
-                WHERE LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-            ) v
-            WHERE _rn = 1
-        """)
-        conn.commit()
         conn.close()
     except Exception as e:
         print(f"[init_db] Warning: {e}")
@@ -415,10 +270,10 @@ def seed_locations():
                     "SELECT COUNT(*) FROM MachineLookup WHERE MachineCode = %s", (code,)
                 )
                 if cursor.fetchone()[0]:
-                    # Machine already exists — NEVER overwrite from the static seed
-                    # list. (The old UPDATE re-applied 2026-era names/coords on every
-                    # deploy, silently reverting renames and completed moves.)
-                    pass
+                    cursor.execute(
+                        "UPDATE MachineLookup SET MachineName=%s, Longitude=%s, Latitude=%s WHERE MachineCode=%s",
+                        (name, lon, lat, code),
+                    )
                 else:
                     cursor.execute(
                         "INSERT INTO MachineLookup (MachineCode, MachineName, Longitude, Latitude) VALUES (%s, %s, %s, %s)",
@@ -595,31 +450,7 @@ def logout():
 @login_required
 def index():
     email = get_current_user()
-    return render_template(
-        "index.html",
-        role=get_role(email),
-        roles=get_all_roles(email),
-        username=email,
-    )
-
-
-@app.route("/api/switch-role/<path:new_role>")
-@login_required
-def switch_role(new_role):
-    """Set the knm_active_role cookie if new_role is one of the user's actual
-    role claims. Then redirect back to '/' so the page re-renders."""
-    email = get_current_user()
-    roles = get_all_roles(email)
-    new_role = (new_role or "").strip().lower()
-    if new_role not in roles:
-        return jsonify({"error": "You don't have that role."}), 403
-    resp = redirect("/")
-    resp.set_cookie(
-        "knm_active_role", new_role,
-        max_age=60 * 60 * 24 * 7,   # 7 days
-        httponly=False, samesite="Lax",
-    )
-    return resp
+    return render_template("index.html", role=get_role(email), username=email)
 
 
 # ── Locations ──────────────────────────────────────────────────────────────────
@@ -633,7 +464,6 @@ def get_locations():
         cursor.execute("""
             SELECT MachineName, MachineCode, Latitude, Longitude
             FROM MachineLookup
-            WHERE ISNULL(IsActive, 1) = 1
             ORDER BY MachineName
         """)
         rows = cursor.fetchall()
@@ -648,44 +478,14 @@ def get_locations():
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
-@app.route("/api/location-names")
-@login_required
-def get_location_names():
-    """Distinct location names for the Sales/Transactions location filter — every
-    name a machine has EVER been at (from history) plus current names, so past
-    locations remain selectable after a relocation. Falls back to MachineLookup
-    if the history table does not exist yet."""
-    try:
-        conn = get_connection()
-        cursor = conn.cursor()
-        try:
-            cursor.execute("""
-                SELECT DISTINCT LocationName FROM MachineLocationHistory
-                WHERE LocationName IS NOT NULL AND LocationName <> '(decommissioned)'
-                UNION
-                SELECT DISTINCT MachineName FROM MachineLookup WHERE MachineName IS NOT NULL
-                ORDER BY LocationName
-            """)
-        except Exception:
-            # history table not migrated yet → current names only
-            conn.rollback() if hasattr(conn, "rollback") else None
-            cursor.execute("SELECT DISTINCT MachineName FROM MachineLookup WHERE MachineName IS NOT NULL ORDER BY MachineName")
-        names = [r[0] for r in cursor.fetchall()]
-        conn.close()
-        return jsonify(names)
-    except Exception as e:
-        return jsonify({"error": f"Database error: {str(e)}"}), 500
-
-
 # ── Sales ──────────────────────────────────────────────────────────────────────
 
 @app.route("/api/dispenses")
 @login_required
 def get_dispenses():
-    start_str = request.args.get("start",    "").strip()
-    end_str   = request.args.get("end",      "").strip()
-    machine   = request.args.get("machine",  "").strip()
-    location  = request.args.get("location", "").strip()
+    start_str = request.args.get("start",   "").strip()
+    end_str   = request.args.get("end",     "").strip()
+    machine   = request.args.get("machine", "").strip()
 
     if not start_str or not end_str:
         return jsonify({"error": "Please provide both a start and end datetime."}), 400
@@ -702,52 +502,14 @@ def get_dispenses():
     start_ole = to_ole_date(start_dt)
     end_ole   = to_ole_date(end_dt)
 
-    params = []
-    machine_filter = ""
-    if machine:
-        machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s"
-        params.append(machine)
-    location_join   = ""
-    location_filter = ""
-    if location:
-        location_join = """
-        LEFT JOIN MachineLookup ml
-            ON CAST(ml.MachineCode AS NVARCHAR(50)) = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-        OUTER APPLY (
-            SELECT TOP 1 h.LocationName
-            FROM MachineLocationHistory h
-            WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-              AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
-              AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
-            ORDER BY h.ValidFromOle DESC
-        ) loc"""
-        # Fall back to the CURRENT MachineLookup name when no history interval
-        # covers the vend (machine added without a history row) — otherwise those
-        # machines silently vanish from location-filtered views.
-        location_filter = "AND COALESCE(loc.LocationName, ml.MachineName) = %s"
-        params.append(location)
+    machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s" if machine else ""
 
     query = f"""
         SELECT
             mdt.[Event Code]    AS EventCode,
             mc.EventName        AS SKUName,
             COUNT(*)            AS DispenseCount
-        FROM (
-            SELECT [Machine Code], [Event Code], [Date Time]
-            FROM (
-                SELECT [Machine Code], [Event Code], [Date Time],
-                       ROW_NUMBER() OVER (
-                           PARTITION BY [Machine Code], CAST([Date Time] AS FLOAT)
-                           ORDER BY [Event Code] ASC
-                       ) AS _rn
-                FROM [MasterData Table]
-                WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
-                  AND CAST([Date Time] AS FLOAT) <= {end_ole}
-                  AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-            ) _d
-            WHERE _d._rn = 1
-        ) mdt
+        FROM [MasterData Table] mdt
         INNER JOIN (
             SELECT ItemCode,
                 COALESCE(
@@ -757,16 +519,15 @@ def get_dispenses():
             FROM MasterCode
             GROUP BY ItemCode
         ) mc ON mdt.[Event Code] = mc.ItemCode
-        {location_join}
         WHERE CAST(mdt.[Date Time] AS float) >= {start_ole}
           AND CAST(mdt.[Date Time] AS float) <= {end_ole}
+          AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
           {machine_filter}
-          {location_filter}
         GROUP BY mdt.[Event Code], mc.EventName
         ORDER BY DispenseCount DESC
     """
 
-    params = tuple(params)
+    params = (machine,) if machine else ()
 
     try:
         conn = get_connection()
@@ -785,16 +546,10 @@ def get_dispenses():
 @app.route("/api/transactions")
 @login_required
 def get_transactions():
-    """Individual vend events in reverse chronological order.
-
-    Location is resolved PER VEND from MachineLocationHistory (the location that
-    was live at vend time), so a relocation is a sharp cutoff with no fan-out.
-    Filter by `location` (location name, preferred) or legacy `machine` (code).
-    """
-    start_str = request.args.get("start",    "").strip()
-    end_str   = request.args.get("end",      "").strip()
-    machine   = request.args.get("machine",  "").strip()
-    location  = request.args.get("location", "").strip()
+    """Individual vend events in reverse chronological order."""
+    start_str = request.args.get("start",   "").strip()
+    end_str   = request.args.get("end",     "").strip()
+    machine   = request.args.get("machine", "").strip()
 
     if not start_str or not end_str:
         return jsonify({"error": "Please provide both a start and end datetime."}), 400
@@ -811,41 +566,14 @@ def get_transactions():
     start_ole = to_ole_date(start_dt)
     end_ole   = to_ole_date(end_dt)
 
-    # Build filters + ordered params. start/end OLE are interpolated (numeric,
-    # not user-supplied); machine/location are parameterised.
-    params = []
-    machine_filter = ""
-    if machine:
-        machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s"
-        params.append(machine)
-    location_filter = ""
-    if location:
-        # filter on the RESOLVED location name (post per-vend resolution)
-        location_filter = "AND COALESCE(loc.LocationName, ml.MachineName) = %s"
-        params.append(location)
+    machine_filter = "AND CAST(mdt.[Machine Code] AS NVARCHAR(50)) = %s" if machine else ""
 
     query = f"""
         SELECT TOP 2000
             CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
             mc.EventName                   AS ItemName,
-            COALESCE(loc.LocationName, ml.MachineName,
-                     CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
-        FROM (
-            SELECT [Machine Code], [Event Code], [Date Time]
-            FROM (
-                SELECT [Machine Code], [Event Code], [Date Time],
-                       ROW_NUMBER() OVER (
-                           PARTITION BY [Machine Code], CAST([Date Time] AS FLOAT)
-                           ORDER BY [Event Code] ASC
-                       ) AS _rn
-                FROM [MasterData Table]
-                WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
-                  AND CAST([Date Time] AS FLOAT) <= {end_ole}
-                  AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-            ) _d
-            WHERE _d._rn = 1
-        ) mdt
+            ISNULL(ml.MachineName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
+        FROM [MasterData Table] mdt
         INNER JOIN (
             SELECT ItemCode,
                 COALESCE(
@@ -856,23 +584,16 @@ def get_transactions():
             GROUP BY ItemCode
         ) mc ON mdt.[Event Code] = mc.ItemCode
         LEFT JOIN MachineLookup ml
-            ON CAST(ml.MachineCode AS NVARCHAR(50)) = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-        OUTER APPLY (
-            SELECT TOP 1 h.LocationName
-            FROM MachineLocationHistory h
-            WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-              AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
-              AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
-            ORDER BY h.ValidFromOle DESC
-        ) loc
+            ON CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
         WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
           AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
+          AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+          AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
           {machine_filter}
-          {location_filter}
         ORDER BY mdt.[Date Time] DESC
     """
 
-    params = tuple(params)
+    params = (machine,) if machine else ()
 
     try:
         conn   = get_connection()
@@ -932,15 +653,8 @@ def get_messages():
             mc.EventName                   AS MessageName,
             ISNULL(ml.MachineName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
         FROM [MasterData Table] mdt
-        INNER JOIN (
-            SELECT ItemCode,
-                COALESCE(
-                    MIN(CASE WHEN EventName LIKE '%[a-zA-Z]%' THEN EventName END),
-                    MIN(EventName)
-                ) AS EventName
-            FROM MasterCode
-            GROUP BY ItemCode
-        ) mc ON mdt.[Event Code] = mc.ItemCode
+        INNER JOIN MasterCode mc
+            ON mdt.[Event Code] = mc.ItemCode
         LEFT JOIN MachineLookup ml
             ON CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
         WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
@@ -980,28 +694,23 @@ def get_topups():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        # Single-scan dedup join: one pass over MasterData grouped to distinct
-        # (machine, instant) pairs — de-duplicates replayed vends AND is ~2x
-        # faster than the old per-machine correlated COUNT(*).
         cursor.execute("""
             SELECT
                 ml.MachineName,
                 ml.MachineCode,
                 ml.LastTopupTimestamp,
                 ml.CountBeforeLastTopup,
-                COUNT(v.t) AS VendsSince
+                (
+                    SELECT COUNT(*)
+                    FROM [MasterData Table] mdt
+                    WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
+                      AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+                      AND (
+                          ml.LastTopupTimestamp IS NULL
+                          OR CAST(mdt.[Date Time] AS FLOAT) >= ml.LastTopupTimestamp
+                      )
+                ) AS VendsSince
             FROM MachineLookup ml
-            LEFT JOIN (
-                SELECT CAST([Machine Code] AS NVARCHAR(50)) AS code,
-                       CAST([Date Time] AS FLOAT) AS t
-                FROM [MasterData Table]
-                WHERE LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-                GROUP BY CAST([Machine Code] AS NVARCHAR(50)), CAST([Date Time] AS FLOAT)
-            ) v ON v.code = CAST(ml.MachineCode AS NVARCHAR(50))
-               AND (ml.LastTopupTimestamp IS NULL OR v.t >= ml.LastTopupTimestamp)
-            WHERE ISNULL(ml.IsActive, 1) = 1
-            GROUP BY ml.MachineName, ml.MachineCode, ml.LastTopupTimestamp, ml.CountBeforeLastTopup
             ORDER BY ml.MachineName
         """)
         rows = cursor.fetchall()
@@ -1057,14 +766,14 @@ def log_topup(code):
         # Count vends since the current last topup (to snapshot as CountBeforeLastTopup)
         if current_ole is not None:
             cursor.execute(f"""
-                SELECT COUNT(DISTINCT CAST([Date Time] AS FLOAT)) FROM [MasterData Table]
+                SELECT COUNT(*) FROM [MasterData Table]
                 WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
                   AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6 AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
                   AND CAST([Date Time] AS FLOAT) >= {float(current_ole)}
             """, (code,))
         else:
             cursor.execute("""
-                SELECT COUNT(DISTINCT CAST([Date Time] AS FLOAT)) FROM [MasterData Table]
+                SELECT COUNT(*) FROM [MasterData Table]
                 WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
                   AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6 AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
             """, (code,))
@@ -1102,11 +811,6 @@ def delete_topup(code):
             conn.close()
             return jsonify({"error": "No topup recorded for this machine."}), 400
 
-        cursor.execute("""SELECT MachineName, LastTopupTimestamp, PreviousTopupTimestamp, CountBeforeLastTopup
-                          FROM MachineLookup WHERE MachineCode = %s""", (code,))
-        _t = cursor.fetchone()
-        snap = ({"MachineCode": code, "MachineName": _t[0], "LastTopupTimestamp": _t[1],
-                 "PreviousTopupTimestamp": _t[2], "CountBeforeLastTopup": _t[3]} if _t else None)
         # Revert: LastTopupTimestamp ← PreviousTopupTimestamp, clear the rest
         cursor.execute("""
             UPDATE MachineLookup
@@ -1115,9 +819,6 @@ def delete_topup(code):
                 CountBeforeLastTopup   = 0
             WHERE MachineCode = %s
         """, (code,))
-        log_deletion(cursor, "topup", code,
-                     f"Undid last top-up for {(snap or {}).get('MachineName') or code}",
-                     snap, False, get_current_user())
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -1164,23 +865,21 @@ def plan_dispatch():
                 ml.Latitude,
                 ml.Longitude,
                 ml.LastTopupTimestamp,
-                COUNT(v.t) AS VendsSince
+                (
+                    SELECT COUNT(*)
+                    FROM [MasterData Table] mdt
+                    WHERE CAST(mdt.[Machine Code] AS NVARCHAR(50)) = CAST(ml.MachineCode AS NVARCHAR(50))
+                      AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6 AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+                      AND (
+                          ml.LastTopupTimestamp IS NULL
+                          OR CAST(mdt.[Date Time] AS FLOAT) >= ml.LastTopupTimestamp
+                      )
+                ) AS VendsSince
             FROM MachineLookup ml
-            LEFT JOIN (
-                SELECT CAST([Machine Code] AS NVARCHAR(50)) AS code,
-                       CAST([Date Time] AS FLOAT) AS t
-                FROM [MasterData Table]
-                WHERE LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-                  AND CAST([Machine Code] AS NVARCHAR(50)) IN ({placeholders})
-                GROUP BY CAST([Machine Code] AS NVARCHAR(50)), CAST([Date Time] AS FLOAT)
-            ) v ON v.code = CAST(ml.MachineCode AS NVARCHAR(50))
-               AND (ml.LastTopupTimestamp IS NULL OR v.t >= ml.LastTopupTimestamp)
             WHERE ml.MachineCode IN ({placeholders})
               AND ml.Latitude  IS NOT NULL
               AND ml.Longitude IS NOT NULL
-            GROUP BY ml.MachineCode, ml.MachineName, ml.Latitude, ml.Longitude, ml.LastTopupTimestamp
-        """, tuple(codes) + tuple(codes))
+        """, tuple(codes))
         rows = cursor.fetchall()
         conn.close()
     except Exception as e:
@@ -1273,20 +972,10 @@ def add_location():
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        # UPSERT: never create a second row for an existing MachineCode (that was
-        # the JOIN fan-out / "doubling" bug). Update in place if the code exists.
-        cursor.execute("SELECT COUNT(*) FROM MachineLookup WHERE MachineCode = %s", (code,))
-        if cursor.fetchone()[0]:
-            cursor.execute(
-                "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s, IsActive=1 WHERE MachineCode=%s",
-                (name, lat, lon, code),
-            )
-        else:
-            cursor.execute(
-                "INSERT INTO MachineLookup (MachineName, MachineCode, Latitude, Longitude) VALUES (%s, %s, %s, %s)",
-                (name, code, lat, lon),
-            )
-        mlh_record_change(cursor, code, name, lat, lon, "admin")
+        cursor.execute(
+            "INSERT INTO MachineLookup (MachineName, MachineCode, Latitude, Longitude) VALUES (%s, %s, %s, %s)",
+            (name, code, lat, lon),
+        )
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -1300,8 +989,6 @@ def update_location(code):
     data     = request.get_json()
     name     = (data.get("name")     or "").strip()
     new_code = (data.get("new_code") or "").strip()
-    mode     = (data.get("name_change_mode") or "").strip().lower()   # "rename" | "move"
-    eff_str  = (data.get("effective") or "").strip()                  # move time, SGT "YYYY-MM-DD HH:MM"
     if not name:
         return jsonify({"error": "Location name is required."}), 400
     try:
@@ -1312,53 +999,6 @@ def update_location(code):
     try:
         conn   = get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT MachineName FROM MachineLookup WHERE MachineCode = %s", (code,))
-        row = cursor.fetchone()
-        if not row:
-            conn.close()
-            return jsonify({"error": "Machine not found."}), 404
-        current_name = row[0]
-        # NULL current name = initial labelling, not a site change → rename path.
-        initial_label = (current_name is None)
-        name_changed  = (not initial_label and name != current_name)
-
-        # A name change MUST declare its meaning — this is what keeps location
-        # history honest. RENAME = same physical site, label corrected → the
-        # current stay is relabelled in place, history stays continuous.
-        # MOVE = machine physically relocated → the old name's interval CLOSES
-        # at the move time and the new name's interval OPENS there, so
-        # searching the old location stops at the move and the new one starts.
-        eff_ole = None
-        if name_changed:
-            if mode not in ("rename", "move"):
-                conn.close()
-                return jsonify({"error": (
-                    "Name change requires name_change_mode: 'rename' (same site, "
-                    "label corrected) or 'move' (machine physically relocated).")}), 400
-            if mode == "move":
-                if eff_str:
-                    try:
-                        eff_ole = to_ole_date(datetime.strptime(eff_str, "%Y-%m-%d %H:%M"))
-                    except ValueError:
-                        conn.close()
-                        return jsonify({"error": "effective must be YYYY-MM-DD HH:MM (SGT)."}), 400
-                else:
-                    eff_ole = now_sgt_ole()
-                if eff_ole > now_sgt_ole() + (5.0 / 1440.0):
-                    conn.close()
-                    return jsonify({"error": "Move time cannot be in the future."}), 400
-                cursor.execute("""
-                    SELECT TOP 1 ValidFromOle FROM MachineLocationHistory
-                    WHERE MachineCode = %s AND ValidToOle IS NULL
-                    ORDER BY ValidFromOle DESC
-                """, (code,))
-                open_iv = cursor.fetchone()
-                if open_iv and open_iv[0] is not None and eff_ole <= float(open_iv[0]):
-                    conn.close()
-                    return jsonify({"error": (
-                        "Move time predates the current stay. Use the Machine "
-                        "History card's 'Record a past move' instead.")}), 400
-
         if new_code and new_code != code:
             cursor.execute(
                 "SELECT COUNT(*) FROM MachineLookup WHERE MachineCode = %s", (new_code,)
@@ -1370,27 +1010,11 @@ def update_location(code):
                 "UPDATE MachineLookup SET MachineCode=%s, MachineName=%s, Latitude=%s, Longitude=%s WHERE MachineCode=%s",
                 (new_code, name, lat, lon, code),
             )
-            # carry history forward to the new code
-            cursor.execute(
-                "UPDATE MachineLocationHistory SET MachineCode=%s WHERE MachineCode=%s",
-                (new_code, code),
-            )
-            hist_code = new_code
         else:
             cursor.execute(
                 "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s WHERE MachineCode=%s",
                 (name, lat, lon, code),
             )
-            hist_code = code
-
-        if name_changed and mode == "move":
-            mlh_record_change(cursor, hist_code, name, lat, lon, "admin", at_ole=eff_ole)
-        else:
-            # rename, initial labelling, or unchanged name (coords touch-up):
-            # relabel/refresh the open interval in place — never a cutover.
-            if mlh_rename_open(cursor, hist_code, name, lat, lon) == 0:
-                # no open interval exists — create one (covers new machines)
-                mlh_record_change(cursor, hist_code, name, lat, lon, "admin")
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -1404,20 +1028,10 @@ def delete_location(code):
     try:
         conn   = get_connection()
         cursor = conn.cursor()
-        # snapshot the lookup row for the audit log before we touch anything
-        cursor.execute("SELECT * FROM MachineLookup WHERE MachineCode = %s", (code,))
-        _srow = cursor.fetchone()
-        snap = {c[0]: v for c, v in zip(cursor.description, _srow)} if _srow else None
-        # Close the open history interval (preserve the historical record) BEFORE
-        # removing the lookup row, so past vends still resolve to a location.
-        mlh_record_change(cursor, code, None, None, None, "admin", decommission=True)
         cursor.execute("DELETE FROM MachineLookup WHERE MachineCode = %s", (code,))
         if cursor.rowcount == 0:
             conn.close()
             return jsonify({"error": "Location not found."}), 404
-        log_deletion(cursor, "location", code,
-                     f"Location '{(snap or {}).get('MachineName') or code}' ({code})",
-                     snap, False, get_current_user())
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -1452,43 +1066,16 @@ def internal_vend_counts():
     try:
         conn   = get_connection()
         cursor = conn.cursor()
-        # Per-vend location resolution (site-correct for NETS cross-check): a machine
-        # that moved mid-month splits into one row per (code, location-at-vend-time).
         cursor.execute(f"""
-            SELECT CAST(mdt.[Machine Code] AS NVARCHAR(50)) AS MachineCode,
-                   COALESCE(loc.LocationName, ml.MachineName) AS LocationName,
-                   COUNT(*) AS VendCount
-            FROM (
-                SELECT [Machine Code], [Event Code], [Date Time]
-                FROM (
-                    SELECT [Machine Code], [Event Code], [Date Time],
-                           ROW_NUMBER() OVER (
-                               PARTITION BY [Machine Code], CAST([Date Time] AS FLOAT)
-                               ORDER BY [Event Code] ASC
-                           ) AS _rn
-                    FROM [MasterData Table]
-                    WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
-                      AND CAST([Date Time] AS FLOAT) <= {end_ole}
-                      AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                      AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-                ) _d
-                WHERE _d._rn = 1
-            ) mdt
-            LEFT JOIN MachineLookup ml
-                ON CAST(ml.MachineCode AS NVARCHAR(50)) = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-            OUTER APPLY (
-                SELECT TOP 1 h.LocationName
-                FROM MachineLocationHistory h
-                WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-                  AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
-                  AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
-                ORDER BY h.ValidFromOle DESC
-            ) loc
+            SELECT ml.MachineCode, ml.MachineName, COUNT(*) AS VendCount
+            FROM [MasterData Table] mdt
+            INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
             WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
               AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
-            GROUP BY CAST(mdt.[Machine Code] AS NVARCHAR(50)),
-                     COALESCE(loc.LocationName, ml.MachineName)
-            ORDER BY COALESCE(loc.LocationName, ml.MachineName)
+              AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+              AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+            GROUP BY ml.MachineCode, ml.MachineName
+            ORDER BY ml.MachineName
         """)
         rows = cursor.fetchall()
         conn.close()
@@ -1509,40 +1096,18 @@ def march2026_vends():
         conn   = get_connection()
         cursor = conn.cursor()
         cursor.execute(f"""
-            SELECT CAST(mdt.[Machine Code] AS NVARCHAR(50)) AS MachineCode,
-                   COALESCE(loc.LocationName, ml.MachineName) AS LocationName,
-                   COUNT(*) AS VendCount
-            FROM (
-                SELECT [Machine Code], [Event Code], [Date Time]
-                FROM (
-                    SELECT [Machine Code], [Event Code], [Date Time],
-                           ROW_NUMBER() OVER (
-                               PARTITION BY [Machine Code], CAST([Date Time] AS FLOAT)
-                               ORDER BY [Event Code] ASC
-                           ) AS _rn
-                    FROM [MasterData Table]
-                    WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
-                      AND CAST([Date Time] AS FLOAT) <= {end_ole}
-                      AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                      AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-                ) _d
-                WHERE _d._rn = 1
-            ) mdt
-            LEFT JOIN MachineLookup ml
-                ON CAST(ml.MachineCode AS NVARCHAR(50)) = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-            OUTER APPLY (
-                SELECT TOP 1 h.LocationName
-                FROM MachineLocationHistory h
-                WHERE h.MachineCode = CAST(mdt.[Machine Code] AS NVARCHAR(50))
-                  AND CAST(mdt.[Date Time] AS FLOAT) >= h.ValidFromOle
-                  AND (h.ValidToOle IS NULL OR CAST(mdt.[Date Time] AS FLOAT) < h.ValidToOle)
-                ORDER BY h.ValidFromOle DESC
-            ) loc
+            SELECT
+                ml.MachineCode,
+                ml.MachineName,
+                COUNT(*) AS VendCount
+            FROM [MasterData Table] mdt
+            INNER JOIN MachineLookup ml ON mdt.[Machine Code] = ml.MachineCode
             WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
               AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
-            GROUP BY CAST(mdt.[Machine Code] AS NVARCHAR(50)),
-                     COALESCE(loc.LocationName, ml.MachineName)
-            ORDER BY COALESCE(loc.LocationName, ml.MachineName)
+              AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+              AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+            GROUP BY ml.MachineCode, ml.MachineName
+            ORDER BY ml.MachineName
         """)
         rows = cursor.fetchall()
         conn.close()
@@ -1579,7 +1144,6 @@ def get_heartbeat():
                 END) AS LastErrorEvent
             FROM MachineLookup ml
             LEFT JOIN [MasterData Table] md ON ml.MachineCode = md.[Machine Code]
-            WHERE ISNULL(ml.IsActive, 1) = 1
             GROUP BY ml.MachineName, ml.MachineCode
             ORDER BY ml.MachineName
         """)
@@ -1711,14 +1275,6 @@ try:
     init_workorders_db()
 except Exception as e:
     print(f"[startup] init_workorders_db failed: {e}")
-
-# ── Alpha preview (additive, READ-ONLY) — streamlined UI at /alpha ─────────────
-# Admin-only "Alpha App" tab opens this. Wrapped so it can never break startup.
-try:
-    from alpha_preview import alpha_bp
-    app.register_blueprint(alpha_bp)
-except Exception as e:
-    print(f"[startup] alpha_preview blueprint not loaded: {e}")
 
 
 if __name__ == "__main__":

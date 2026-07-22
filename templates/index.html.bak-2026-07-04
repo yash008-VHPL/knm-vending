@@ -421,10 +421,6 @@
     {% if role == 'admin' %}
     <button class="tab-btn" style="color:#b91c1c" onclick="switchTab('admin_delete', this); if(window.__adInit) window.__adInit();">🗑 Test Cleanup</button>
     {% endif %}
-    {# ── Alpha App: admin only — opens the separate streamlined preview (read-only) ── #}
-    {% if role == 'admin' %}
-    <button class="tab-btn" style="color:#7c3aed" onclick="window.open('/alpha','_blank')">🧪 Alpha App</button>
-    {% endif %}
 </div>
 
 <div class="container">
@@ -1221,8 +1217,6 @@
     }
 
     function startEdit(code, name, lat, lon) {
-        window._origLocName = window._origLocName || {};
-        window._origLocName[code] = name;
         const row      = document.getElementById(`row-${code}`);
         const nameCell = document.getElementById(`name-${code}`);
         const codeCell = document.getElementById(`code-${code}`);
@@ -1246,38 +1240,11 @@
         const lat      = document.getElementById(`edit-lat-${code}`).value.trim();
         const lon      = document.getElementById(`edit-lon-${code}`).value.trim();
         if (!name) { setStatus('Location name cannot be empty.', 'error', 'adminStatus'); return; }
-        // A name change must be declared as a RENAME (same site, label fixed)
-        // or a MOVE (machine physically relocated) so location history stays
-        // correct: a move closes the old location at the move time and opens
-        // the new one there; a rename keeps history continuous.
-        let extra = {};
-        const orig = (window._origLocName || {})[code];
-        if (orig !== undefined && name !== orig) {
-            const isMove = confirm(
-                `Name change: "${orig}" \u2192 "${name}".\n\n` +
-                `Has this machine PHYSICALLY MOVED to a different site?\n\n` +
-                `OK = MOVE \u2014 sales history splits at the move time\n` +
-                `Cancel = RENAME \u2014 same site, label corrected, history stays continuous`);
-            if (isMove) {
-                // default the move time to NOW in SGT regardless of browser TZ
-                const p = n => String(n).padStart(2, '0');
-                const d = new Date(Date.now() + (480 + new Date().getTimezoneOffset()) * 60000);
-                const nowStr = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-                const eff = prompt('When did the move happen? (SGT, YYYY-MM-DD HH:MM)\nLeave as-is if it is happening now.', nowStr);
-                if (eff === null) { setStatus('Save cancelled.', 'error', 'adminStatus'); return; }
-                extra = { name_change_mode: 'move', effective: eff.trim() };
-            } else {
-                if (!confirm(`Confirm RENAME: "${orig}" \u2192 "${name}" at the SAME site.\n\nOK = apply rename\nCancel = abort (no change saved)`)) {
-                    setStatus('Save cancelled.', 'error', 'adminStatus'); return;
-                }
-                extra = { name_change_mode: 'rename' };
-            }
-        }
         try {
             const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, new_code: new_code || null, lat: lat || null, lon: lon || null, ...extra }),
+                body: JSON.stringify({ name, new_code: new_code || null, lat: lat || null, lon: lon || null }),
             });
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }

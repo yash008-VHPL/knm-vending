@@ -123,20 +123,14 @@
 
         select,
         input[type="text"],
-        input[type="search"],
-        input[type="number"],
         input[type="date"],
-        input[type="time"],
-        input[type="datetime-local"] {
-            box-sizing: border-box;
-            height: 40px;               /* fixed so native select / date / time / search all line up */
+        input[type="time"] {
             border: 1px solid #d1d5db;
             border-radius: 6px;
-            padding: 0 12px;
+            padding: 8px 12px;
             font-size: 0.875rem;
             color: #111827;
             background: white;
-            vertical-align: top;        /* consistent baseline when sat side by side */
         }
         select             { min-width: 180px; }
         input[type="text"] { width: 110px; }
@@ -144,11 +138,8 @@
 
         select:focus,
         input[type="text"]:focus,
-        input[type="search"]:focus,
-        input[type="number"]:focus,
         input[type="date"]:focus,
-        input[type="time"]:focus,
-        input[type="datetime-local"]:focus {
+        input[type="time"]:focus {
             outline: none;
             border-color: #1a56db;
             box-shadow: 0 0 0 3px rgba(26,86,219,0.15);
@@ -357,74 +348,21 @@
     </div>
     <div class="header-user">
         <span>{{ username }}</span>
-        {% if roles and roles|length > 1 %}
-        <select onchange="if(this.value){window.location='/api/switch-role/'+encodeURIComponent(this.value);}"
-                style="background:rgba(255,255,255,0.18);color:white;border:1px solid rgba(255,255,255,0.3);border-radius:6px;padding:5px 8px;font-size:0.82rem;font-weight:700;cursor:pointer">
-            {% for r in roles %}
-            <option value="{{ r }}" {% if r == role %}selected{% endif %} style="color:#111827">
-                {% if r == 'admin' %}Admin{% elif r == 'field_manager' %}Field Manager{% elif r == 'operator' %}Technician{% elif r == 'customer_service' %}Customer Service{% elif r == 'dispatch' %}Dispatch{% elif r == 'sales' %}Sales{% else %}{{ r }}{% endif %}
-            </option>
-            {% endfor %}
-        </select>
-        {% else %}
         <span class="role-badge">{{ role }}</span>
-        {% endif %}
         <a href="/.auth/logout?post_logout_redirect_uri=/" class="logout-btn">Sign out</a>
     </div>
 </header>
 
 <div class="tab-bar">
-    {# ── Sales / Messages / Topups / Heartbeat — admin, dispatch, sales, field_manager (heartbeat only for field_manager) ── #}
-    {% if role == 'admin' or role == 'dispatch' or role == 'sales' %}
-    <button class="tab-btn{% if role in ['admin','dispatch','sales'] %} active{% endif %}" onclick="switchTab('sales', this)">Sales</button>
+    <button class="tab-btn active" onclick="switchTab('sales', this)">Sales</button>
     <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
-    {% endif %}
-    {% if role == 'admin' or role == 'dispatch' or role == 'sales' or role == 'field_manager' %}
     <button class="tab-btn"        onclick="switchTab('heartbeat', this)">💓 Heartbeat</button>
-    {% endif %}
-    {# ── Locations: admin, dispatch (full edit), field_manager + customer_service (read-only) ── #}
-    {% if role == 'admin' or role == 'dispatch' or role == 'field_manager' or role == 'customer_service' %}
-    <button class="tab-btn{% if role == 'customer_service' %} active{% endif %}" onclick="switchTab('admin', this)">Locations</button>
-    {% endif %}
     {% if role == 'admin' or role == 'dispatch' %}
+    <button class="tab-btn"        onclick="switchTab('admin', this)">Locations</button>
     <button class="tab-btn"        onclick="switchTab('dispatch', this)">Dispatch</button>
     {% endif %}
-    {# ── Fault Report: everyone except pure operator (operators take WOs, don't file complaints) ── #}
-    {% if role != 'operator' %}
-    <button class="tab-btn"        onclick="switchTab('fault_report', this); if(window.__frInit) window.__frInit();">Fault Report</button>
-    {% endif %}
-    {# ── Work Orders (new PDF-template flow): operator default + admin can inspect ── #}
-    {% if role == 'admin' or role == 'operator' %}
-    <button class="tab-btn{% if role == 'operator' %} active{% endif %}" onclick="switchTab('work_orders', this); if(window.__owoInit) window.__owoInit();">Work Orders</button>
-    {% endif %}
-    {# ── Tech Support: admin + field_manager (triage/review). Default for field_manager. ── #}
-    {% if role == 'admin' or role == 'field_manager' %}
-    <button class="tab-btn{% if role == 'field_manager' %} active{% endif %}" onclick="switchTab('tech_support', this); if(window.__tsInit) window.__tsInit();">Tech Support</button>
-    {% endif %}
-    {# ── Manage KB: admin, field_manager ── #}
-    {% if role == 'admin' or role == 'field_manager' %}
-    <button class="tab-btn"        onclick="switchTab('kb_admin', this); if(window.__kbInit) window.__kbInit();">Manage KB</button>
-    {% endif %}
-    {# ── Movements: admin, field_manager, operator ── #}
-    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <button class="tab-btn"        onclick="switchTab('movements', this); if(window.__mvInit) window.__mvInit();">Movements</button>
-    {% endif %}
-    {# ── Machine History: admin, field_manager, operator (read access per ops manager 2026-06-12) ── #}
-    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <button class="tab-btn"        onclick="switchTab('machine_history', this); if(window.__mhInit) window.__mhInit();">Machine History</button>
-    {% endif %}
-    {% if role == 'admin' or role == 'field_manager' %}
-    <button class="tab-btn"        onclick="switchTab('historic_locations', this); if(window.__hlInit) window.__hlInit();">Historic Locations</button>
-    {% endif %}
-    {# ── Test Cleanup: admin only ── #}
-    {% if role == 'admin' %}
-    <button class="tab-btn" style="color:#b91c1c" onclick="switchTab('admin_delete', this); if(window.__adInit) window.__adInit();">🗑 Test Cleanup</button>
-    {% endif %}
-    {# ── Alpha App: admin only — opens the separate streamlined preview (read-only) ── #}
-    {% if role == 'admin' %}
-    <button class="tab-btn" style="color:#7c3aed" onclick="window.open('/alpha','_blank')">🧪 Alpha App</button>
-    {% endif %}
+    <button class="tab-btn"        onclick="switchTab('workorders', this); if(window.__woInit) window.__woInit();">Work Orders</button>
 </div>
 
 <div class="container">
@@ -432,7 +370,7 @@
     <!-- ══════════════════════════════════════════
          TAB: Sales
     ══════════════════════════════════════════ -->
-    <div id="tab-sales" class="tab-pane{% if role in ['admin','dispatch','sales'] %} active{% endif %}">
+    <div id="tab-sales" class="tab-pane active">
 
         <div class="card">
             <div class="controls">
@@ -728,8 +666,8 @@
     </div><!-- /tab-dispatch -->
     {% endif %}
 
-    {% if role == 'admin' or role == 'dispatch' or role == 'field_manager' or role == 'customer_service' %}
-    <div id="tab-admin" class="tab-pane{% if role == 'customer_service' %} active{% endif %}">
+    {% if role == 'admin' or role == 'dispatch' %}
+    <div id="tab-admin" class="tab-pane">
     <div class="card">
         <div class="card-title">Location Management</div>
         <div id="adminStatus" style="display:none"></div>
@@ -775,48 +713,11 @@
     {% endif %}
 
     <!-- ══════════════════════════════════════════
-         TABS: Fault Report / Tech Support / Manage KB (V2)
+         TAB: Work Orders (added — see workorders.py / _workorders_tab.html)
     ══════════════════════════════════════════ -->
-    {% if role != 'operator' %}
-    <div id="tab-fault_report" class="tab-pane">
-        {% include "_fault_report_tab.html" %}
+    <div id="tab-workorders" class="tab-pane">
+        {% include "_workorders_tab.html" %}
     </div>
-    {% endif %}
-    {% if role == 'admin' or role == 'operator' %}
-    <div id="tab-work_orders" class="tab-pane{% if role == 'operator' %} active{% endif %}">
-        {% include "_operator_work_order_tab.html" %}
-    </div>
-    {% endif %}
-    {% if role == 'admin' or role == 'field_manager' %}
-    <div id="tab-tech_support" class="tab-pane{% if role == 'field_manager' %} active{% endif %}">
-        {% include "_tech_support_tab.html" %}
-    </div>
-    {% endif %}
-    {% if role == 'admin' or role == 'field_manager' %}
-    <div id="tab-kb_admin" class="tab-pane">
-        {% include "_kb_admin_tab.html" %}
-    </div>
-    {% endif %}
-    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <div id="tab-movements" class="tab-pane">
-        {% include "_movements_tab.html" %}
-    </div>
-    {% endif %}
-    {% if role == 'admin' or role == 'field_manager' or role == 'operator' %}
-    <div id="tab-machine_history" class="tab-pane">
-        {% include "_machine_history_tab.html" %}
-    </div>
-    {% endif %}
-    {% if role == 'admin' or role == 'field_manager' %}
-    <div id="tab-historic_locations" class="tab-pane">
-        {% include "_historic_locations_tab.html" %}
-    </div>
-    {% endif %}
-    {% if role == 'admin' %}
-    <div id="tab-admin_delete" class="tab-pane">
-        {% include "_admin_delete_tab.html" %}
-    </div>
-    {% endif %}
 
 </div><!-- /container -->
 
@@ -862,19 +763,18 @@
             const data = await resp.json();
             if (data.error) return;
 
-            // Messages dropdown — still filters by machine code (with "All" option in HTML)
-            {
-                const sel = document.getElementById('msgMachineSelect');
-                if (sel) {
-                    while (sel.options.length > 1) sel.remove(1);
-                    data.forEach(loc => {
-                        const opt = document.createElement('option');
-                        opt.value = loc.code;
-                        opt.textContent = loc.name;
-                        sel.appendChild(opt);
-                    });
-                }
-            }
+            // Sales + Messages dropdowns (with "All" option already in HTML)
+            [['locationSelect', true], ['msgMachineSelect', true]].forEach(([id, hasAll]) => {
+                const sel = document.getElementById(id);
+                if (!sel) return;
+                while (sel.options.length > 1) sel.remove(1);
+                data.forEach(loc => {
+                    const opt = document.createElement('option');
+                    opt.value = loc.code;
+                    opt.textContent = loc.name;
+                    sel.appendChild(opt);
+                });
+            });
 
             // Topup dropdown (no "all" option — one machine required)
             const topupSel = document.getElementById('topupMachineSelect');
@@ -888,32 +788,10 @@
                 });
             }
 
-            if (USER_ROLE === 'admin' || USER_ROLE === 'dispatch' || USER_ROLE === 'customer_service') renderAdminTable(data);
+            if (USER_ROLE === 'admin' || USER_ROLE === 'dispatch') renderAdminTable(data);
         } catch (e) { /* silently ignore */ }
     }
     loadLocations();
-
-    // ── Sales/Transactions location filter: by LOCATION NAME (incl. historical) ──
-    // Vends are attributed per-vend to the location live at vend time, so the
-    // filter must key on location name, not machine code. Includes places a
-    // machine used to be, so past locations remain searchable after a move.
-    async function loadLocationNames() {
-        try {
-            const resp = await fetch('/api/location-names');
-            const names = await resp.json();
-            if (!Array.isArray(names)) return;
-            const sel = document.getElementById('locationSelect');
-            if (!sel) return;
-            while (sel.options.length > 1) sel.remove(1);   // keep "All Locations"
-            names.forEach(n => {
-                const opt = document.createElement('option');
-                opt.value = n;
-                opt.textContent = n;
-                sel.appendChild(opt);
-            });
-        } catch (e) { /* silently ignore */ }
-    }
-    loadLocationNames();
 
     // ══════════════════════════════════════════
     // SALES
@@ -933,9 +811,9 @@
     }
 
     async function searchSales() {
-        const start    = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
-        const end      = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
-        const location = document.getElementById('locationSelect').value;
+        const start   = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
+        const end     = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
+        const machine = document.getElementById('locationSelect').value;
 
         if (!document.getElementById('startDate').value || !document.getElementById('endDate').value) {
             setStatus('Please enter a start and end date.', 'error', 'status');
@@ -950,7 +828,7 @@
 
         try {
             let url = `/api/dispenses?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
-            if (location) url += `&location=${encodeURIComponent(location)}`;
+            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
             const resp = await fetch(url);
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'status'); return; }
@@ -992,9 +870,9 @@
     }
 
     async function searchTransactions() {
-        const start    = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
-        const end      = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
-        const location = document.getElementById('locationSelect').value;
+        const start   = `${document.getElementById('startDate').value} ${document.getElementById('startTime').value}`;
+        const end     = `${document.getElementById('endDate').value} ${document.getElementById('endTime').value}`;
+        const machine = document.getElementById('locationSelect').value;
 
         if (!document.getElementById('startDate').value || !document.getElementById('endDate').value) {
             setStatus('Please enter a start and end date.', 'error', 'status');
@@ -1009,12 +887,12 @@
 
         try {
             let url = `/api/transactions?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
-            if (location) url += `&location=${encodeURIComponent(location)}`;
+            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
             const resp = await fetch(url);
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'status'); return; }
             setStatus('', '', 'status');
-            renderTransactionResults(data.results, data.capped, location);
+            renderTransactionResults(data.results, data.capped, machine);
         } catch (e) {
             setStatus('Could not reach the server.', 'error', 'status');
         } finally {
@@ -1202,12 +1080,10 @@
                 <td id="lon-${esc(loc.code)}">${loc.lon !== null ? loc.lon : ''}</td>
                 <td>
                     <div class="action-cell">
-                        {% if role == 'admin' or role == 'dispatch' %}
                         <button class="btn btn-secondary btn-sm"
                             onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}', '${loc.lat ?? ''}', '${loc.lon ?? ''}')">
                             Edit
                         </button>
-                        {% endif %}
                         {% if role == 'admin' %}
                         <button class="btn btn-danger btn-sm"
                             onclick="deleteLocation('${esc(loc.code)}', '${esc(loc.name)}')">
@@ -1221,8 +1097,6 @@
     }
 
     function startEdit(code, name, lat, lon) {
-        window._origLocName = window._origLocName || {};
-        window._origLocName[code] = name;
         const row      = document.getElementById(`row-${code}`);
         const nameCell = document.getElementById(`name-${code}`);
         const codeCell = document.getElementById(`code-${code}`);
@@ -1246,38 +1120,11 @@
         const lat      = document.getElementById(`edit-lat-${code}`).value.trim();
         const lon      = document.getElementById(`edit-lon-${code}`).value.trim();
         if (!name) { setStatus('Location name cannot be empty.', 'error', 'adminStatus'); return; }
-        // A name change must be declared as a RENAME (same site, label fixed)
-        // or a MOVE (machine physically relocated) so location history stays
-        // correct: a move closes the old location at the move time and opens
-        // the new one there; a rename keeps history continuous.
-        let extra = {};
-        const orig = (window._origLocName || {})[code];
-        if (orig !== undefined && name !== orig) {
-            const isMove = confirm(
-                `Name change: "${orig}" \u2192 "${name}".\n\n` +
-                `Has this machine PHYSICALLY MOVED to a different site?\n\n` +
-                `OK = MOVE \u2014 sales history splits at the move time\n` +
-                `Cancel = RENAME \u2014 same site, label corrected, history stays continuous`);
-            if (isMove) {
-                // default the move time to NOW in SGT regardless of browser TZ
-                const p = n => String(n).padStart(2, '0');
-                const d = new Date(Date.now() + (480 + new Date().getTimezoneOffset()) * 60000);
-                const nowStr = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-                const eff = prompt('When did the move happen? (SGT, YYYY-MM-DD HH:MM)\nLeave as-is if it is happening now.', nowStr);
-                if (eff === null) { setStatus('Save cancelled.', 'error', 'adminStatus'); return; }
-                extra = { name_change_mode: 'move', effective: eff.trim() };
-            } else {
-                if (!confirm(`Confirm RENAME: "${orig}" \u2192 "${name}" at the SAME site.\n\nOK = apply rename\nCancel = abort (no change saved)`)) {
-                    setStatus('Save cancelled.', 'error', 'adminStatus'); return;
-                }
-                extra = { name_change_mode: 'rename' };
-            }
-        }
         try {
             const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name, new_code: new_code || null, lat: lat || null, lon: lon || null, ...extra }),
+                body: JSON.stringify({ name, new_code: new_code || null, lat: lat || null, lon: lon || null }),
             });
             const data = await resp.json();
             if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }

@@ -196,26 +196,8 @@ def fetch_db_counts(year: int, month: int) -> dict:
     # MachineLocationHistory) so a machine that moved mid-month splits its count
     # across the correct locations — matching NETS, which is physical-site based.
     cursor.execute(f"""
-        SELECT COALESCE(loc.LocationName, ml.MachineName) AS LocationName,
-               COUNT(*) AS VendCount
-        FROM (
-            SELECT [Machine Code], [Event Code], [Date Time]
-            FROM (
-                SELECT [Machine Code], [Event Code], [Date Time],
-                       ROW_NUMBER() OVER (
-                           PARTITION BY [Machine Code], CAST([Date Time] AS FLOAT)
-                           ORDER BY [Event Code] ASC
-                       ) AS _rn
-                FROM [MasterData Table]
-                WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
-                  AND CAST([Date Time] AS FLOAT) <= {end_ole}
-                  AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-                  AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
-            ) _d
-            WHERE _d._rn = 1
-        ) mdt
-        LEFT JOIN MachineLookup ml
-            ON CAST(ml.MachineCode AS NVARCHAR(50)) = CAST(mdt.[Machine Code] AS NVARCHAR(50))
+        SELECT loc.LocationName, COUNT(*) AS VendCount
+        FROM [MasterData Table] mdt
         OUTER APPLY (
             SELECT TOP 1 h.LocationName
             FROM MachineLocationHistory h
@@ -226,8 +208,10 @@ def fetch_db_counts(year: int, month: int) -> dict:
         ) loc
         WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
           AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
-          AND COALESCE(loc.LocationName, ml.MachineName) IS NOT NULL
-        GROUP BY COALESCE(loc.LocationName, ml.MachineName)
+          AND LEN(CAST(mdt.[Event Code] AS NVARCHAR(20))) = 6
+          AND CAST(mdt.[Event Code] AS NVARCHAR(20)) LIKE '1%'
+          AND loc.LocationName IS NOT NULL
+        GROUP BY loc.LocationName
     """)
     rows = cursor.fetchall()
     conn.close()
