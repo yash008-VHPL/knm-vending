@@ -256,7 +256,7 @@ function machineRowsHtml(){const canEdit=["admin","dispatch","field_manager"].in
 function renderMachineList(){const el=document.getElementById("mList");if(el)el.innerHTML=machineRowsHtml();
   const c=document.getElementById("mCount");if(c)c.textContent=machinesFor().length;}
 function renderMachines(){const cur=subActive("machines","active");const canEdit=["admin","dispatch","field_manager"].includes(state.role);
-  return `<div class="screen-h"><div><h2>Machines</h2><div class="crumb">One registry — Locations + Historic Locations + Machine History</div></div>${canEdit&&cur==="active"?'<button class="btn ghost">+ Add machine</button>':''}</div>
+  return `<div class="screen-h"><div><h2>Machines</h2><div class="crumb">One registry — Locations + Historic Locations + Machine History</div></div>${state.role==="admin"&&cur==="active"?'<button class="btn ghost" onclick="openAddMachine()">+ Add machine</button>':''}</div>
     <div class="subnav"><button data-sub="active" class="${cur==='active'?'on':''}">Active (${machines.filter(m=>m.active).length})</button>
       <button data-sub="decom" class="${cur==='decom'?'on':''}">Decommissioned (${machines.filter(m=>!m.active).length})</button></div>
     <input id="mSearch" type="search" placeholder="Search machine name or code…" value="${(state.mq||'').replace(/"/g,'&quot;')}"
@@ -271,6 +271,21 @@ function openMachine(code){const m=mByCode(code);const wos=work.filter(w=>w.mach
     <h3 style="font-size:.92rem;margin:8px 0 8px">History (work + visits)</h3>
     <div class="timeline">${wos.length?wos.map(w=>`<div><b>${w.id} · ${tagTxt(w.type)} · ${w.status}</b>${w.desc}</div>`).join(""):'<div class="meta">No work recorded.</div>'}</div>
     <p class="note">Info / History / status in one drawer. (Edits are preview-only.)</p>`);}
+
+function openAddMachine(){
+  drawer(`<h3>Add machine</h3><p class="note">Registers the machine in the live registry and opens its location history at the current site.</p>
+    <div class="field"><label>Location name (required)</label><input id="am_name" placeholder="e.g. UPS House"></div>
+    <div class="field"><label>Machine code (required)</label><input id="am_code" placeholder="e.g. 54020502"></div>
+    <div class="grid2"><div class="field"><label>Lat</label><input id="am_lat" placeholder="1.3402"></div>
+      <div class="field"><label>Lon</label><input id="am_lon" placeholder="103.8896"></div></div>
+    <button class="btn" onclick="submitAddMachine()">Add machine</button>`);}
+async function submitAddMachine(){
+  const name=($("#am_name").value||"").trim(), code=($("#am_code").value||"").trim();
+  const lat=($("#am_lat").value||"").trim(), lon=($("#am_lon").value||"").trim();
+  if(!name||!code){toast("Location name and machine code are required.");return;}
+  if(!live){toast("Demo mode — backend unreachable, nothing saved.");return;}
+  const r=await api("/api/admin/locations",{method:"POST",body:{name,code,lat:lat||null,lon:lon||null}});
+  if(!r)return; closeDrawer(); await reload(); toast(name+" ("+code+") added");}
 
 /* FLEET */
 function renderFleet(){const cur=subActive("fleet","status");

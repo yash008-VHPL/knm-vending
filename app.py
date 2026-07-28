@@ -931,7 +931,22 @@ def get_messages():
             CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
             mc.EventName                   AS MessageName,
             ISNULL(ml.MachineName, CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
-        FROM [MasterData Table] mdt
+        FROM (
+            -- de-dup replayed events: the gateway sometimes writes the same
+            -- message more than once at the exact same instant (same code).
+            SELECT [Machine Code], [Event Code], [Date Time]
+            FROM (
+                SELECT [Machine Code], [Event Code], [Date Time],
+                       ROW_NUMBER() OVER (
+                           PARTITION BY [Machine Code], CAST([Date Time] AS FLOAT), [Event Code]
+                           ORDER BY (SELECT NULL)
+                       ) AS _rn
+                FROM [MasterData Table]
+                WHERE CAST([Date Time] AS FLOAT) >= {start_ole}
+                  AND CAST([Date Time] AS FLOAT) <= {end_ole}
+            ) _d
+            WHERE _d._rn = 1
+        ) mdt
         INNER JOIN (
             SELECT ItemCode,
                 COALESCE(
