@@ -137,8 +137,33 @@ def _apply_heartbeat(cur, machines):
             machines[c]["status"] = "g"
 
 
+def _apply_vends_since(cur, machines):
+    """Per-machine vend count since last refill (deduped to distinct
+    machine+instant, same rule as the main dashboard). Single native-typed
+    scan (~3-4s) — index-friendly GROUP BY, join via TRY_CAST."""
+    cur.execute("""
+        SELECT ml.MachineCode, COUNT(v.t) AS VendsSince
+        FROM MachineLookup ml
+        LEFT JOIN (
+            SELECT [Machine Code] AS mc, [Date Time] AS t
+            FROM [MasterData Table]
+            WHERE LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
+              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%%'
+            GROUP BY [Machine Code], [Date Time]
+        ) v ON v.mc = TRY_CAST(ml.MachineCode AS INT)
+           AND (ml.LastTopupTimestamp IS NULL OR CAST(v.t AS FLOAT) >= ml.LastTopupTimestamp)
+        WHERE ISNULL(ml.IsActive,1) = 1
+        GROUP BY ml.MachineCode
+    """)
+    for code, n in cur.fetchall():
+        c = str(code)
+        if c in machines:
+            machines[c]["vendsSince"] = int(n)
+
+
 def _fetch_sales(cur):
-    start = _to_ole(datetime.utcnow() - timedelta(days=7))
+    # vend [Date Time] floats are SGT wall-clock — shift now() accordingly
+    start = _to_ole(datetime.utcnow() + timedelta(hours=8) - timedelta(days=7))
     cur.execute("""
         SELECT COUNT(*) FROM (
             SELECT DISTINCT mdt.[Machine Code], CAST(mdt.[Date Time] AS FLOAT) AS t
@@ -234,6 +259,11 @@ def alpha_bootstrap():
         cur = conn.cursor()
         machines = _fetch_machines(cur)
         _apply_heartbeat(cur, machines)
+        try:
+            _apply_vends_since(cur, machines)
+        except Exception as e:
+            import sys
+            print("[alpha] vends-since skipped:", e, file=sys.stderr)
         try:
             sales = _fetch_sales(cur)
         except Exception:

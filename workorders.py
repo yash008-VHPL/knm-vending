@@ -20,7 +20,7 @@ Heartbeat hook deferred per Yash's directive (2026-06-03).
 from __future__ import annotations
 
 from functools import wraps
-from datetime import datetime, timedelta
+from datetime import datetime
 import base64
 import io
 
@@ -2796,16 +2796,12 @@ def _sync_topup(cursor, machine_code):
     if not row:
         return "Machine code not found in vending data — topup not synced."
     current_ole = row[0]
-    # NB: '1%%' — pymssql %-formats the query before sending it, so a literal
-    # '%' MUST be doubled in any statement that also passes parameters.
-    # (This was '1%' and raised TypeError on every call, i.e. delivery
-    #  completion has never actually succeeded. Do not "simplify" it back.)
     if current_ole is not None:
         cursor.execute(f"""
             SELECT COUNT(DISTINCT CAST([Date Time] AS FLOAT)) FROM [MasterData Table]
             WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
               AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%%'
+              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
               AND CAST([Date Time] AS FLOAT) >= {float(current_ole)}
         """, (machine_code,))
     else:
@@ -2813,7 +2809,7 @@ def _sync_topup(cursor, machine_code):
             SELECT COUNT(DISTINCT CAST([Date Time] AS FLOAT)) FROM [MasterData Table]
             WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
               AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%%'
+              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
         """, (machine_code,))
     vends_since = int(cursor.fetchone()[0])
     cursor.execute(f"""
@@ -3197,32 +3193,12 @@ def api_delivery_detail(did):
             conn.close()
             return jsonify({"error": "Delivery order not found."}), 404
         activity = _activity_for(cursor, "deliveryorder", did)
-        # Quantities live in WO_DeliveryOrderLines whenever the order went
-        # through a visit work order. The legacy Item1Qty..Item8Qty columns only
-        # cover the first 8 of 17 catalogue items, so prefer the lines table and
-        # fall back to the legacy columns for pre-visit-era orders.
-        line_items = []
-        try:
-            cursor.execute("""
-                SELECT i.Name, l.QtyOrdered, l.QtyDelivered, i.Unit, i.Content
-                FROM WO_DeliveryOrderLines l
-                INNER JOIN WO_DeliveryItems i ON i.ItemID = l.ItemID
-                WHERE l.DeliveryOrderID = %s
-                ORDER BY i.SortOrder, i.ItemID
-            """, (did,))
-            for n, (name, qo, qd, unit, content) in enumerate(cursor.fetchall(), start=1):
-                line_items.append({"index": n, "label": name, "unit": unit,
-                                   "content": content,
-                                   "quantity": int(qd if qd is not None else (qo or 0)),
-                                   "quantity_ordered": int(qo or 0)})
-        except Exception:
-            line_items = []
         conn.close()
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
-    items = line_items or [{"index": i + 1, "label": DELIVERY_ITEMS[i],
-                            "quantity": int(row[7 + i] or 0)} for i in range(8)]
+    items = [{"index": i + 1, "label": DELIVERY_ITEMS[i],
+              "quantity": int(row[7 + i] or 0)} for i in range(8)]
     return jsonify({
         "id": row[0], "machine_name": row[1], "machine_code": row[2],
         "notes": row[3], "assigned_to": row[4], "priority": row[5],
@@ -3292,7 +3268,7 @@ def api_delivery_complete(did):
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT AssignedTo, MachineCode, RecipientName, Status FROM WO_DeliveryOrders "
+            "SELECT AssignedTo, MachineCode, RecipientName FROM WO_DeliveryOrders "
             "WHERE DeliveryOrderID = %s",
             (did,),
         )
@@ -3300,11 +3276,6 @@ def api_delivery_complete(did):
         if not row:
             conn.close()
             return jsonify({"error": "Delivery order not found."}), 404
-        # Already completed (e.g. signed off via a visit work order) — completing
-        # again would re-run _sync_topup and wipe the top-up baseline.
-        if (row[3] or "").lower() == "completed":
-            conn.close()
-            return jsonify({"error": "This delivery order is already completed."}), 400
         role = get_role(user)
         if role == ROLE_OPERATOR and (row[0] or "").lower() != user:
             conn.close()
@@ -4286,10 +4257,7 @@ def api_visit_start():
     sjo_ids = data.get("service_job_order_ids") or []
     do_id   = data.get("delivery_order_id")
     user = get_current_user()
-    # Visit date is the operator's LOCAL (SGT, UTC+8) day — a 07:00 SGT visit
-    # must not be stamped as yesterday, and reopening a sheet at 08:30 SGT
-    # must reuse the same visit rather than start a new one.
-    today = (datetime.utcnow() + timedelta(hours=8)).date()
+    today = datetime.utcnow().date()
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -4298,63 +4266,25 @@ def api_visit_start():
         mrow = cursor.fetchone()
         machine_name = mrow[0] if mrow else None
 
-        # Reuse an existing UNFINALISED visit for this operator+machine+day instead of
-        # creating a duplicate draft every time the sheet is opened. (Finalised
-        # visits are immutable, so a second trip on the same day starts a new one.)
+        display_id = allocate_display_id(cursor, "VIS")
         cursor.execute("""
-            SELECT TOP 1 VisitID FROM WO_VisitSessions
-            WHERE MachineCode = %s AND OperatorEmail = %s AND VisitDate = %s
-              AND (Status IS NULL OR Status NOT IN ('signed', 'pending_email_signature'))
-            ORDER BY VisitID DESC
-        """, (code, user, today))
-        exist = cursor.fetchone()
-
-        if exist:
-            vid = int(exist[0])
-            if do_id is not None:
-                cursor.execute(
-                    "UPDATE WO_VisitSessions SET LinkedDeliveryOrderID = %s "
-                    "WHERE VisitID = %s AND LinkedDeliveryOrderID IS NULL",
-                    (do_id, vid),
-                )
-        else:
-            display_id = allocate_display_id(cursor, "VIS")
-            cursor.execute("""
-                INSERT INTO WO_VisitSessions
-                    (DisplayID, MachineCode, MachineNameSnap, OperatorEmail,
-                     VisitDate, LinkedDeliveryOrderID)
-                OUTPUT INSERTED.VisitID
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """, (display_id, code, machine_name, user, today, do_id))
-            vid = int(cursor.fetchone()[0])
+            INSERT INTO WO_VisitSessions
+                (DisplayID, MachineCode, MachineNameSnap, OperatorEmail,
+                 VisitDate, LinkedDeliveryOrderID)
+            OUTPUT INSERTED.VisitID
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (display_id, code, machine_name, user, today, do_id))
+        vid = int(cursor.fetchone()[0])
 
         for jid in sjo_ids:
             try:
                 jid_int = int(jid)
             except (TypeError, ValueError):
                 continue
-            # Only link job orders that are genuinely open on THIS machine and
-            # (for non-managers) assigned to the caller — stops a crafted payload
-            # force-closing someone else's work order at finalize.
-            if get_role(user) in MANAGER_ROLES:
-                cursor.execute(
-                    "SELECT 1 FROM WO_JobOrders WHERE JobOrderID=%s "
-                    "AND MachineCode=%s AND StatusCode IN (0,1)",
-                    (jid_int, code),
-                )
-            else:
-                cursor.execute(
-                    "SELECT 1 FROM WO_JobOrders WHERE JobOrderID=%s "
-                    "AND MachineCode=%s AND StatusCode IN (0,1) AND LOWER(AssignedTo)=%s",
-                    (jid_int, code, user.lower()),
-                )
-            if not cursor.fetchone():
-                continue
-            cursor.execute("""
-                IF NOT EXISTS (SELECT 1 FROM WO_VisitSession_JobOrders
-                               WHERE VisitID=%s AND JobOrderID=%s)
-                INSERT INTO WO_VisitSession_JobOrders (VisitID, JobOrderID) VALUES (%s, %s)
-            """, (vid, jid_int, vid, jid_int))
+            cursor.execute(
+                "INSERT INTO WO_VisitSession_JobOrders (VisitID, JobOrderID) VALUES (%s, %s)",
+                (vid, jid_int),
+            )
 
         cursor.execute(_select_visit_sql() + " WHERE VisitID = %s", (vid,))
         row = cursor.fetchone()
@@ -4496,9 +4426,6 @@ def api_visit_update(vid):
                     qty = int(ln.get("qty_delivered") or 0)
                 except (TypeError, ValueError):
                     continue
-                if qty < 0 or qty > 999:
-                    conn.close()
-                    return jsonify({"error": f"Quantity for item {item_id} must be 0-999."}), 400
                 cursor.execute("""
                     UPDATE WO_DeliveryOrderLines SET QtyDelivered = %s
                     WHERE DeliveryOrderID = %s AND ItemID = %s
@@ -4713,8 +4640,6 @@ def api_visit_finalize(vid):
     """
     data = request.get_json(silent=True) or {}
     user = get_current_user()
-    conn = None
-    skipped_job_orders = []
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -4812,69 +4737,28 @@ def api_visit_finalize(vid):
             })
 
         # Transition linked WOs:
-        #   Each linked JobOrder → StatusCode = 2 (pending_review) so manager reviews.
-        #   Re-check it is still open (and still the caller's, for non-managers) —
-        #   it may have been reassigned or closed since the visit was started.
-        may_force = get_role(user) in MANAGER_ROLES
+        #   Each linked JobOrder → StatusCode = 2 (pending_review) so manager reviews
         for jid in visit["linked_job_order_ids"]:
-            if may_force:
-                cursor.execute("""
-                    UPDATE WO_JobOrders
-                    SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
-                    WHERE JobOrderID = %s AND StatusCode IN (0, 1)
-                """, (user, jid))
-            else:
-                cursor.execute("""
-                    UPDATE WO_JobOrders
-                    SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
-                    WHERE JobOrderID = %s AND StatusCode IN (0, 1)
-                      AND LOWER(AssignedTo) = %s
-                """, (user, jid, user.lower()))
-            if cursor.rowcount:
-                _log_activity(cursor, "joborder", jid, "visit_submit",
-                              f"Linked to visit {visit['display_id']}", user)
-            else:
-                skipped_job_orders.append(jid)
-                _log_activity(cursor, "joborder", jid, "visit_submit_skipped",
-                              f"Visit {visit['display_id']} submitted but job order was "
-                              f"no longer open/assigned to {user}", user)
-
-        # Linked DeliveryOrder → completed. The goods physically changed hands
-        # even when the customer was unavailable to sign, so complete it either
-        # way; the visit's own 'pending_email_signature' status is what flags the
-        # manager for sign-off. (Previously this left the DO open forever with no
-        # path to close it.) Guarded on Status <> 'completed' so a second submit
-        # or a manager also hitting /deliveryorders/<id>/complete cannot
-        # double-run _sync_topup and destroy the top-up baseline.
-        if visit["linked_delivery_order_id"]:
+            cursor.execute("""
+                UPDATE WO_JobOrders
+                SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
+                WHERE JobOrderID = %s
+            """, (user, jid))
+            _log_activity(cursor, "joborder", jid, "visit_submit",
+                          f"Linked to visit {visit['display_id']}", user)
+        # Linked DeliveryOrder → status = completed (only if signed; if pending email, mark in flight)
+        if visit["linked_delivery_order_id"] and not cust_unavail:
             cursor.execute("""
                 UPDATE WO_DeliveryOrders
                 SET Status = 'completed', CompletedBy = %s, CompletedAt = SYSUTCDATETIME(),
-                    RecipientName = COALESCE(%s, RecipientName)
-                WHERE DeliveryOrderID = %s AND Status <> 'completed'
+                    RecipientName = %s
+                WHERE DeliveryOrderID = %s
             """, (user, receiving_name, visit["linked_delivery_order_id"]))
-            if cursor.rowcount:
-                _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
-                              "visit_submit",
-                              f"Linked to visit {visit['display_id']}"
-                              + (" (customer unavailable)" if cust_unavail else ""), user)
-                # Mirror /deliveryorders/<id>/complete: keep MachineLookup's refill
-                # clock in step, otherwise "last refill" / "vends since" go stale.
-                if visit["machine_code"]:
-                    topup_note = _sync_topup(cursor, str(visit["machine_code"]))
-                    _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
-                                  "topup_synced", topup_note, user)
+            _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
+                          "visit_submit",
+                          f"Linked to visit {visit['display_id']}", user)
 
-        # Commit the record BEFORE touching SharePoint. The upload is a 60-120s
-        # external HTTP call; doing it inside the transaction held write locks on
-        # MachineLookup / WO_JobOrders / WO_DeliveryOrders for its whole duration.
-        conn.commit()
-        conn.close()
-        conn = None
-
-        # Build PDF + upload to SharePoint (best-effort, own short connection)
-        pdf_ready = False
-        conn2 = None
+        # Build PDF + upload to SharePoint
         try:
             pdf_bytes = _build_visit_pdf(visit, service_wos, None, delivery_items_with_qty)
             now = datetime.utcnow()
@@ -4886,33 +4770,18 @@ def api_visit_finalize(vid):
                 data=pdf_bytes,
                 content_type="application/pdf",
             )
-            conn2 = get_connection()
-            c2 = conn2.cursor()
-            c2.execute(
+            cursor.execute(
                 "UPDATE WO_VisitSessions SET PDFSPItemID = %s, PDFSPWebURL = %s WHERE VisitID = %s",
                 (sp_item_id, web_url, vid),
             )
-            conn2.commit()
-            pdf_ready = True
         except Exception as e:
-            # PDF/SP failure must not lose the signature; log and continue
+            # PDF/SP failure should not block submission; log and continue
             print(f"[visit_finalize] PDF/SP upload failed for visit {vid}: {e}")
-        finally:
-            if conn2 is not None:
-                try:
-                    conn2.close()
-                except Exception:
-                    pass
 
-        return jsonify({"ok": True, "status": new_status,
-                        "pdf_ready": pdf_ready,
-                        "skipped_job_orders": skipped_job_orders})
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "status": new_status})
     except Exception as e:
-        try:
-            if conn is not None:
-                conn.close()
-        except Exception:
-            pass
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 

@@ -73,44 +73,6 @@
   .pill{display:inline-block;font-size:.68rem;font-weight:700;padding:2px 8px;border-radius:20px;background:var(--chip);color:var(--blue)}
   .note{font-size:.78rem;color:var(--mut);margin-top:10px}
   .legacy-note{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:8px;padding:9px 12px;font-size:.78rem;margin-bottom:14px}
-  /* ── Work Order sheet (mirrors the KNM paper form) ─────────────────────── */
-  .wo-bg{position:fixed;inset:0;background:rgba(15,23,42,.5);display:none;z-index:40;overflow:auto;padding:24px 12px}
-  .wo-bg.show{display:block}
-  .wo{max-width:820px;margin:0 auto;background:#fff;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.28);padding:0 0 18px;position:relative}
-  .wo-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;padding:18px 22px;border-bottom:2px solid var(--ink)}
-  .wo-top h2{font-size:1.3rem;font-weight:800;line-height:1.15}
-  .wo-top .co{font-size:.72rem;color:var(--mut);line-height:1.5;margin-top:5px}
-  .wo-top .rt{text-align:right;font-size:.72rem;color:var(--mut);white-space:nowrap}
-  .wo-top .rt b{display:block;font-size:1rem;color:var(--ink);letter-spacing:.04em}
-  .wo-body{padding:16px 22px}
-  .wo-x{position:absolute;top:12px;right:14px;background:none;border:none;font-size:1.5rem;color:var(--mut);cursor:pointer;line-height:1}
-  .wo-sec{font-size:.8rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#4b5563;margin:20px 0 7px;border-bottom:1px solid var(--line);padding-bottom:4px}
-  .wo-sec span{font-weight:500;text-transform:none;letter-spacing:0}
-  .wo-req{background:#fffbeb;border:1px solid #fde68a;border-radius:9px;padding:11px 13px;margin-bottom:10px}
-  .wo-req h4{font-size:.78rem;color:#92400e;margin-bottom:3px}
-  .wo-req .ref{font-size:.68rem;font-weight:700;color:#b45309;margin-bottom:6px}
-  .wo-req .f{font-size:.8rem;margin-top:4px}
-  .wo-req .verbatim{background:#fff;border:1px solid #fde68a;border-radius:6px;padding:6px 8px;margin-top:3px;max-height:96px;overflow:auto;white-space:pre-wrap;font-size:.79rem}
-  table.wo-t{width:100%;border-collapse:collapse;font-size:.8rem}
-  table.wo-t th{background:#9ca3af;color:#fff;font-weight:700;font-size:.72rem;text-align:left;padding:6px 9px}
-  table.wo-t td{border-bottom:1px solid var(--line);padding:5px 9px;vertical-align:middle}
-  table.wo-t tbody tr:nth-child(odd){background:#f9fafb}
-  table.wo-t input[type=text],table.wo-t input[type=number]{height:32px;padding:4px 8px;font-size:.8rem}
-  table.wo-t input[type=number]{width:84px;text-align:center}
-  table.wo-t .c{text-align:center}
-  table.wo-t input[type=checkbox]{width:17px;height:17px;accent-color:var(--blue)}
-  .wo-ord{font-size:.68rem;color:#1d4ed8;font-weight:700}
-  .wo-cust{border:1px dashed #d1d5db;border-radius:9px;padding:10px 12px;margin-top:16px}
-  .wo-cust.on{border-color:#f59e0b;background:#fffbeb}
-  .wo-cust textarea{display:none;margin-top:8px}
-  .wo-cust.on textarea{display:block}
-  .wo-cust label{display:flex;gap:8px;align-items:flex-start;font-size:.8rem;font-weight:600;color:var(--ink);text-transform:none;letter-spacing:0;margin:0}
-  .wo-cust label input{width:16px;height:16px;flex:0 0 auto;margin-top:1px;accent-color:#d97706}
-  .wo-act{display:flex;gap:10px;justify-content:flex-end;margin-top:20px;padding-top:14px;border-top:1px solid var(--line);flex-wrap:wrap}
-  .wo-sig{position:fixed;inset:0;background:rgba(15,23,42,.6);display:none;z-index:60;align-items:center;justify-content:center;padding:16px}
-  .wo-sig.show{display:flex}
-  .wo-sig .box{background:#fff;border-radius:12px;padding:20px;width:min(420px,96vw)}
-  .wo-sig h3{font-size:1rem;margin-bottom:4px}
 </style>
 </head>
 <body>
@@ -129,18 +91,6 @@
 
 <div class="drawer-bg" id="drawerbg" onclick="closeDrawer()"></div>
 <div class="drawer" id="drawer"><button class="x" onclick="closeDrawer()">×</button><div id="drawerc"></div></div>
-<div class="wo-bg" id="woBg"><div class="wo" id="woSheet"></div></div>
-<div class="wo-sig" id="woSig"><div class="box">
-  <h3>Receiving Personnel signature</h3>
-  <p class="note" style="margin:0 0 12px">The customer's representative confirms services rendered and goods delivered are in good order.</p>
-  <div class="field"><label>Name (typed signature)</label><input id="woSigName" placeholder="Full name"></div>
-  <div class="field"><label>Date</label><input type="date" id="woSigDate"></div>
-  <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:6px">
-    <button class="btn ghost" onclick="woSigClose()">Cancel</button>
-    <button class="btn ghost" onclick="woSigUnavailable()">Customer unavailable</button>
-    <button class="btn" onclick="woSigConfirm()">Sign &amp; submit</button>
-  </div>
-</div></div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -192,20 +142,10 @@ const mByCode=c=>machines.find(m=>m.code===c);
 const wName=w=>{const m=mByCode(w.machine);return m?m.name:(w.machineName||w.machine);};
 function statusTag(w){return w.status==="new"?'<span class="tag new">NEW</span>':w.status==="assigned"?'<span class="tag assigned">ASSIGNED</span>':'<span class="tag done">DONE</span>';}
 
-/* The /api/wo/* endpoints resolve the caller's role from the knm_active_role
-   cookie (app.py get_role). Alpha picks its role client-side, so without this
-   a stale cookie from the main dashboard 403s every work-order call. Only ever
-   set to a role the user actually holds — the server re-validates anyway. */
-function readRoleCookie(){
-  const m=document.cookie.match(/(?:^|;\s*)knm_active_role=([^;]*)/);
-  return m?decodeURIComponent(m[1]).toLowerCase():"";}
-function syncRoleCookie(){
-  if(!MYROLES.includes(state.role))return;
-  document.cookie="knm_active_role="+encodeURIComponent(state.role)+";path=/;max-age=604800;samesite=Lax";}
 function buildRolePicker(){
   const sel=$("#rolesel");sel.innerHTML="";
   Object.keys(ROLE_NAV).forEach(r=>{const o=document.createElement("option");o.value=r;o.textContent=ROLE_LABEL[r];if(r===state.role)o.selected=true;sel.appendChild(o);});
-  sel.onchange=()=>{state.role=sel.value;syncRoleCookie();state.area=ROLE_HOME[state.role];state.sub={};render();toast("Switched to "+ROLE_LABEL[state.role]);};
+  sel.onchange=()=>{state.role=sel.value;state.area=ROLE_HOME[state.role];state.sub={};render();toast("Switched to "+ROLE_LABEL[state.role]);};
 }
 function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
   ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});}
@@ -270,185 +210,34 @@ function svcMyJobs(){const me=(ME||"").toLowerCase();const mine=work.filter(w=>(
 function jobRow(w){const m=mByCode(w.machine);
   return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${wName(w)}</b><div class="meta">${w.desc} · ${w.id}</div></div>
     <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span><button class="btn sm ghost" onclick="openJob('${w.id}')">Open</button></div>`;}
-/* ── Opening a job ──────────────────────────────────────────────────────────
-   Service + delivery stops open the STANDARD Work Order sheet (one sheet per
-   machine visit, exactly like the paper form). Movements have no paper form —
-   they keep the simple confirm drawer so the location cutover still runs. */
-function openJob(id){const w=work.find(x=>x.id===id); if(!w)return;
-  if(w.kind==="movement")return openMovement(w);
-  if(w.machine==="?"){toast("This item has no machine code — open it in the main dashboard.");return;}
-  openWorkOrder(w.machine);}
-
-function openMovement(w){
-  drawer(`<h3>${wName(w)}</h3><span class="pill">MOVEMENT</span> <span class="pill">${w.id}</span>
-    <p class="note">${w.desc}</p>
-    <button class="btn" onclick="completeMovement('${w.id}')">Complete movement</button>
-    <p class="note">Applies the machine's <b>location change</b> exactly like the Movements tab. Movements are not part of the Work Order form.</p>`);}
-async function completeMovement(id){const w=work.find(x=>x.id===id);
-  if(!w||!w.rid){toast("Demo row — not writable.");return;}
-  const r=await api(`/api/wo/movementorders/${w.rid}/complete`,{method:"POST",body:{}});
-  if(!r)return; closeDrawer(); await reload(); toast(w.id+" completed — location updated");}
-
-/* ── WORK ORDER SHEET ─────────────────────────────────────────────────────── */
-let WO={det:null,visit:null,busy:false};
-const woEsc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const woToday=()=>new Date().toLocaleDateString("en-CA");  // LOCAL yyyy-mm-dd, not UTC
-
-async function openWorkOrder(code){
-  if(WO.busy)return; WO.busy=true;
-  try{
-    const det=await api(`/api/wo/operator/location/${encodeURIComponent(code)}`);
-    if(!det)return;
-    if(!(det.service_wos||[]).length && !det.delivery_wo){
-      toast("Nothing open on this machine for you — it may already be submitted.");return;}
-    const st=await api("/api/wo/visits/start",{method:"POST",body:{
-      machine_code:code,
-      service_job_order_ids:(det.service_wos||[]).map(x=>x.id),
-      delivery_order_id:det.delivery_wo?det.delivery_wo.id:null}});
-    if(!st||!st.visit)return;
-    WO.det=det; WO.visit=st.visit;
-    renderWorkOrder(); $("#woBg").classList.add("show");
-  } finally { WO.busy=false; }
-}
-function closeWorkOrder(){$("#woBg").classList.remove("show");WO={det:null,visit:null,busy:false};}
-
-function renderWorkOrder(){
-  const d=WO.det,v=WO.visit,mc=d.machine;
-  let h=`<button class="wo-x" onclick="closeWorkOrder()">×</button>
-  <div class="wo-top">
-    <div><h2>Kopi Near Me Pte. Ltd.</h2>
-      <div class="co">18 Kim Chuan Terrace, #03-03<br>Singapore 537040<br>sales@kopinearme.com</div></div>
-    <div class="rt"><b>WORK ORDER</b>${woEsc(v.display_id||"#"+v.id)}<br>${woEsc(v.visit_date||woToday())}</div>
-  </div><div class="wo-body">`;
-
-  (d.service_wos||[]).forEach(wo=>{
-    let b="";
-    if(wo.complaint_summary){
-      b+=`<div class="f"><b>Customer reported:</b><div class="verbatim">${woEsc(wo.complaint_summary)}</div></div>`;
-      const l=[]; if(wo.complaint_reporter)l.push("by "+woEsc(wo.complaint_reporter));
-      if(wo.complaint_urgency)l.push("urgency: "+woEsc(wo.complaint_urgency));
-      if(l.length)b+=`<div style="font-size:.72rem;color:#92400e;margin-top:3px">${l.join(" · ")}</div>`;}
-    if(wo.attached_kb&&wo.attached_kb.title)b+=`<div class="f"><b>KB ref:</b> ${woEsc(wo.attached_kb.title)}</div>`;
-    if(wo.attached_kb&&wo.attached_kb.corrective_action)b+=`<div class="f"><b>Corrective action:</b> ${woEsc(wo.attached_kb.corrective_action)}</div>`;
-    if(wo.diagnosis)b+=`<div class="f"><b>Diagnosis:</b> ${woEsc(wo.diagnosis)}</div>`;
-    if(wo.proposed_fix)b+=`<div class="f"><b>Proposed fix:</b> ${woEsc(wo.proposed_fix)}</div>`;
-    h+=`<div class="wo-req"><h4>⚠ Service requested</h4><div class="ref">${woEsc(wo.display_id||"#"+wo.id)} · ${woEsc(wo.priority_label||"normal")}</div>${b}</div>`;});
-
-  h+=`<div class="grid2">
-    <div class="field"><label>Company / Location</label><input type="text" readonly value="${woEsc(mc.name||mc.code)}"></div>
-    <div class="field"><label>Date</label><input type="date" value="${woEsc(v.visit_date||woToday())}" disabled></div></div>
-  <div class="grid2">
-    <div class="field"><label>Machine Code</label><input type="text" readonly value="${woEsc(mc.code)}"></div>
-    <div class="field"><label>Dispense Counter</label><input type="number" id="woCounter" placeholder="Read from machine display" value="${v.dispense_counter!=null?v.dispense_counter:""}"></div></div>`;
-
-  h+=`<div class="wo-sec">Services</div><table class="wo-t">
-    <thead><tr><th style="width:52%">Description</th><th style="width:90px" class="c">Completed</th><th>Remarks</th></tr></thead><tbody>`;
-  (d.service_categories||[]).forEach(c=>{const cv=(v.services&&v.services[c.code])||{};
-    h+=`<tr><td>${woEsc(c.label)}</td>
-      <td class="c"><input type="checkbox" id="woS_${c.code}_d"${cv.done?" checked":""}></td>
-      <td><input type="text" id="woS_${c.code}_r" value="${woEsc(cv.remarks||"")}" placeholder="Optional"></td></tr>`;});
-  h+=`</tbody></table>`;
-
-  const sched=!!d.delivery_wo, ord={},del={};
-  if(sched)(d.delivery_wo.lines||[]).forEach(l=>{ord[l.item_id]=l.qty_ordered;del[l.item_id]=l.qty_delivered;});
-  h+=`<div class="wo-sec">Delivery <span>${sched?"— scheduled top-up":"— optional; record anything you replenish on site"}</span></div>
-   <table class="wo-t"><thead><tr><th style="width:46%">Description</th><th>Unit</th><th>Content</th><th class="c">Qty</th></tr></thead><tbody>`;
-  (d.delivery_items||[]).forEach(it=>{const qo=ord[it.id],qd=del[it.id];
-    h+=`<tr><td>${woEsc(it.name)}${qo?` <span class="wo-ord">(${qo} ordered)</span>`:""}</td>
-      <td>${woEsc(it.unit)}</td><td>${woEsc(it.content)}</td>
-      <td class="c"><input type="number" min="0" max="999" placeholder="${qo!=null?qo:0}" data-item-id="${it.id}" data-had="${qd!=null?1:0}" value="${qd!=null?qd:""}"></td></tr>`;});
-  h+=`</tbody></table>
-   <p class="note">The Receiving Personnel checks and verifies that services rendered and goods delivered are in good order.</p>`;
-
-  h+=`<div class="wo-cust" id="woCustBox">
-      <label><input type="checkbox" id="woCustChk" onchange="document.getElementById('woCustBox').classList.toggle('on',this.checked)">
-        Customer unavailable at site — PDF will be sent for sign-off and the manager flagged</label>
-      <textarea id="woCustReason" placeholder="Reason (e.g. shop closed, no staff present)"></textarea></div>
-    <div class="wo-sec">Service Personnel (you)</div>
-    <div class="grid2">
-      <div class="field"><label>Your name (typed signature)</label><input type="text" id="woSvcName" value="${woEsc(v.service_name||ME||"")}"></div>
-      <div class="field"><label>Date</label><input type="date" id="woSvcDate" value="${woEsc(v.service_date||woToday())}"></div></div>
-    <div class="wo-act">
-      <button class="btn ghost" onclick="closeWorkOrder()">Close</button>
-      <button class="btn ghost" onclick="woSave(true)">Save draft</button>
-      <button class="btn" onclick="woSubmit()">Submit &amp; sign</button></div></div>`;
-  $("#woSheet").innerHTML=h;
-  $("#woBg").scrollTop=0;
-}
-
-function woBody(){
-  const svc={};
-  (WO.det.service_categories||[]).forEach(c=>{svc[c.code]={
-    done:$("#woS_"+c.code+"_d").checked,
-    remarks:($("#woS_"+c.code+"_r").value||"").trim()};});
-  const lines=[];
-  document.querySelectorAll('#woSheet input[type=number][data-item-id]').forEach(i=>{
-    // Blank means "not touched" — never send it, or an untouched sheet would
-    // insert a zero line for all 17 catalogue items and wipe the ordered qtys.
-    // The one exception is clearing a qty that was previously saved.
-    if(i.value==="" && i.dataset.had!=="1")return;
-    lines.push({item_id:parseInt(i.dataset.itemId,10),qty_delivered:parseInt(i.value,10)||0});});
-  const ctr=$("#woCounter").value;
-  return {dispense_counter:ctr!==""?parseInt(ctr,10):null,services:svc,delivery_lines:lines,
-    service_name:($("#woSvcName").value||"").trim()||null,
-    service_date:$("#woSvcDate").value||null,
-    customer_unavailable:$("#woCustChk").checked,
-    customer_unavailable_reason:($("#woCustReason").value||"").trim()||null};}
-
-async function woSave(notify){
-  const r=await api(`/api/wo/visits/${WO.visit.id}`,{method:"PATCH",body:woBody()});
-  if(r&&notify)toast("Draft saved.");
-  return !!r;}
-
-async function woSubmit(){
-  if(!($("#woSvcName").value||"").trim()){toast("Enter your name (Service Personnel) first.");return;}
-  if(!(await woSave(false)))return;
-  $("#woSigName").value=""; $("#woSigDate").value=woToday();
-  $("#woSig").classList.add("show");}
-function woSigClose(){$("#woSig").classList.remove("show");}
-
-function woSigConfirm(){
-  const nm=($("#woSigName").value||"").trim(), dt=$("#woSigDate").value;
-  if(!nm){toast("Receiving personnel name required.");return;}
-  if(!dt){toast("Date required.");return;}
-  woFinalize({receiving_name:nm,receiving_date:dt,customer_unavailable:false,
-    service_name:($("#woSvcName").value||"").trim(),service_date:$("#woSvcDate").value});}
-
-function woSigUnavailable(){
-  let rsn=($("#woCustReason").value||"").trim();
-  if(!rsn){rsn=(prompt("Customer unavailable — brief reason (flagged to manager):")||"").trim();
-    if(!rsn){toast("Reason required.");return;}
-    $("#woCustReason").value=rsn; $("#woCustChk").checked=true; $("#woCustBox").classList.add("on");}
-  woFinalize({customer_unavailable:true,customer_unavailable_reason:rsn,
-    service_name:($("#woSvcName").value||"").trim(),service_date:$("#woSvcDate").value});}
-
-let woSubmitting=false;
-async function woFinalize(body){
-  if(woSubmitting){toast("Submitting — please wait.");return;}
-  woSubmitting=true;
-  document.querySelectorAll("#woSig .btn").forEach(b=>b.disabled=true);
-  let r,vid=WO.visit.id;
-  try{ r=await api(`/api/wo/visits/${vid}/finalize`,{method:"POST",body}); }
-  finally{ woSubmitting=false;
-    document.querySelectorAll("#woSig .btn").forEach(b=>b.disabled=false); }
-  if(!r)return;
-  woSigClose(); closeWorkOrder(); await reload();
-  const skipped=(r.skipped_job_orders||[]).length;
-  toast((r.status==="pending_email_signature"
-      ? "Submitted — customer unavailable; manager flagged for sign-off."
-      : "Work Order signed and submitted.")
-    + (skipped?` ${skipped} job order(s) had already been closed or reassigned.`:"")
-    + (r.pdf_ready?"":" PDF could not be filed — tell a manager."));
-  // Link rather than window.open: this runs after awaits, so iOS Safari would
-  // block a popup. finalize reports whether the PDF actually filed.
-  if(r.pdf_ready)woPdfLink(vid);}
-function woPdfLink(vid){
-  const a=document.createElement("a");
-  a.href=`/api/wo/visits/${vid}/pdf`; a.target="_blank"; a.rel="noopener";
-  a.className="btn"; a.textContent="Open signed Work Order PDF";
-  a.style.cssText="position:fixed;bottom:64px;left:50%;transform:translateX(-50%);z-index:70;text-decoration:none";
-  a.onclick=()=>setTimeout(()=>a.remove(),100);
-  document.body.appendChild(a); setTimeout(()=>a.remove(),20000);}
+function openJob(id){const w=work.find(x=>x.id===id);const m=mByCode(w.machine);
+  const kbLink=w.type==="service"?`<div class="card" style="background:#f8fafc"><b>KB-12</b> — No dispense after coin<div class="meta">Clear jam, cycle motor, test 3 vends</div></div>`:"";
+  const refill=w.kind==="delivery"?`<div class="field"><label>Received by — typed signature (required)</label><input id="job_recipient" placeholder="Recipient name"></div>`:"";
+  const hint=w.kind==="joborder"?"Completing marks the job <b>done — pending manager review</b> (manager closes it)."
+           :w.kind==="delivery"?"Completing signs the delivery and syncs the top-up to vending data."
+           :w.kind==="movement"?"Completing applies the machine's <b>location change</b> exactly like the Movements tab."
+           :"Complaints close via manager review once their job order is done.";
+  drawer(`<h3>${wName(w)}</h3><span class="pill">${tagTxt(w.type)}</span> <span class="pill">${w.id}</span><p class="note">${w.desc}</p>${kbLink}${refill}
+    ${w.kind!=="complaint"?`<button class="btn" onclick="completeJob('${w.id}')">Complete &amp; sign visit</button>`:""}
+    <p class="note">${hint}</p>`);}
+async function completeJob(id){const w=work.find(x=>x.id===id);
+  if(!w.rid){toast("Demo row — not writable.");return;}
+  if(w.kind==="joborder"){
+    const r=await api(`/api/wo/joborders/${w.rid}/status`,{method:"POST",body:{status_code:2}});
+    if(!r)return; closeDrawer(); await reload(); toast(w.id+" done — pending manager review");
+  }else if(w.kind==="delivery"){
+    const rec=(($("#job_recipient")||{}).value||"").trim();
+    if(!rec){toast("Enter the recipient name (typed signature).");return;}
+    const det=await api(`/api/wo/deliveryorders/${w.rid}`); if(!det)return;
+    const q=(det.items||[]).map(i=>i.quantity??0); while(q.length<8)q.push(0);
+    const p=await api(`/api/wo/deliveryorders/${w.rid}`,{method:"PATCH",body:{quantities:q.slice(0,8),recipient_name:rec}});
+    if(!p)return;
+    const r=await api(`/api/wo/deliveryorders/${w.rid}/complete`,{method:"POST",body:{}});
+    if(!r)return; closeDrawer(); await reload(); toast(w.id+" completed"+(r.topup_note?" — "+r.topup_note:""));
+  }else if(w.kind==="movement"){
+    const r=await api(`/api/wo/movementorders/${w.rid}/complete`,{method:"POST",body:{}});
+    if(!r)return; closeDrawer(); await reload(); toast(w.id+" completed — location updated");
+  }else{toast("Complaints close via manager review once their job order is done.");}}
 function svcKB(){return `<div class="rows">${kb.map(k=>`<div class="row"><div class="grow"><b>${k.id} — ${k.sym}</b><div class="meta">Root: ${k.root} · Fix: ${k.fix}</div></div>${(state.role==="field_manager"||state.role==="admin")?'<button class="btn sm ghost">Edit</button>':''}</div>`).join("")}</div><p class="note">CAR-format KB, inline from any job (was the Manage KB tab). Demo entries.</p>`;}
 function listWork(arr,empty){if(!arr.length)return `<p class="empty">${empty||"Nothing here."}</p>`;
   return `<div class="rows">${arr.map(w=>{const m=mByCode(w.machine);return `<div class="row"><span class="dot ${m?m.status:'g'}"></span>
@@ -566,11 +355,7 @@ function setBanner(h){const b=$("#banner");live=!!(h&&h.live);
 
 /* boot */
 async function boot(){
-  // Honour a role the user already chose in the main dashboard; only write the
-  // cookie when there isn't a valid one, so /alpha never silently switches them.
-  const ck=readRoleCookie();
-  state.role = (MYROLES.includes(ck)&&ROLE_NAV[ck] ? ck : MYROLES.find(r=>ROLE_NAV[r])) || state.role;
-  if(ck!==state.role) syncRoleCookie();
+  state.role = MYROLES.find(r=>ROLE_NAV[r]) || state.role;   // land on the real role's home
   buildRolePicker();state.area=ROLE_HOME[state.role];
   try{
     const res=await fetch("/alpha/api/bootstrap");const d=await res.json();
