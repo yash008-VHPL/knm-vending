@@ -73,6 +73,30 @@
   .pill{display:inline-block;font-size:.68rem;font-weight:700;padding:2px 8px;border-radius:20px;background:var(--chip);color:var(--blue)}
   .note{font-size:.78rem;color:var(--mut);margin-top:10px}
   .legacy-note{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:8px;padding:9px 12px;font-size:.78rem;margin-bottom:14px}
+  /* ── Sales search ── */
+  .sales-controls{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:14px}
+  .sales-controls .field{flex:1;min-width:130px;margin-bottom:0}
+  .datetime-row{display:flex;gap:5px}
+  .datetime-row input{flex:1}
+  .view-toggle{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex-shrink:0}
+  .view-toggle button{border:none;background:#fff;padding:7px 11px;font-size:.78rem;font-weight:600;cursor:pointer;color:var(--mut)}
+  .view-toggle button.on{background:var(--blue);color:#fff}
+  .sales-summary-row{display:flex;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+  .sales-stat{border:1px solid var(--line);border-radius:10px;padding:10px 14px;background:#fafbff}
+  .sales-stat .val{font-size:1.6rem;font-weight:700;color:var(--blue);line-height:1}
+  .sales-stat small{color:var(--mut)}
+  .bar-bg{background:#e5e7eb;border-radius:4px;height:8px;overflow:hidden;min-width:50px}
+  .bar-fill{background:var(--blue);height:100%;border-radius:4px}
+  .sales-table{width:100%;border-collapse:collapse;font-size:.83rem}
+  .sales-table th{text-align:left;padding:7px 9px;border-bottom:2px solid var(--line);font-weight:700;color:var(--mut);font-size:.73rem}
+  .sales-table td{padding:6px 9px;border-bottom:1px solid var(--line)}
+  .sales-table .right{text-align:right}
+  .sales-status{padding:7px 10px;border-radius:8px;font-size:.79rem;font-weight:600;margin-bottom:10px}
+  .sales-status.error{background:#fee2e2;color:#b91c1c}
+  .sales-status.loading{background:#dbeafe;color:#1e40af}
+  .cap-note{background:#fef3c7;border:1px solid #fde68a;color:#92400e;border-radius:8px;padding:7px 11px;font-size:.78rem;margin-bottom:10px}
+  .btn.success{background:#16a34a;color:#fff}
+  .btn.success:hover{background:#15803d}
 </style>
 </head>
 <body>
@@ -151,7 +175,9 @@ function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
   ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});}
 function render(){buildTabs();const m=$("#main");
   m.innerHTML=({service:renderService,machines:renderMachines,fleet:renderFleet,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
-  document.querySelectorAll("[data-sub]").forEach(b=>{b.onclick=()=>{state.sub[state.area]=b.dataset.sub;render();};});}
+  document.querySelectorAll("[data-sub]").forEach(b=>{b.onclick=()=>{state.sub[state.area]=b.dataset.sub;render();};});
+  if(state.area==="fleet"&&subActive("fleet","status")==="sales") initSalesTab();
+}
 const subActive=(a,d)=>state.sub[a]||d;
 
 /* SERVICE */
@@ -291,7 +317,7 @@ async function submitAddMachine(){
 function renderFleet(){const cur=subActive("fleet","status");
   const A=machines.filter(m=>m.active);const g=A.filter(m=>m.status==="g").length,y=A.filter(m=>m.status==="y").length,r=A.filter(m=>m.status==="r").length;
   let body;
-  if(cur==="sales")body=`<div class="kpis"><div class="kpi"><b>${state.salesVends==null?'—':state.salesVends.toLocaleString()}</b><small>vends · 7d (live)</small></div><div class="kpi"><b>${A.length}</b><small>active machines</small></div></div><p class="note">7-day vend count is queried live (vend-code filter). Was the Sales tab.</p>`;
+  if(cur==="sales")body=renderSalesUI();
   else if(cur==="events")body=`<div class="rows">${A.filter(m=>m.status!=="g").slice(0,12).map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.status==='r'?'silent past threshold':'recent error/exception'}</div></div></div>`).join("")||'<p class="empty">No active alerts.</p>'}</div><p class="note">Derived from heartbeat (was Messages tab).</p>`;
   else if(cur==="refill")body=`<div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.vendsSince==null?'vends since refill: —':m.vendsSince+' vends since refill'} · last ${m.lastRefill}</div></div></div>`).join("")}</div><p class="note">Read-only refill status so Sales keeps top-up visibility. Logging happens in Plan / My Jobs.</p>`;
   else body=`<div class="kpis"><div class="kpi"><b style="color:var(--ok)">${g}</b><small>🟢 online</small></div><div class="kpi"><b style="color:var(--warn)">${y}</b><small>🟡 warning</small></div><div class="kpi"><b style="color:var(--bad)">${r}</b><small>🔴 silent</small></div></div>
@@ -338,6 +364,162 @@ function checkDel(){$("#del_btn").disabled=$("#del_confirm").value.trim()!=="DEL
 function drawer(h){$("#drawerc").innerHTML=h;$("#drawer").classList.add("show");$("#drawerbg").classList.add("show");}
 function closeDrawer(){$("#drawer").classList.remove("show");$("#drawerbg").classList.remove("show");}
 const cssId=s=>String(s).replace(/[^a-zA-Z0-9_-]/g,"_");
+
+/* ── SALES SEARCH ── */
+let _salesView='summary';
+
+function renderSalesUI(){
+  return `<div class="card">
+    <div class="sales-controls">
+      <div class="field"><label>Location</label><select id="sal_loc"><option value="">All Locations</option></select></div>
+      <div class="field"><label>Start</label><div class="datetime-row"><input type="date" id="sal_s0"><input type="time" id="sal_s1" value="00:00" style="max-width:90px"></div></div>
+      <div class="field"><label>End</label><div class="datetime-row"><input type="date" id="sal_e0"><input type="time" id="sal_e1" value="23:59" style="max-width:90px"></div></div>
+      <div class="view-toggle"><button id="sal_vsum" class="on" onclick="setSalesView('summary')">Summary</button><button id="sal_vtxn" onclick="setSalesView('transactions')">Transactions</button></div>
+      <button class="btn" id="sal_btn" onclick="runSalesSearch()">Search</button>
+    </div>
+    <div id="sal_status" style="display:none"></div>
+  </div>
+  <div id="sal_results" style="display:none"><div class="card">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px"><button class="btn sm success" onclick="exportSalesCSV('summary')">⬇ Export CSV</button></div>
+    <div class="sales-summary-row">
+      <div class="sales-stat"><div class="val" id="sal_total">0</div><small>Total Dispenses</small></div>
+      <div class="sales-stat"><div class="val" id="sal_skus">0</div><small>Unique SKUs</small></div>
+    </div>
+    <table class="sales-table">
+      <thead><tr><th style="width:36px">#</th><th>SKU</th><th style="width:80px;color:#9ca3af;font-weight:500">Code</th><th class="right" style="width:90px">Count</th><th class="right" style="width:80px">%</th><th style="min-width:80px"></th></tr></thead>
+      <tbody id="sal_tbody"></tbody>
+      <tfoot><tr><td colspan="3">Total</td><td class="right" id="sal_foot"></td><td class="right">100%</td><td></td></tr></tfoot>
+    </table>
+  </div></div>
+  <div id="sal_txns" style="display:none"><div class="card">
+    <div style="display:flex;justify-content:flex-end;margin-bottom:10px"><button class="btn sm success" onclick="exportSalesCSV('transactions')">⬇ Export CSV</button></div>
+    <div id="sal_cap" class="cap-note" style="display:none">⚠️ Results capped at 2,000 rows. Narrow your date range.</div>
+    <div id="sal_cnt" style="font-size:.78rem;color:var(--mut);margin-bottom:10px"></div>
+    <table class="sales-table">
+      <thead><tr><th style="width:100px">Date</th><th style="width:80px">Time</th><th>Item</th><th>Machine</th></tr></thead>
+      <tbody id="sal_tbodytxn"></tbody>
+    </table>
+  </div></div>`;
+}
+
+function initSalesTab(){
+  const now=new Date(),s=new Date(now);s.setDate(now.getDate()-7);
+  const fmt=d=>d.toISOString().slice(0,10);
+  const e0=$("#sal_e0"),s0=$("#sal_s0");
+  if(e0&&!e0.value)e0.value=fmt(now);
+  if(s0&&!s0.value)s0.value=fmt(s);
+  loadSalesLocations();
+}
+
+async function loadSalesLocations(){
+  try{
+    const names=await(await fetch("/api/location-names")).json();
+    if(!Array.isArray(names))return;
+    const sel=$("#sal_loc");if(!sel)return;
+    while(sel.options.length>1)sel.remove(1);
+    names.forEach(n=>{const o=document.createElement("option");o.value=n;o.textContent=n;sel.appendChild(o);});
+  }catch(e){}
+}
+
+function setSalesView(v){
+  _salesView=v;
+  const sum=$("#sal_vsum"),txn=$("#sal_vtxn");
+  if(sum)sum.classList.toggle("on",v==="summary");
+  if(txn)txn.classList.toggle("on",v==="transactions");
+}
+
+function runSalesSearch(){
+  if(_salesView==="transactions")searchSalesTxns();else searchSalesSummary();
+}
+
+async function searchSalesSummary(){
+  const s0=$("#sal_s0"),s1=$("#sal_s1"),e0=$("#sal_e0"),e1=$("#sal_e1"),loc=$("#sal_loc");
+  if(!s0||!s0.value||!e0||!e0.value){setSalesStatus("Enter a start and end date.","error");return;}
+  const start=`${s0.value} ${s1.value}`,end=`${e0.value} ${e1.value}`;
+  const btn=$("#sal_btn");btn.disabled=true;
+  setSalesStatus("Querying…","loading");
+  $("#sal_results").style.display="none";$("#sal_txns").style.display="none";
+  try{
+    let url=`/api/dispenses?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+    if(loc&&loc.value)url+=`&location=${encodeURIComponent(loc.value)}`;
+    const d=await(await fetch(url)).json();
+    if(d.error){setSalesStatus("Error: "+d.error,"error");return;}
+    setSalesStatus("","");renderSalesSummary(d.results,d.total);
+  }catch(e){setSalesStatus("Could not reach the server.","error");}
+  finally{btn.disabled=false;}
+}
+
+function renderSalesSummary(results,total){
+  $("#sal_total").textContent=total.toLocaleString();
+  $("#sal_skus").textContent=results.length;
+  $("#sal_foot").textContent=total.toLocaleString();
+  const max=results.length>0?results[0].count:1;
+  $("#sal_tbody").innerHTML=results.length
+    ?results.map((r,i)=>{const pct=total>0?((r.count/total)*100).toFixed(1):"0.0";const bar=((r.count/max)*100).toFixed(1);
+      return `<tr><td>${i+1}</td><td>${esc(r.sku)}</td><td style="color:var(--mut);font-size:.78rem">${r.code}</td><td class="right">${r.count.toLocaleString()}</td><td class="right">${pct}%</td><td><div class="bar-bg"><div class="bar-fill" style="width:${bar}%"></div></div></td></tr>`;}).join("")
+    :`<tr><td colspan="6" style="text-align:center;color:var(--mut);padding:28px">No dispenses found.</td></tr>`;
+  $("#sal_results").style.display="block";
+}
+
+async function searchSalesTxns(){
+  const s0=$("#sal_s0"),s1=$("#sal_s1"),e0=$("#sal_e0"),e1=$("#sal_e1"),loc=$("#sal_loc");
+  if(!s0||!s0.value||!e0||!e0.value){setSalesStatus("Enter a start and end date.","error");return;}
+  const start=`${s0.value} ${s1.value}`,end=`${e0.value} ${e1.value}`;
+  const btn=$("#sal_btn");btn.disabled=true;
+  setSalesStatus("Querying…","loading");
+  $("#sal_results").style.display="none";$("#sal_txns").style.display="none";
+  try{
+    let url=`/api/transactions?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+    if(loc&&loc.value)url+=`&location=${encodeURIComponent(loc.value)}`;
+    const d=await(await fetch(url)).json();
+    if(d.error){setSalesStatus("Error: "+d.error,"error");return;}
+    setSalesStatus("","");renderSalesTxns(d.results,d.capped);
+  }catch(e){setSalesStatus("Could not reach the server.","error");}
+  finally{btn.disabled=false;}
+}
+
+function renderSalesTxns(results,capped){
+  const cap=$("#sal_cap"),cnt=$("#sal_cnt");
+  if(cap)cap.style.display=capped?"block":"none";
+  if(cnt)cnt.textContent=results.length?`${results.length.toLocaleString()} transaction${results.length!==1?"s":""}${capped?" (capped)":""}`:""
+  $("#sal_tbodytxn").innerHTML=results.length
+    ?results.map(r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.time)}</td><td>${esc(r.item)}</td><td>${esc(r.machine)}</td></tr>`).join("")
+    :`<tr><td colspan="4" style="text-align:center;color:var(--mut);padding:28px">No transactions found.</td></tr>`;
+  $("#sal_txns").style.display="block";
+}
+
+function setSalesStatus(msg,type){
+  const el=$("#sal_status");if(!el)return;
+  el.style.display=msg?"block":"none";
+  el.className="sales-status "+(type||"");
+  el.textContent=msg;
+}
+
+function exportSalesCSV(view){
+  const s0=$("#sal_s0"),e0=$("#sal_e0"),loc=$("#sal_loc");
+  const start=s0?s0.value:"",end=e0?e0.value:"";
+  const locLabel=loc?loc.options[loc.selectedIndex]?.text||"all":"all";
+  const csvEsc=v=>{const s=String(v??"");return(s.includes(",")||s.includes('"')||s.includes("\n"))?`"${s.replace(/"/g,'""')}"`:`${s}`;};
+  let rows,filename;
+  if(view==="summary"){
+    rows=[["#","SKU","Item Code","Count","% of Total"]];
+    document.querySelectorAll("#sal_tbody tr").forEach(tr=>{const tds=tr.querySelectorAll("td");
+      if(tds.length>=5)rows.push([tds[0].textContent,tds[1].textContent,tds[2].textContent,tds[3].textContent,tds[4].textContent]);});
+    filename=`sales_summary_${locLabel}_${start}_to_${end}.csv`;
+  }else{
+    rows=[["Date","Time","Item Dispensed","Machine"]];
+    document.querySelectorAll("#sal_tbodytxn tr").forEach(tr=>{const tds=tr.querySelectorAll("td");
+      if(tds.length>=4)rows.push([tds[0].textContent,tds[1].textContent,tds[2].textContent,tds[3].textContent]);});
+    filename=`transactions_${locLabel}_${start}_to_${end}.csv`;
+  }
+  const csv=rows.map(r=>r.map(csvEsc).join(",")).join("\r\n");
+  const blob=new Blob(["﻿"+csv],{type:"text/csv;charset=utf-8;"});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");a.href=url;a.download=filename.replace(/[^a-z0-9._\-]/gi,"_");
+  document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
+}
+
+function esc(str){return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");}
 
 /* DEMO fallback seed (used only if /alpha/api/bootstrap is unreachable) */
 function demoSeed(){
