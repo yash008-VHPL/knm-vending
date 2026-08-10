@@ -45,8 +45,15 @@ ROLE_ADMIN         = "admin"
 ROLE_OPERATOR      = "operator"
 ROLE_FIELD_MANAGER = "field_manager"
 
+ROLE_DISPATCH      = "dispatch"
+
 OPERATOR_ROLES = {ROLE_OPERATOR, ROLE_FIELD_MANAGER, ROLE_ADMIN}
 MANAGER_ROLES  = {ROLE_FIELD_MANAGER, ROLE_ADMIN}
+# Dispatch owns who goes where, and nothing else. It can read the technician
+# roster and the assignment candidates, and it can set AssignedTo on the three
+# order types. It deliberately does NOT get create, close, review, KB, movement
+# creation, or any admin route — those stay with MANAGER_ROLES.
+DISPATCH_ROLES = MANAGER_ROLES | {ROLE_DISPATCH}
 
 
 # ── Status / Priority code maps ───────────────────────────────────────────────
@@ -524,7 +531,7 @@ def _ingest_data_urls(cursor, parent_type, parent_id, stage, data_urls, user):
 # ── Technicians (AAD-backed via Graph) ────────────────────────────────────────
 
 @workorders_bp.route("/technicians")
-@require_roles(*MANAGER_ROLES)
+@require_roles(*DISPATCH_ROLES)
 def api_technicians():
     """Returns users with the 'operator' app role (rendered as 'Technician' in UI).
     Pulled live from Microsoft Graph via sharepoint_helper.list_users_by_role
@@ -554,7 +561,7 @@ def api_technicians():
 
 
 @workorders_bp.route("/technicians/refresh", methods=["POST"])
-@require_roles(*MANAGER_ROLES)
+@require_roles(*DISPATCH_ROLES)
 def api_technicians_refresh():
     """Bust the 10-min cache to force a fresh Graph fetch."""
     try:
@@ -1582,7 +1589,7 @@ def api_joborder_update(jid):
 
 
 @workorders_bp.route("/joborders/<int:jid>/assign", methods=["POST"])
-@require_roles(*MANAGER_ROLES)
+@require_roles(*DISPATCH_ROLES)
 def api_joborder_assign(jid):
     data = request.get_json(silent=True) or {}
     assigned = (data.get("assigned_to") or "").strip().lower() or None
@@ -1590,16 +1597,40 @@ def api_joborder_assign(jid):
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        # This route used to force StatusCode=0 unconditionally. Harmless while
+        # it was manager-only, dangerous once dispatch could call it: it would
+        # resurrect a job order the manager had already closed (3) or accepted
+        # into review (2), leaving an open WO hanging off a closed complaint and
+        # silently emptying the review queue. Reassignment is now refused for
+        # those two states, and only clears needs_assistance (1) back to
+        # assigned (0), which is the one case where a new owner is the point.
+        cursor.execute("SELECT StatusCode FROM WO_JobOrders WHERE JobOrderID = %s", (jid,))
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Job order not found."}), 404
+        sc = int(row[0] or 0)
+        if sc == 2:
+            conn.close()
+            return jsonify({"error": "Job order is pending manager review; it cannot be reassigned."}), 400
+        if sc == 3:
+            conn.close()
+            return jsonify({"error": "Job order is closed; it cannot be reassigned."}), 400
         cursor.execute(
             "UPDATE WO_JobOrders SET AssignedTo=%s, StatusCode=0 WHERE JobOrderID=%s",
             (assigned, jid),
         )
         _log_activity(cursor, "joborder", jid, "assigned",
-                      f"Assigned to {assigned or '(unassigned)'}", user)
+                      f"Assigned to {assigned or '(unassigned)'}"
+                      + (" (cleared needs_assistance)" if sc == 1 else ""), user)
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
     except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
@@ -3064,6 +3095,61 @@ def api_movement_complete(mid):
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+@workorders_bp.route("/movementorders/<int:mid>/assign", methods=["POST"])
+@require_roles(*DISPATCH_ROLES)
+def api_movement_assign(mid):
+    """Reassign a movement order.
+
+    This route did not exist before 2026-08-10: a movement's assignee could only
+    ever be set at creation, which is why the Plan tab told dispatch to "assign
+    via the Movements tab" for something no tab could do. Mirrors
+    api_delivery_assign.
+
+    A completed movement (StatusCode 2) is refused — its location cutover has
+    already been applied, so moving it to another driver would be meaningless.
+    """
+    data = request.get_json(silent=True) or {}
+    assigned = (data.get("assigned_to") or "").strip().lower() or None
+    user = get_current_user()
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT StatusCode, AssignedTo FROM WO_MovementOrders WHERE MovementOrderID = %s",
+            (mid,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            conn.close()
+            return jsonify({"error": "Movement order not found."}), 404
+        sc = int(row[0] or 0)
+        if sc == 2:
+            conn.close()
+            return jsonify({"error": "Movement already completed; cannot reassign."}), 400
+        # in_progress belongs to the driver who started it. Handing it over
+        # without resetting would leave them unable to complete it (both /status
+        # and /complete gate on AssignedTo) while the new owner inherits an
+        # order that already reads in_progress. Reset to scheduled and say so.
+        reset = sc == 1
+        cursor.execute(
+            "UPDATE WO_MovementOrders SET AssignedTo = %s, StatusCode = %s WHERE MovementOrderID = %s",
+            (assigned, 0 if reset else sc, mid),
+        )
+        _log_activity(cursor, "movementorder", mid, "assigned",
+                      f"Assigned to {assigned or '(unassigned)'}"
+                      + (f" (was {row[1]})" if row[1] else "")
+                      + (" — reset from in_progress to scheduled" if reset else ""), user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
 @workorders_bp.route("/movementorders/<int:mid>/status", methods=["POST"])
 @require_roles(*OPERATOR_ROLES)
 def api_movement_status(mid):
@@ -3335,7 +3421,7 @@ def api_delivery_complete(did):
 
 
 @workorders_bp.route("/deliveryorders/<int:did>/assign", methods=["POST"])
-@require_roles(*MANAGER_ROLES)
+@require_roles(*DISPATCH_ROLES)
 def api_delivery_assign(did):
     data = request.get_json(silent=True) or {}
     assigned = (data.get("assigned_to") or "").strip().lower() or None
@@ -3370,7 +3456,7 @@ def api_delivery_assign(did):
 # ── Assignment candidates ─────────────────────────────────────────────────────
 
 @workorders_bp.route("/assignment/delivery-candidates")
-@require_roles(*MANAGER_ROLES)
+@require_roles(*DISPATCH_ROLES)
 def api_assign_delivery_candidates():
     try:
         conn = get_connection()
@@ -3409,7 +3495,7 @@ def api_assign_delivery_candidates():
 
 
 @workorders_bp.route("/assignment/joborder-candidates")
-@require_roles(*MANAGER_ROLES)
+@require_roles(*DISPATCH_ROLES)
 def api_assign_joborder_candidates():
     try:
         conn = get_connection()

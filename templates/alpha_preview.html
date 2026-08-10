@@ -138,6 +138,29 @@
   .wo-attrs{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;margin-bottom:4px}
   .wo-attrs .field{margin-bottom:0}
   .wo-attrs select{height:36px}
+  /* ── Dispatch board ── */
+  .bd{display:grid;grid-template-columns:repeat(auto-fill,minmax(258px,1fr));gap:12px}
+  .bd-c{border:1px solid var(--line);border-radius:11px;background:#fff;padding:11px 12px}
+  .bd-h{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:9px;
+        padding-bottom:8px;border-bottom:1px solid var(--line)}
+  .bd-h b{font-size:.85rem}
+  .bd-h .who{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bd-h .em{display:block;font-size:.68rem;color:var(--mut);font-weight:500}
+  .slot{display:flex;align-items:center;gap:7px;border:1px dashed #cbd5e1;border-radius:8px;
+        padding:6px 8px;min-height:38px;margin-bottom:6px;background:#fcfdff}
+  .slot.on{border-style:solid;border-color:var(--line);background:#fff}
+  .slot .n{font-size:.64rem;font-weight:800;color:#94a3b8;width:15px;flex:0 0 auto;
+           font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .slot .b{flex:1;min-width:0}
+  .slot .b b{display:block;font-size:.76rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .slot .b small{font-size:.66rem;color:var(--mut)}
+  .slot select{font-size:.74rem;height:28px;padding:2px 6px;flex:1;min-width:0}
+  .slot .x{background:none;border:none;color:#94a3b8;cursor:pointer;font-size:1rem;line-height:1;padding:0 2px}
+  .slot .x:hover{color:var(--bad)}
+  .slot .add{background:none;border:none;color:var(--blue);font-size:.74rem;font-weight:700;
+             cursor:pointer;text-align:left;flex:1;padding:0}
+  .bd-un{border:1px solid #fde68a;background:#fffbeb;border-radius:11px;padding:11px 12px}
+  .kpi small b{display:inline;font-size:inherit;font-weight:800;color:var(--ink);line-height:inherit}
 </style>
 </head>
 <body>
@@ -253,7 +276,7 @@ function renderService(){const r=state.role;let modes;
   return `<div class="screen-h"><div><h2>Service</h2><div class="crumb">Report · Triage · Do — one work record across roles</div></div></div>
    <div class="legacy-note">Replaces Fault Report + Tech Support + Work Orders + Manage KB; retires the legacy Work Orders app.</div>
    <div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>${body}`;}
-function svcReport(){const opts=machines.filter(m=>m.active).map(m=>`<option value="${m.code}">${m.name}</option>`).join("");
+function svcReport(){const opts=machines.filter(m=>m.active).map(m=>`<option value="${woEsc(m.code)}">${woEsc(m.name)}</option>`).join("");
   return `<div class="card" style="max-width:560px">
     <div class="field"><label>Machine</label><select id="rep_m">${opts}</select></div>
     <div class="field"><label>What's wrong?</label><textarea id="rep_d" placeholder="Describe the fault…"></textarea></div>
@@ -276,9 +299,10 @@ function svcTriage(){const news=work.filter(w=>w.status==="new"),prog=work.filte
     ${news.length?`<div class="rows">${news.map(triageRow).join("")}</div>`:'<p class="empty">Inbox clear 🎉</p>'}
     <h3 style="margin:18px 0 8px;font-size:.95rem">In progress</h3>${prog.length?listWork(prog):'<p class="empty">Nothing assigned.</p>'}`;}
 function triageRow(w){const m=mByCode(w.machine);
-  return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${wName(w)} — ${w.desc}</b>
-    <div class="meta">${w.id} · ${w.source} · priority ${w.priority}</div></div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
-    ${w.kind==="movement"?`<span class="pill">assign via Movements tab</span>`
+  return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${woEsc(wName(w))} — ${woEsc(w.desc)}</b>
+    <div class="meta">${woEsc(w.id)} · ${woEsc(w.source)} · priority ${woEsc(w.priority)}</div></div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
+    ${w.kind==="complaint"&&!(state.role==="field_manager"||state.role==="admin")
+        ? `<span class="pill" title="A complaint becomes assignable once a job order is raised for it">needs a job order first</span>`
       :drivers.length?`<select id="as_${cssId(w.id)}" class="btn sm ghost" style="width:auto">${drivers.map(d=>`<option value="${d}">${driverName(d)}</option>`).join("")}</select>
     <button class="btn sm" onclick="assign('${w.id}')">Assign</button>`
       :`<input id="as_${cssId(w.id)}" placeholder="operator@email" style="width:170px">
@@ -291,13 +315,14 @@ async function assign(id){const w=work.find(x=>x.id===id);const d=($("#as_"+cssI
   else if(w.kind==="delivery") r=await api(`/api/wo/deliveryorders/${w.rid}/assign`,{method:"POST",body:{assigned_to:d}});
   else if(w.kind==="complaint")r=await api("/api/wo/joborders",{method:"POST",body:{complaint_id:w.rid,assigned_to:d,
     diagnosis:w.desc,machine_code:w.machine!=="?"?w.machine:null,machine_name:w.machineName||undefined}});
-  else{toast("Assign movements from the main dashboard's Movements tab.");return;}
+  else if(w.kind==="movement") r=await api(`/api/wo/movementorders/${w.rid}/assign`,{method:"POST",body:{assigned_to:d}});
+  else{toast("This item cannot be assigned directly.");return;}
   if(!r)return; await reload(); toast(w.id+" assigned to "+driverName(d));}
 function svcMyJobs(){const me=(ME||"").toLowerCase();const mine=work.filter(w=>(w.assignedTo||"").toLowerCase()===me&&w.status==="assigned");
   return `<p class="note" style="margin:0 0 10px">Stops assigned to <b>${ME||"you"}</b>. Service, delivery &amp; movement in one list.</p>
    ${mine.length?`<div class="rows">${mine.map(jobRow).join("")}</div>`:'<p class="empty">No open stops assigned to you.</p>'}`;}
 function jobRow(w){const m=mByCode(w.machine);
-  return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${wName(w)}</b><div class="meta">${w.desc} · ${w.id}</div></div>
+  return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${woEsc(wName(w))}</b><div class="meta">${woEsc(w.desc)} · ${woEsc(w.id)}</div></div>
     <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span><button class="btn sm ghost" onclick="openJob('${w.id}')">Open</button></div>`;}
 /* ── Opening a job ──────────────────────────────────────────────────────────
    Service + delivery stops open the STANDARD Work Order sheet (one sheet per
@@ -309,8 +334,8 @@ function openJob(id){const w=work.find(x=>x.id===id); if(!w)return;
   openWorkOrder(w.machine);}
 
 function openMovement(w){
-  drawer(`<h3>${wName(w)}</h3><span class="pill">MOVEMENT</span> <span class="pill">${w.id}</span>
-    <p class="note">${w.desc}</p>
+  drawer(`<h3>${woEsc(wName(w))}</h3><span class="pill">MOVEMENT</span> <span class="pill">${woEsc(w.id)}</span>
+    <p class="note">${woEsc(w.desc)}</p>
     <button class="btn" onclick="completeMovement('${w.id}')">Complete movement</button>
     <p class="note">Applies the machine's <b>location change</b> exactly like the Movements tab. Movements are not part of the Work Order form.</p>`);}
 async function completeMovement(id){const w=work.find(x=>x.id===id);
@@ -515,7 +540,7 @@ function woPdfLink(vid){
 function svcKB(){return `<div class="rows">${kb.map(k=>`<div class="row"><div class="grow"><b>${k.id} — ${k.sym}</b><div class="meta">Root: ${k.root} · Fix: ${k.fix}</div></div>${(state.role==="field_manager"||state.role==="admin")?'<button class="btn sm ghost">Edit</button>':''}</div>`).join("")}</div><p class="note">CAR-format KB, inline from any job (was the Manage KB tab). Demo entries.</p>`;}
 function listWork(arr,empty){if(!arr.length)return `<p class="empty">${empty||"Nothing here."}</p>`;
   return `<div class="rows">${arr.map(w=>{const m=mByCode(w.machine);return `<div class="row"><span class="dot ${m?m.status:'g'}"></span>
-    <div class="grow"><b>${wName(w)} — ${w.desc}</b><div class="meta">${w.id} · ${driverName(w.assignedTo)} · ${w.source}</div></div>
+    <div class="grow"><b>${woEsc(wName(w))} — ${woEsc(w.desc)}</b><div class="meta">${woEsc(w.id)} · ${woEsc(driverName(w.assignedTo))} · ${woEsc(w.source)}</div></div>
     <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>${statusTag(w)}</div>`;}).join("")}</div>`;}
 
 /* MACHINES */
@@ -524,7 +549,7 @@ function machinesFor(){const cur=subActive("machines","active");const q=(state.m
     (!q || (m.name||"").toLowerCase().includes(q) || (m.code||"").toLowerCase().includes(q)));}
 function machineRowsHtml(){const canEdit=["admin","dispatch","field_manager"].includes(state.role);const list=machinesFor();
   if(!list.length) return '<p class="empty">No machines match your search.</p>';
-  return list.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b>
+  return list.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b>
     <div class="meta">${m.code} · ${m.lat??'?'}, ${m.lon??'?'} · last refill ${m.lastRefill}</div></div>
     <button class="btn sm ghost" onclick="openMachine('${m.code}')">Info · History${canEdit?' · Edit':''}</button></div>`).join("");}
 function renderMachineList(){const el=document.getElementById("mList");if(el)el.innerHTML=machineRowsHtml();
@@ -538,12 +563,12 @@ function renderMachines(){const cur=subActive("machines","active");const canEdit
     <div class="meta" style="margin-bottom:8px"><b id="mCount">${machinesFor().length}</b> shown</div>
     <div class="rows" id="mList">${machineRowsHtml()}</div>`;}
 function openMachine(code){const m=mByCode(code);const wos=work.filter(w=>w.machine===code);
-  drawer(`<h3>${m.name}</h3><span class="pill">${m.code}</span> <span class="pill">${m.active?'active':'decommissioned'}</span>
-    <div class="grid2" style="margin-top:12px"><div class="field"><label>Name</label><input value="${m.name}"></div>
+  drawer(`<h3>${woEsc(m.name)}</h3><span class="pill">${woEsc(m.code)}</span> <span class="pill">${m.active?'active':'decommissioned'}</span>
+    <div class="grid2" style="margin-top:12px"><div class="field"><label>Name</label><input value="${woEsc(m.name)}"></div>
       <div class="field"><label>Code</label><input value="${m.code}"></div><div class="field"><label>Lat</label><input value="${m.lat??''}"></div>
       <div class="field"><label>Lon</label><input value="${m.lon??''}"></div></div>
     <h3 style="font-size:.92rem;margin:8px 0 8px">History (work + visits)</h3>
-    <div class="timeline">${wos.length?wos.map(w=>`<div><b>${w.id} · ${tagTxt(w.type)} · ${w.status}</b>${w.desc}</div>`).join(""):'<div class="meta">No work recorded.</div>'}</div>
+    <div class="timeline">${wos.length?wos.map(w=>`<div><b>${woEsc(w.id)} · ${tagTxt(w.type)} · ${woEsc(w.status)}</b>${woEsc(w.desc)}</div>`).join(""):'<div class="meta">No work recorded.</div>'}</div>
     <p class="note">Info / History / status in one drawer. (Edits are preview-only.)</p>`);}
 
 function openAddMachine(){
@@ -566,10 +591,10 @@ function renderFleet(){const cur=subActive("fleet","status");
   const A=machines.filter(m=>m.active);const g=A.filter(m=>m.status==="g").length,y=A.filter(m=>m.status==="y").length,r=A.filter(m=>m.status==="r").length;
   let body;
   if(cur==="sales")body=renderSalesUI();
-  else if(cur==="events")body=`<div class="rows">${A.filter(m=>m.status!=="g").slice(0,12).map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.status==='r'?'silent past threshold':'recent error/exception'}</div></div></div>`).join("")||'<p class="empty">No active alerts.</p>'}</div><p class="note">Derived from heartbeat (was Messages tab).</p>`;
-  else if(cur==="refill")body=`<div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.vendsSince==null?'vends since refill: —':m.vendsSince+' vends since refill'} · last ${m.lastRefill}</div></div></div>`).join("")}</div><p class="note">Read-only refill status so Sales keeps top-up visibility. Logging happens in Plan / My Jobs.</p>`;
+  else if(cur==="events")body=`<div class="rows">${A.filter(m=>m.status!=="g").slice(0,12).map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${m.status==='r'?'silent past threshold':'recent error/exception'}</div></div></div>`).join("")||'<p class="empty">No active alerts.</p>'}</div><p class="note">Derived from heartbeat (was Messages tab).</p>`;
+  else if(cur==="refill")body=`<div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${m.vendsSince==null?'vends since refill: —':m.vendsSince+' vends since refill'} · last ${m.lastRefill}</div></div></div>`).join("")}</div><p class="note">Read-only refill status so Sales keeps top-up visibility. Logging happens in Plan / My Jobs.</p>`;
   else body=`<div class="kpis"><div class="kpi"><b style="color:var(--ok)">${g}</b><small>🟢 online</small></div><div class="kpi"><b style="color:var(--warn)">${y}</b><small>🟡 warning</small></div><div class="kpi"><b style="color:var(--bad)">${r}</b><small>🔴 silent</small></div></div>
-    <div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${m.name}</b><div class="meta">${m.status==='r'?'silent — needs attention':m.status==='y'?'warning':'online'}</div></div>${m.status!=='g'?`<button class="btn sm ghost" onclick="fleetReport('${m.code}')">Report fault</button>`:''}</div>`).join("")}</div>
+    <div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${m.status==='r'?'silent — needs attention':m.status==='y'?'warning':'online'}</div></div>${m.status!=='g'?`<button class="btn sm ghost" onclick="fleetReport('${m.code}')">Report fault</button>`:''}</div>`).join("")}</div>
     <p class="note">Live heartbeat (was Heartbeat tab). "Report fault" opens Service ▸ Report.</p>`;
   return `<div class="screen-h"><div><h2>Fleet</h2><div class="crumb">Monitor — Sales + Messages + Heartbeat (+ refill status)</div></div></div>
     <div class="subnav"><button data-sub="status" class="${cur==='status'?'on':''}">Live status</button><button data-sub="sales" class="${cur==='sales'?'on':''}">Sales</button>
@@ -578,23 +603,192 @@ function fleetReport(code){if(!ROLE_NAV[state.role].includes("service")){toast("
   state.area="service";state.sub.service=(state.role==="field_manager"||state.role==="admin")?"triage":"report";render();if($("#rep_m"))$("#rep_m").value=code;toast("Reporting fault on "+code);}
 
 /* PLAN */
-function renderPlan(){const open=work.filter(w=>w.status!=="done");const un=open.filter(w=>!w.assignedTo);
-  return `<div class="screen-h"><div><h2>Plan — today</h2><div class="crumb">Route &amp; schedule — Dispatch + Topups + Movements</div></div><button class="btn" onclick="autoPlan()">Auto-plan routes</button></div>
-    <div class="kpis"><div class="kpi"><b>${open.filter(w=>w.type==='delivery').length}</b><small>deliveries</small></div><div class="kpi"><b>${open.filter(w=>w.type==='service').length}</b><small>service</small></div>
-      <div class="kpi"><b>${open.filter(w=>w.type==='movement').length}</b><small>movements</small></div><div class="kpi"><b>${un.length}</b><small>unassigned</small></div></div>
-    <h3 style="font-size:.95rem;margin:4px 0 8px">Drivers &amp; load</h3>
-    <div class="rows">${drivers.map(d=>{const load=open.filter(w=>w.assignedTo===d);return `<div class="row"><div class="grow"><b>${driverName(d)}</b><div class="meta">${load.length} stop(s): ${load.map(w=>w.machine).join(", ")||"—"}</div></div><span class="pill">${load.length} stop${load.length!==1?'s':''}</span></div>`;}).join("")}</div>
-    <h3 style="font-size:.95rem;margin:18px 0 8px">Unassigned work</h3>${un.length?`<div class="rows">${un.map(triageRow).join("")}</div>`:'<p class="empty">All open work is assigned.</p>'}
-    <p class="note">Live — assignments write to the work-order system. A refill routes here and closes as a delivery stop, so the Topups tab disappears.</p>`;}
+const SLOT_PAD  = 3;                       // spare empty slots under each driver
+const openWork  = () => work.filter(w => w.status !== "done");
+/* Board sites live in one indexed array. Slot <option> values and the clear
+   button carry the INDEX, never a machine code — so nothing from the database
+   is ever interpolated into an attribute or a JS string. */
+let BOARD_SITES = [];
+
+function buildSites(){
+  const by = {};
+  openWork().forEach(w => {
+    // A work item with no machine code cannot be a board stop: grouping them
+    // would collapse unrelated machines into one clickable "site" whose slot
+    // would bulk-assign the lot. They stay in the Unassigned list instead.
+    if (!w.machine || w.machine === "?") return;
+    const s = by[w.machine] = by[w.machine] || {code: w.machine, name: null, items: []};
+    s.items.push(w);
+    // deterministic name: prefer the machine registry, else the first non-empty
+    if (!s.name) { const m = mByCode(w.machine); s.name = m ? m.name : (w.machineName || null); }
+  });
+  BOARD_SITES = Object.values(by).map(s => (s.name = s.name || s.code, s)).sort((a, b) => {
+    const ua = a.items.filter(x => !x.assignedTo).length, ub = b.items.filter(x => !x.assignedTo).length;
+    return ua !== ub ? ub - ua : String(a.name).localeCompare(String(b.name));
+  });
+  return BOARD_SITES;
+}
+function siteLabel(s){
+  const u = s.items.filter(x => !x.assignedTo).length;
+  const kinds = [...new Set(s.items.map(x => tagTxt(x.type)))].join("/");
+  return woEsc(`${s.name} — ${s.items.length} ${kinds}${u ? ` · ${u} unassigned` : " · all assigned"}`);
+}
+
+function renderPlan(){
+  const open = openWork(), un = open.filter(w => !w.assignedTo);
+  buildSites();
+  // Complaints are counted separately: they are not assignable until a manager
+  // raises a job order, so folding them in would leave the tile stuck above zero.
+  const cnt = t => open.filter(w => w.type === t && w.kind !== "complaint").length;
+  const unc = t => un.filter(w => w.type === t && w.kind !== "complaint").length;
+  const kpi = (t, lbl) => `<div class="kpi"><b>${cnt(t)}</b><small>${lbl} open · <b>${unc(t)}</b> unassigned</small></div>`;
+  const comp = un.filter(w => w.kind === "complaint").length;
+
+  // Anyone holding open work who is not on the Graph roster gets a card too,
+  // or their stops would vanish from the board while still inflating the KPIs.
+  const roster = drivers.map(d => d.toLowerCase());
+  const offRoster = [...new Set(open.map(w => (w.assignedTo || "").toLowerCase()).filter(Boolean))]
+                    .filter(e => !roster.includes(e));
+  const opts = BOARD_SITES.map((s, i) => `<option value="${i}">${siteLabel(s)}</option>`).join("");
+
+  const noRoster = !drivers.length ? `<div class="legacy-note"><b>Driver roster did not load.</b>
+      The board needs <code>/api/wo/technicians</code>, which is Graph-backed and role-gated.
+      Until it returns, assign by typing an operator email in the Unassigned list below.</div>` : "";
+
+  return `<div class="screen-h"><div><h2>Plan — today</h2>
+      <div class="crumb">Assign sites to drivers. Filling a slot assigns every open item at that site.</div></div>
+      <button class="btn" onclick="autoPlan()">Auto-plan routes</button></div>
+    <div class="kpis">${kpi("delivery","deliveries")}${kpi("service","service")}${kpi("movement","movements")}
+      <div class="kpi"><b>${un.length - comp}</b><small>assignable now${comp ? ` · <b>${comp}</b> complaint${comp!==1?"s":""} awaiting a job order` : ""}</small></div></div>
+    ${noRoster}
+    <h3 style="font-size:.95rem;margin:4px 0 8px">Board — drivers &amp; stops</h3>
+    ${drivers.length || offRoster.length
+      ? `<div class="bd">${drivers.map(d => driverCard(d, opts, false)).join("")}
+                        ${offRoster.map(d => driverCard(d, opts, true)).join("")}</div>` : ""}
+    ${(() => { const cl = open.filter(w => (!w.machine || w.machine === "?") && w.assignedTo);
+        return cl.length ? `<div class="legacy-note" style="margin-top:12px"><b>${cl.length} assigned item(s) have no machine code</b>
+          and cannot appear on the board: ${cl.map(w => woEsc(w.id)).join(", ")}. Fix the machine code in the main dashboard.</div>` : ""; })()}
+    <h3 style="font-size:.95rem;margin:18px 0 8px">Unassigned work — ${un.length - comp} assignable${comp ? `, ${comp} awaiting a job order` : ""}</h3>
+    ${un.length ? `<div class="rows">${un.map(triageRow).join("")}</div>`
+                : '<p class="empty">All open work is assigned.</p>'}
+    <p class="note">Live — every slot writes through the same work-order API the main dashboard uses.
+      Manual board; auto-assignment comes later.</p>`;
+}
+
+function driverCard(email, opts, off){
+  const lc = (email || "").toLowerCase();
+  const mine = BOARD_SITES.filter(s => s.items.some(w => (w.assignedTo || "").toLowerCase() === lc));
+  // An off-roster person with nothing on the board would render an empty card
+  // telling you to reassign stops it isn't showing. Their work is codeless and
+  // is listed separately below the board instead.
+  if (off && !mine.length) return "";
+  const empties = off ? 0 : SLOT_PAD;              // off-roster cards are read-only
+
+  const filledHtml = mine.map((s, i) => {
+    const his = s.items.filter(w => (w.assignedTo || "").toLowerCase() === lc);
+    const idx = BOARD_SITES.indexOf(s);
+    return `<div class="slot on"><span class="n">${i + 1}</span>
+      <span class="b"><b>${woEsc(s.name)}</b>
+        <small>${woEsc(s.code)} · ${his.map(x => tagTxt(x.type)).join(", ")}</small></span>
+      ${off ? "" : `<button class="x" title="Unassign this stop" data-i="${idx}" onclick="boardClear(this)">×</button>`}
+    </div>`;
+  }).join("");
+
+  const emptyHtml = Array.from({length: empties}, (_, k) => `
+    <div class="slot"><span class="n">${mine.length + k + 1}</span>
+      <select onchange="boardAssign(this)">
+        <option value="">— pick a site —</option>${opts}
+      </select></div>`).join("");
+
+  return `<div class="bd-c" data-email="${woEsc(email)}">
+    <div class="bd-h"><span class="who"><b>${woEsc(driverName(email))}</b>${
+      off ? "" : `<span class="em">${woEsc(email)}</span>`}</span>
+      <span class="pill">${off ? "off roster · " : ""}${mine.length} stop${mine.length !== 1 ? "s" : ""}</span></div>
+    ${filledHtml}${emptyHtml}
+    ${off ? '<p class="note" style="margin:6px 0 0;font-size:.7rem">Not in the Operator role in AAD. Reassign these stops or restore the role.</p>' : ""}</div>`;
+}
+
+/* The card owns its email in a data attribute: nothing is encoded into a
+   handler string, so there is no token to collide and nothing to unescape. */
+const cardEmail = el => (el.closest(".bd-c") || {}).dataset?.email || null;
+
+async function boardAssign(sel){
+  const i = sel.value; if (i === "") return;
+  const site = BOARD_SITES[+i], email = cardEmail(sel);
+  if (!site || !email){ toast("Could not resolve that stop — refresh and retry."); return; }
+  sel.disabled = true;
+  try{
+    const lc = email.toLowerCase();
+    const mine = site.items.filter(w => (w.assignedTo || "").toLowerCase() === lc);
+    if (mine.length === site.items.length && site.items.length){
+      toast("Already assigned to " + driverName(email)); return; }
+    const moved = site.items.filter(w => w.assignedTo && w.assignedTo.toLowerCase() !== lc);
+    if (moved.length){
+      const who = [...new Set(moved.map(w => driverName(w.assignedTo)))].join(", ");
+      if (!confirm(`${moved.length} item(s) at ${site.name} are assigned to ${who}. Move them to ${driverName(email)}?`)) return;
+    }
+    toast(await assignSite(site.code, email, `assigned to ${driverName(email)}`));
+    await reload();
+  } finally { sel.value = ""; sel.disabled = false; }
+}
+
+async function boardClear(btn){
+  const site = BOARD_SITES[+btn.dataset.i], email = cardEmail(btn);
+  if (!site || !email) return;
+  if (!confirm(`Unassign ${site.name} from ${driverName(email)}?`)) return;
+  // scoped to THIS driver — auto-plan can split a site, and clearing someone
+  // else's stop from under them would be silent data loss
+  toast(await assignSite(site.code, null, "unassigned", email));
+  await reload();
+}
+
+/* Returns a single honest summary string. Every item is attempted; nothing is
+   rolled back, so a partial result must be reported as a partial result. */
+async function assignSite(code, email, verb, onlyFrom){
+  const lc = onlyFrom ? onlyFrom.toLowerCase() : null;
+  const items = openWork().filter(w => w.machine === code &&
+    (!lc || (w.assignedTo || "").toLowerCase() === lc));
+  let ok = 0, failed = 0, skipped = 0;
+  for (const w of items){
+    let path = null;
+    if (w.rid){
+      if (w.kind === "joborder")      path = `/api/wo/joborders/${w.rid}/assign`;
+      else if (w.kind === "delivery") path = `/api/wo/deliveryorders/${w.rid}/assign`;
+      else if (w.kind === "movement") path = `/api/wo/movementorders/${w.rid}/assign`;
+    }
+    if (!path){ skipped++; continue; }            // complaints and demo rows
+    const r = await api(path, {method: "POST", body: {assigned_to: email}});
+    if (r) ok++; else failed++;
+  }
+  const bits = [`${ok} ${verb}`];
+  if (failed)  bits.push(`${failed} failed`);
+  if (skipped) bits.push(`${skipped} skipped (raise a job order first)`);
+  return `${code}: ` + bits.join(" · ");
+}
+
 async function autoPlan(){
-  const un=work.filter(w=>w.status!=="done"&&!w.assignedTo&&w.rid&&(w.kind==="joborder"||w.kind==="delivery"));
-  if(!un.length){toast("Nothing auto-plannable (job orders & deliveries only).");return;}
   if(!drivers.length){toast("No technicians found to assign — configure the Technician lookup.");return;}
-  let n=0;
-  for(let i=0;i<un.length;i++){const w=un[i];const d=drivers[i%drivers.length];
-    const path=w.kind==="joborder"?`/api/wo/joborders/${w.rid}/assign`:`/api/wo/deliveryorders/${w.rid}/assign`;
-    const r=await api(path,{method:"POST",body:{assigned_to:d}}); if(r)n++;}
-  await reload(); toast("Auto-planned "+n+" of "+un.length+" stop(s)");}
+  // Round-robin by SITE, not by work item. Assigning item-by-item would split a
+  // machine across two drivers, which the board cannot represent and which makes
+  // the per-driver clear button destructive.
+  // Only sites where EVERY item is unassigned. A site that is partly someone
+  // else's would otherwise be moved wholesale with no warning — boardAssign
+  // asks before doing that; auto-plan has no way to ask per site.
+  const all=buildSites().filter(s=>s.items.some(w=>!w.assignedTo));
+  const todo=all.filter(s=>s.items.every(w=>!w.assignedTo));
+  const partial=all.length-todo.length;
+  if(!todo.length){toast(partial?`Nothing fully unassigned — ${partial} site(s) are part-assigned; use the slots.`
+                                :"Nothing to auto-plan — every site already has a driver.");return;}
+  if(!confirm(`Assign ${todo.length} fully unassigned site(s) round-robin across ${drivers.length} driver(s)?`
+    +(partial?`\n\n${partial} part-assigned site(s) will be left alone.`:"")))return;
+  let ok=0,bad=0;
+  for(let i=0;i<todo.length;i++){
+    const s=await assignSite(todo[i].code, drivers[i%drivers.length], "assigned");
+    if(/failed/.test(s)){bad++;} else {ok++;}
+  }
+  await reload();
+  toast(`Auto-plan — ${ok} site(s) assigned`+(bad?` · ${bad} had failures, check the work list`:"")
+        +(partial?` · ${partial} part-assigned skipped`:""));}
 
 /* ADMIN */
 function renderAdmin(){const cur=subActive("admin","cleanup");let body;
