@@ -20,7 +20,7 @@ Heartbeat hook deferred per Yash's directive (2026-06-03).
 from __future__ import annotations
 
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import io
 
@@ -2796,12 +2796,16 @@ def _sync_topup(cursor, machine_code):
     if not row:
         return "Machine code not found in vending data — topup not synced."
     current_ole = row[0]
+    # NB: '1%%' — pymssql %-formats the query before sending it, so a literal
+    # '%' MUST be doubled in any statement that also passes parameters.
+    # (This was '1%' and raised TypeError on every call, i.e. delivery
+    #  completion has never actually succeeded. Do not "simplify" it back.)
     if current_ole is not None:
         cursor.execute(f"""
             SELECT COUNT(DISTINCT CAST([Date Time] AS FLOAT)) FROM [MasterData Table]
             WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
               AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
+              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%%'
               AND CAST([Date Time] AS FLOAT) >= {float(current_ole)}
         """, (machine_code,))
     else:
@@ -2809,7 +2813,7 @@ def _sync_topup(cursor, machine_code):
             SELECT COUNT(DISTINCT CAST([Date Time] AS FLOAT)) FROM [MasterData Table]
             WHERE CAST([Machine Code] AS NVARCHAR(50)) = %s
               AND LEN(CAST([Event Code] AS NVARCHAR(20))) = 6
-              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%'
+              AND CAST([Event Code] AS NVARCHAR(20)) LIKE '1%%'
         """, (machine_code,))
     vends_since = int(cursor.fetchone()[0])
     cursor.execute(f"""
@@ -3193,12 +3197,32 @@ def api_delivery_detail(did):
             conn.close()
             return jsonify({"error": "Delivery order not found."}), 404
         activity = _activity_for(cursor, "deliveryorder", did)
+        # Quantities live in WO_DeliveryOrderLines whenever the order went
+        # through a visit work order. The legacy Item1Qty..Item8Qty columns only
+        # cover the first 8 of 17 catalogue items, so prefer the lines table and
+        # fall back to the legacy columns for pre-visit-era orders.
+        line_items = []
+        try:
+            cursor.execute("""
+                SELECT i.Name, l.QtyOrdered, l.QtyDelivered, i.Unit, i.Content
+                FROM WO_DeliveryOrderLines l
+                INNER JOIN WO_DeliveryItems i ON i.ItemID = l.ItemID
+                WHERE l.DeliveryOrderID = %s
+                ORDER BY i.SortOrder, i.ItemID
+            """, (did,))
+            for n, (name, qo, qd, unit, content) in enumerate(cursor.fetchall(), start=1):
+                line_items.append({"index": n, "label": name, "unit": unit,
+                                   "content": content,
+                                   "quantity": int(qd if qd is not None else (qo or 0)),
+                                   "quantity_ordered": int(qo or 0)})
+        except Exception:
+            line_items = []
         conn.close()
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
-    items = [{"index": i + 1, "label": DELIVERY_ITEMS[i],
-              "quantity": int(row[7 + i] or 0)} for i in range(8)]
+    items = line_items or [{"index": i + 1, "label": DELIVERY_ITEMS[i],
+                            "quantity": int(row[7 + i] or 0)} for i in range(8)]
     return jsonify({
         "id": row[0], "machine_name": row[1], "machine_code": row[2],
         "notes": row[3], "assigned_to": row[4], "priority": row[5],
@@ -3268,7 +3292,7 @@ def api_delivery_complete(did):
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT AssignedTo, MachineCode, RecipientName FROM WO_DeliveryOrders "
+            "SELECT AssignedTo, MachineCode, RecipientName, Status FROM WO_DeliveryOrders "
             "WHERE DeliveryOrderID = %s",
             (did,),
         )
@@ -3276,6 +3300,11 @@ def api_delivery_complete(did):
         if not row:
             conn.close()
             return jsonify({"error": "Delivery order not found."}), 404
+        # Already completed (e.g. signed off via a visit work order) — completing
+        # again would re-run _sync_topup and wipe the top-up baseline.
+        if (row[3] or "").lower() == "completed":
+            conn.close()
+            return jsonify({"error": "This delivery order is already completed."}), 400
         role = get_role(user)
         if role == ROLE_OPERATOR and (row[0] or "").lower() != user:
             conn.close()
@@ -3791,6 +3820,115 @@ def api_equipment_log():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ── Service category constants (fixed 4 per the PDF template) ────────────────
+# ── Machine attributes (2026-08-10) ───────────────────────────────────────────
+# Five physical facts about a machine that change what a driver puts in the van.
+# The option lists below are authoritative: the UI renders them verbatim and the
+# API rejects anything outside them, so these columns cannot drift into free text.
+#
+# NULL means "never recorded". That is deliberately NOT the same as the "Absent"
+# option, which is a real answer meaning the feature is not fitted.
+#
+# Capture point is the operator's Work Order sheet, because these are physical
+# observations only the person at the machine can make reliably. The gate is on
+# FINALIZE, not on assignment: six separate code paths write AssignedTo (two of
+# them at INSERT), so a gate there is bypassable, and it would freeze dispatch on
+# day one when every machine is NULL. Gating finalize costs the technician five
+# taps and lets the fleet self-heal one visit at a time.
+MACHINE_ATTRS = [
+    # (payload key,      DB column,         label,               options)
+    ("machine_type",     "MachineType",     "Type of machine",   ["Standing", "Standing-Fr", "Tabletop", "Lite"]),
+    ("water_source",     "WaterSource",     "Machine water",     ["Piped", "Carried"]),
+    ("tea_syrup",        "TeaSyrup",        "Tea and syrup",     ["Installed", "Absent"]),
+    ("payment_terminal", "PaymentTerminal", "Payment terminal",  ["NETS", "Other", "Cash", "Absent"]),
+    ("data_connection",  "DataConnection",  "Data connection",   ["Own", "Local WiFi", "Absent"]),
+]
+MACHINE_ATTR_COLS = [a[1] for a in MACHINE_ATTRS]
+
+
+def _machine_attrs_spec():
+    """Option lists for the UI. DB column names are deliberately not exposed."""
+    return [{"key": k, "label": lb, "options": o} for k, _c, lb, o in MACHINE_ATTRS]
+
+
+def _validate_machine_attrs(payload):
+    """PURE. No DB. -> (clean {key: value}, error_message_or_None).
+
+    Called before any cursor.execute in every caller, so a rejection can never
+    discard work that was already written in the same request.
+    """
+    clean = {}
+    if not payload:
+        return clean, None
+    if not isinstance(payload, dict):
+        return clean, "machine_attrs must be an object."
+    for key, _col, label, options in MACHINE_ATTRS:
+        if key not in payload:
+            continue
+        raw = payload.get(key)
+        val = "" if raw is None else str(raw).strip()   # str(): a non-string must not crash
+        if not val:
+            continue
+        if val not in options:
+            return {}, f"{label}: '{val}' is not one of {', '.join(options)}."
+        clean[key] = val
+    return clean, None
+
+
+def _missing_from(vals):
+    """Single source of truth for 'what is still unrecorded'. Used by both the
+    UI hint and the finalize gate, so the two cannot drift."""
+    return [lb for k, _c, lb, _o in MACHINE_ATTRS if not str(vals.get(k) or "").strip()]
+
+
+def _read_machine_attrs(cursor, code):
+    """-> (values_by_key, machine_row_exists). Missing row -> ({all None}, False)."""
+    cursor.execute(
+        f"SELECT TOP 1 {', '.join(MACHINE_ATTR_COLS)} FROM MachineLookup WHERE MachineCode = %s",
+        (str(code),),
+    )
+    r = cursor.fetchone()
+    if not r:
+        return {a[0]: None for a in MACHINE_ATTRS}, False
+    return {MACHINE_ATTRS[i][0]: r[i] for i in range(len(MACHINE_ATTRS))}, True
+
+
+def _write_machine_attrs(cursor, code, clean, user=None):
+    """Persist already-validated values. -> rows affected.
+
+    Only keys present in `clean` are written, so a partial save never blanks a
+    value someone else recorded. Callers MUST check the return: None means
+    "nothing was asked of us"; any n <= 0 means the write did not land (0 = no
+    such MachineCode, -1 = pymssql could not determine, e.g. a trigger with
+    NOCOUNT ON). Either has to surface rather than silently leaving the machine
+    incomplete forever.
+    """
+    if not clean:
+        return None                    # nothing asked of us; not a failed write
+    sets, params = [], []
+    for key, col, _label, _options in MACHINE_ATTRS:
+        if key in clean:
+            sets.append(f"{col} = %s")
+            params.append(clean[key])
+    if not sets:
+        return None
+    params.append(str(code))
+    cursor.execute(
+        f"UPDATE MachineLookup SET {', '.join(sets)} WHERE MachineCode = %s",
+        tuple(params),
+    )
+    n = cursor.rowcount
+    if n and user:
+        try:
+            _log_activity(
+                cursor, "machine", 0, "machine_attrs_updated",
+                f"{code}: " + ", ".join(f"{k}={v}" for k, v in sorted(clean.items())),
+                user,
+            )
+        except Exception as e:                       # never fail a visit over the audit row
+            print(f"[machine_attrs] activity log skipped for {code}: {e}")
+    return n
+
+
 SERVICE_CATEGORIES = [
     ("PMC", "General Machine Preventive Maintenance and Cleaning"),
     ("CMR", "Machine Corrective Maintenance and Recovery"),
@@ -4069,6 +4207,17 @@ def api_operator_location_detail(code):
             conn.close()
             return jsonify({"error": "Machine not found."}), 404
         machine = {"code": code, "name": m[0], "is_active": bool(m[1])}
+        # Machine attributes: current values + the authoritative option lists.
+        # Wrapped because init_db swallows ALTER TABLE failures; if the columns
+        # are not there yet the sheet must still open, just without this block.
+        try:
+            _avals, _ = _read_machine_attrs(cursor, code)
+            machine["attrs"] = _avals
+            machine["attrs_spec"] = _machine_attrs_spec()
+            machine["attrs_missing"] = _missing_from(_avals)
+        except Exception as e:
+            print(f"[machine_attrs] read skipped for {code}: {e}")
+            machine["attrs"], machine["attrs_spec"], machine["attrs_missing"] = {}, [], []
 
         # Service JobOrders for me, open
         cursor.execute("""
@@ -4257,7 +4406,10 @@ def api_visit_start():
     sjo_ids = data.get("service_job_order_ids") or []
     do_id   = data.get("delivery_order_id")
     user = get_current_user()
-    today = datetime.utcnow().date()
+    # Visit date is the operator's LOCAL (SGT, UTC+8) day — a 07:00 SGT visit
+    # must not be stamped as yesterday, and reopening a sheet at 08:30 SGT
+    # must reuse the same visit rather than start a new one.
+    today = (datetime.utcnow() + timedelta(hours=8)).date()
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -4266,25 +4418,63 @@ def api_visit_start():
         mrow = cursor.fetchone()
         machine_name = mrow[0] if mrow else None
 
-        display_id = allocate_display_id(cursor, "VIS")
+        # Reuse an existing UNFINALISED visit for this operator+machine+day instead of
+        # creating a duplicate draft every time the sheet is opened. (Finalised
+        # visits are immutable, so a second trip on the same day starts a new one.)
         cursor.execute("""
-            INSERT INTO WO_VisitSessions
-                (DisplayID, MachineCode, MachineNameSnap, OperatorEmail,
-                 VisitDate, LinkedDeliveryOrderID)
-            OUTPUT INSERTED.VisitID
-            VALUES (%s, %s, %s, %s, %s, %s)
-        """, (display_id, code, machine_name, user, today, do_id))
-        vid = int(cursor.fetchone()[0])
+            SELECT TOP 1 VisitID FROM WO_VisitSessions
+            WHERE MachineCode = %s AND OperatorEmail = %s AND VisitDate = %s
+              AND (Status IS NULL OR Status NOT IN ('signed', 'pending_email_signature'))
+            ORDER BY VisitID DESC
+        """, (code, user, today))
+        exist = cursor.fetchone()
+
+        if exist:
+            vid = int(exist[0])
+            if do_id is not None:
+                cursor.execute(
+                    "UPDATE WO_VisitSessions SET LinkedDeliveryOrderID = %s "
+                    "WHERE VisitID = %s AND LinkedDeliveryOrderID IS NULL",
+                    (do_id, vid),
+                )
+        else:
+            display_id = allocate_display_id(cursor, "VIS")
+            cursor.execute("""
+                INSERT INTO WO_VisitSessions
+                    (DisplayID, MachineCode, MachineNameSnap, OperatorEmail,
+                     VisitDate, LinkedDeliveryOrderID)
+                OUTPUT INSERTED.VisitID
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (display_id, code, machine_name, user, today, do_id))
+            vid = int(cursor.fetchone()[0])
 
         for jid in sjo_ids:
             try:
                 jid_int = int(jid)
             except (TypeError, ValueError):
                 continue
-            cursor.execute(
-                "INSERT INTO WO_VisitSession_JobOrders (VisitID, JobOrderID) VALUES (%s, %s)",
-                (vid, jid_int),
-            )
+            # Only link job orders that are genuinely open on THIS machine and
+            # (for non-managers) assigned to the caller — stops a crafted payload
+            # force-closing someone else's work order at finalize.
+            if get_role(user) in MANAGER_ROLES:
+                cursor.execute(
+                    "SELECT 1 FROM WO_JobOrders WHERE JobOrderID=%s "
+                    "AND MachineCode=%s AND StatusCode IN (0,1)",
+                    (jid_int, code),
+                )
+            else:
+                cursor.execute(
+                    "SELECT 1 FROM WO_JobOrders WHERE JobOrderID=%s "
+                    "AND MachineCode=%s AND StatusCode IN (0,1) AND LOWER(AssignedTo)=%s",
+                    (jid_int, code, user.lower()),
+                )
+            if not cursor.fetchone():
+                continue
+            cursor.execute("""
+                IF NOT EXISTS (SELECT 1 FROM WO_VisitSession_JobOrders
+                               WHERE VisitID=%s AND JobOrderID=%s)
+                INSERT INTO WO_VisitSession_JobOrders (VisitID, JobOrderID) VALUES (%s, %s)
+            """, (vid, jid_int, vid, jid_int))
 
         cursor.execute(_select_visit_sql() + " WHERE VisitID = %s", (vid,))
         row = cursor.fetchone()
@@ -4329,11 +4519,16 @@ def api_visit_update(vid):
     """
     data = request.get_json(silent=True) or {}
     user = get_current_user()
+    # Validated BEFORE opening a connection: a bad attribute value can then never
+    # cost the technician the draft he just typed on site.
+    attrs_clean, attrs_err = _validate_machine_attrs(data.get("machine_attrs"))
+    if attrs_err:
+        return jsonify({"error": attrs_err}), 400
     try:
         conn = get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT OperatorEmail, Status, LinkedDeliveryOrderID FROM WO_VisitSessions WHERE VisitID=%s",
+            "SELECT OperatorEmail, Status, LinkedDeliveryOrderID, MachineCode FROM WO_VisitSessions WHERE VisitID=%s",
             (vid,),
         )
         row = cursor.fetchone()
@@ -4374,6 +4569,22 @@ def api_visit_update(vid):
         if "customer_unavailable_reason" in data:
             sets.append("CustomerUnavailableReason = %s")
             params.append((data["customer_unavailable_reason"] or "").strip() or None)
+
+        # Machine attributes ride along with the draft and commit with it.
+        # A draft save must NEVER fail: this fires on every keystroke-driven
+        # autosave, and losing the technician's counter and remarks because of a
+        # registry problem he cannot fix would be far worse than the problem.
+        # So a bad machine code is REPORTED in the 200 body and hard-failed later
+        # at finalize, where it is actionable and nothing is yet at stake.
+        attrs_warning = None
+        if attrs_clean:
+            if not row[3]:
+                attrs_warning = "This visit has no machine code, so the machine details were not saved."
+            else:
+                _n = _write_machine_attrs(cursor, row[3], attrs_clean, user)
+                if _n is not None and _n <= 0:
+                    attrs_warning = (f"Machine {row[3]} may not be in the machine registry — "
+                                     "could not be confirmed. Tell a manager.")
 
         if sets:
             sets.append("UpdatedAt = SYSUTCDATETIME()")
@@ -4426,6 +4637,9 @@ def api_visit_update(vid):
                     qty = int(ln.get("qty_delivered") or 0)
                 except (TypeError, ValueError):
                     continue
+                if qty < 0 or qty > 999:
+                    conn.close()
+                    return jsonify({"error": f"Quantity for item {item_id} must be 0-999."}), 400
                 cursor.execute("""
                     UPDATE WO_DeliveryOrderLines SET QtyDelivered = %s
                     WHERE DeliveryOrderID = %s AND ItemID = %s
@@ -4442,7 +4656,10 @@ def api_visit_update(vid):
 
         conn.commit()
         conn.close()
-        return jsonify({"ok": True})
+        out = {"ok": True}
+        if attrs_warning:
+            out["machine_attrs_warning"] = attrs_warning
+        return jsonify(out)
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
@@ -4640,6 +4857,11 @@ def api_visit_finalize(vid):
     """
     data = request.get_json(silent=True) or {}
     user = get_current_user()
+    conn = None
+    skipped_job_orders = []
+    attrs_clean, attrs_err = _validate_machine_attrs(data.get("machine_attrs"))
+    if attrs_err:
+        return jsonify({"error": attrs_err}), 400
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -4665,6 +4887,65 @@ def api_visit_finalize(vid):
         if not service_name:
             conn.close()
             return jsonify({"error": "Service Personnel name (you) is required."}), 400
+
+        # ── Machine details must be on record before this Work Order can close.
+        # Completeness is judged on (stored | submitted) WITHOUT writing first,
+        # so the refusal path writes nothing and discards nothing. Placed with
+        # the other pre-write validations — nothing has been written or
+        # committed at this point.
+        _vmcode = row[2]
+        if not _vmcode:
+            conn.close()
+            return jsonify({"error": "This visit has no machine code; it cannot be submitted. "
+                                     "Tell a manager."}), 400
+        try:
+            _stored, _exists = _read_machine_attrs(cursor, _vmcode)
+            _attrs_readable = True
+        except Exception as e:
+            # Columns not present (init_db swallows ALTER failures). The sheet
+            # already degraded to no dropdowns, so the technician had nothing to
+            # fill — refusing here would strand a work order the customer has
+            # just signed. Fall through to pre-patch behaviour.
+            print(f"[machine_attrs] finalize gate skipped for {_vmcode}: {e}")
+            _stored, _exists, _attrs_readable = {}, True, False
+            try:
+                _log_activity(cursor, "visit", vid, "machine_attrs_gate_unavailable",
+                              f"{_vmcode}: columns unreadable ({e})", user)
+            except Exception:
+                pass
+        if _attrs_readable and not _exists:
+            conn.close()
+            return jsonify({"error": f"Machine {_vmcode} is not in the machine registry, so its "
+                                     "details cannot be recorded. Tell a manager."}), 409
+        _missing = []
+        if _attrs_readable:
+            _merged = dict(_stored); _merged.update(attrs_clean)
+            _missing = _missing_from(_merged)
+        # A manager closing out someone else's abandoned visit from the office
+        # cannot see the machine, so the gate would deadlock them. They are
+        # exempt; the technician who is actually on site is not.
+        _is_own_visit = (row[4] or "").lower() == user.lower()
+        if _missing and (_is_own_visit or get_role(user) not in MANAGER_ROLES):
+            conn.close()
+            return jsonify({
+                "error": "Confirm the machine's " + ", ".join(_missing)
+                         + " before submitting this Work Order.",
+                "missing_machine_attrs": _missing,
+            }), 400
+        if _missing:
+            # Manager closing out someone else's visit from the office: exempt,
+            # but never silently — the machine is still incomplete and somebody
+            # has to know it was waved through.
+            try:
+                _log_activity(cursor, "visit", vid, "machine_attrs_gate_skipped",
+                              f"{_vmcode}: still unrecorded — " + ", ".join(_missing), user)
+            except Exception as e:
+                print(f"[machine_attrs] gate-skip log failed: {e}")
+        if _attrs_readable and attrs_clean:
+            _n = _write_machine_attrs(cursor, _vmcode, attrs_clean, user)
+            if _n is not None and _n <= 0:
+                conn.close()
+                return jsonify({"error": f"Machine {_vmcode} is not in the machine registry."}), 409
 
         if cust_unavail and not cust_reason:
             conn.close()
@@ -4737,28 +5018,69 @@ def api_visit_finalize(vid):
             })
 
         # Transition linked WOs:
-        #   Each linked JobOrder → StatusCode = 2 (pending_review) so manager reviews
+        #   Each linked JobOrder → StatusCode = 2 (pending_review) so manager reviews.
+        #   Re-check it is still open (and still the caller's, for non-managers) —
+        #   it may have been reassigned or closed since the visit was started.
+        may_force = get_role(user) in MANAGER_ROLES
         for jid in visit["linked_job_order_ids"]:
-            cursor.execute("""
-                UPDATE WO_JobOrders
-                SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
-                WHERE JobOrderID = %s
-            """, (user, jid))
-            _log_activity(cursor, "joborder", jid, "visit_submit",
-                          f"Linked to visit {visit['display_id']}", user)
-        # Linked DeliveryOrder → status = completed (only if signed; if pending email, mark in flight)
-        if visit["linked_delivery_order_id"] and not cust_unavail:
+            if may_force:
+                cursor.execute("""
+                    UPDATE WO_JobOrders
+                    SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
+                    WHERE JobOrderID = %s AND StatusCode IN (0, 1)
+                """, (user, jid))
+            else:
+                cursor.execute("""
+                    UPDATE WO_JobOrders
+                    SET StatusCode = 2, CompletedBy = %s, CompletedAt = SYSUTCDATETIME()
+                    WHERE JobOrderID = %s AND StatusCode IN (0, 1)
+                      AND LOWER(AssignedTo) = %s
+                """, (user, jid, user.lower()))
+            if cursor.rowcount:
+                _log_activity(cursor, "joborder", jid, "visit_submit",
+                              f"Linked to visit {visit['display_id']}", user)
+            else:
+                skipped_job_orders.append(jid)
+                _log_activity(cursor, "joborder", jid, "visit_submit_skipped",
+                              f"Visit {visit['display_id']} submitted but job order was "
+                              f"no longer open/assigned to {user}", user)
+
+        # Linked DeliveryOrder → completed. The goods physically changed hands
+        # even when the customer was unavailable to sign, so complete it either
+        # way; the visit's own 'pending_email_signature' status is what flags the
+        # manager for sign-off. (Previously this left the DO open forever with no
+        # path to close it.) Guarded on Status <> 'completed' so a second submit
+        # or a manager also hitting /deliveryorders/<id>/complete cannot
+        # double-run _sync_topup and destroy the top-up baseline.
+        if visit["linked_delivery_order_id"]:
             cursor.execute("""
                 UPDATE WO_DeliveryOrders
                 SET Status = 'completed', CompletedBy = %s, CompletedAt = SYSUTCDATETIME(),
-                    RecipientName = %s
-                WHERE DeliveryOrderID = %s
+                    RecipientName = COALESCE(%s, RecipientName)
+                WHERE DeliveryOrderID = %s AND Status <> 'completed'
             """, (user, receiving_name, visit["linked_delivery_order_id"]))
-            _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
-                          "visit_submit",
-                          f"Linked to visit {visit['display_id']}", user)
+            if cursor.rowcount:
+                _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
+                              "visit_submit",
+                              f"Linked to visit {visit['display_id']}"
+                              + (" (customer unavailable)" if cust_unavail else ""), user)
+                # Mirror /deliveryorders/<id>/complete: keep MachineLookup's refill
+                # clock in step, otherwise "last refill" / "vends since" go stale.
+                if visit["machine_code"]:
+                    topup_note = _sync_topup(cursor, str(visit["machine_code"]))
+                    _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
+                                  "topup_synced", topup_note, user)
 
-        # Build PDF + upload to SharePoint
+        # Commit the record BEFORE touching SharePoint. The upload is a 60-120s
+        # external HTTP call; doing it inside the transaction held write locks on
+        # MachineLookup / WO_JobOrders / WO_DeliveryOrders for its whole duration.
+        conn.commit()
+        conn.close()
+        conn = None
+
+        # Build PDF + upload to SharePoint (best-effort, own short connection)
+        pdf_ready = False
+        conn2 = None
         try:
             pdf_bytes = _build_visit_pdf(visit, service_wos, None, delivery_items_with_qty)
             now = datetime.utcnow()
@@ -4770,18 +5092,33 @@ def api_visit_finalize(vid):
                 data=pdf_bytes,
                 content_type="application/pdf",
             )
-            cursor.execute(
+            conn2 = get_connection()
+            c2 = conn2.cursor()
+            c2.execute(
                 "UPDATE WO_VisitSessions SET PDFSPItemID = %s, PDFSPWebURL = %s WHERE VisitID = %s",
                 (sp_item_id, web_url, vid),
             )
+            conn2.commit()
+            pdf_ready = True
         except Exception as e:
-            # PDF/SP failure should not block submission; log and continue
+            # PDF/SP failure must not lose the signature; log and continue
             print(f"[visit_finalize] PDF/SP upload failed for visit {vid}: {e}")
+        finally:
+            if conn2 is not None:
+                try:
+                    conn2.close()
+                except Exception:
+                    pass
 
-        conn.commit()
-        conn.close()
-        return jsonify({"ok": True, "status": new_status})
+        return jsonify({"ok": True, "status": new_status,
+                        "pdf_ready": pdf_ready,
+                        "skipped_job_orders": skipped_job_orders})
     except Exception as e:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 

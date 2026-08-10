@@ -421,9 +421,14 @@
     {% if role == 'admin' %}
     <button class="tab-btn" style="color:#b91c1c" onclick="switchTab('admin_delete', this); if(window.__adInit) window.__adInit();">🗑 Test Cleanup</button>
     {% endif %}
-    {# ── Alpha App: admin only — opens the separate streamlined preview (read-only) ── #}
-    {% if role == 'admin' %}
-    <button class="tab-btn" style="color:#7c3aed" onclick="window.open('/alpha','_blank')">🧪 Alpha App</button>
+    {# ── Beta App (2026-08-10): opened beyond admin to the roles /api/wo/* actually
+         serves — OPERATOR_ROLES = {operator, field_manager, admin}. Every action
+         inside still goes through /api/wo/*, so server-side permissions apply
+         unchanged and this grants no new capability. `dispatch` and
+         `customer_service` are deliberately NOT here: they hold no role in
+         workorders.py, so every button inside would 403 on them. ── #}
+    {% if role in ['admin', 'field_manager', 'operator'] %}
+    <button class="tab-btn" style="color:#7c3aed" onclick="window.open('/alpha','_blank')">🧪 Beta App</button>
     {% endif %}
 </div>
 

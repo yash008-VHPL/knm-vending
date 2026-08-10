@@ -226,6 +226,15 @@ def init_db():
         ("LastTopupTimestamp",     "FLOAT"),
         ("PreviousTopupTimestamp", "FLOAT"),
         ("CountBeforeLastTopup",   "INT"),
+        # ── Machine attributes (2026-08-10). Short NVARCHAR holding one value
+        # from a fixed option list, NOT free text. NULL = never recorded, which
+        # is distinct from the 'Absent' option (a real answer: not fitted).
+        # Option lists and all writes live in workorders.py MACHINE_ATTRS.
+        ("MachineType",     "NVARCHAR(20)"),
+        ("WaterSource",     "NVARCHAR(20)"),
+        ("TeaSyrup",        "NVARCHAR(20)"),
+        ("PaymentTerminal", "NVARCHAR(20)"),
+        ("DataConnection",  "NVARCHAR(20)"),
     ]
     try:
         conn = get_connection()
