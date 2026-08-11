@@ -1224,7 +1224,7 @@ async function boot(){
   }catch(e){demoSeed();setBanner({live:false,reason:String(e)});}
   try{  // assignment targets — managers only; non-managers just get free-text
     const t=await(await fetch("/api/wo/technicians")).json();
-    techs=(t&&t.technicians||[]).map(u=>({email:(u.email||u.mail||u.userPrincipalName||"").toLowerCase(),name:u.name||u.displayName||null})).filter(u=>u.email);
+    techs=(t&&t.technicians||[]).map(u=>({email:(u.email||u.mail||u.userPrincipalName||"").toLowerCase(),name:u.display_name||u.displayName||u.name||null})).filter(u=>u.email);
     drivers=techEmails();
   }catch(e){techs=[];drivers=[];}
   render();
