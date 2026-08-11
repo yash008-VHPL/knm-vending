@@ -201,9 +201,7 @@
   .stp.carry{border-style:dashed;border-color:var(--amber-br);background:#fffbeb}
   .stp-ed{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
   .stp-ed textarea{min-height:38px;font-size:.74rem;padding:4px 7px;margin-bottom:4px}
-  .stp-ed .nl{font-size:.6rem;font-weight:800;letter-spacing:.06em;color:var(--mut);margin:2px 0 2px;
-              display:flex;gap:5px;align-items:center;text-transform:none}
-  .stp-ed .nl input{width:14px;height:14px;accent-color:var(--blue)}
+  .stp-ed .nl{font-size:.6rem;font-weight:800;letter-spacing:.06em;color:var(--mut);margin:2px 0 2px}
   .stp-ed .r{display:flex;gap:6px;margin-top:5px}
   .stp-ed select,.stp-ed input[type=date]{height:28px;font-size:.72rem;padding:2px 6px}
   .stp-ed .btn{flex:1}
@@ -439,16 +437,6 @@ function renderWorkOrder(){
     if(wo.diagnosis)b+=`<div class="f"><b>Diagnosis:</b> ${woEsc(wo.diagnosis)}</div>`;
     if(wo.proposed_fix)b+=`<div class="f"><b>Proposed fix:</b> ${woEsc(wo.proposed_fix)}</div>`;
     h+=`<div class="wo-req"><h4>⚠ Service requested</h4><div class="ref">${woEsc(wo.display_id||"#"+wo.id)} · ${woEsc(wo.priority_label||"normal")}</div>${b}</div>`;});
-
-  // A merged stop carries its service request on the delivery order itself.
-  // Rendered HERE, with the job-order boxes and above the machine details, so
-  // the driver reads what was asked before ticking anything.
-  if (d.delivery_wo && d.delivery_wo.needs_service){
-    const sn = (d.delivery_wo.service_note || "").trim();
-    h += `<div class="wo-req"><h4>⚠ Service requested</h4>
-      <div class="ref">Dispatch · ${woEsc(v.visit_date || woToday())}</div>
-      <div class="f"><div class="verbatim">${woEsc(sn || "Service requested — no detail given")}</div></div></div>`;
-  }
 
   h+=`<div class="grid2">
     <div class="field"><label>Company / Location</label><input type="text" readonly value="${woEsc(mc.name||mc.code)}"></div>
@@ -810,9 +798,10 @@ function pickMachine(btn){
   c.dataset.code = code;
   c.innerHTML = `<div class="t">${woEsc(m ? m.name : code)}</div><div class="c">${woEsc(code)} · ${woEsc(boardDate)}</div>
     <div class="ticks">
-      <label><input type="checkbox" class="k-service"> Service required</label>
+      <label><input type="checkbox" class="k-topup" checked> Top-up</label>
+      <label><input type="checkbox" class="k-service"> Service</label>
     </div>
-    <textarea class="note" placeholder="Note for the driver — shown at the top of the Work Order sheet."></textarea>
+    <textarea class="note" placeholder="What needs doing? Shown to the driver on the Work Order sheet."></textarea>
     <div class="row2">
       <select class="pri"><option value="normal">Normal</option><option value="high">High</option><option value="low">Low</option></select>
       <button class="btn sm ghost" onclick="cancelStop(this)">Cancel</button>
@@ -825,21 +814,23 @@ function cancelStop(btn){ const c = cardEl(btn).querySelector(".comp"); c.style.
 
 async function addStop(btn){
   const card = cardEl(btn), c = card.querySelector(".comp");
-  // Every stop is a visit. Service is an attribute of it, not a second order.
-  const needsService = c.querySelector(".k-service").checked;
+  const kinds = [];
+  if (c.querySelector(".k-topup").checked)   kinds.push("topup");
+  if (c.querySelector(".k-service").checked) kinds.push("service");
+  if (!kinds.length){ toast("Tick Top-up, Service, or both."); return; }
   btn.disabled = true;
   const r = await api("/api/wo/stops", {method: "POST", body: {
     machine_code:   c.dataset.code,
     assigned_to:    card.dataset.email,
     scheduled_date: boardDate,
-    needs_service:  needsService,
+    kinds,
     note:           (c.querySelector(".note").value || "").trim(),
     priority:       c.querySelector(".pri").value,
   }});
   btn.disabled = false;
   if (!r) return;
   if (r.dated === false) toast("Added — but scheduling columns are missing, so it is undated.");
-  else toast(`${r.machine_name}: ${needsService ? "service stop" : "top-up"} added for ${driverName(card.dataset.email)}`);
+  else toast(`${r.machine_name}: ${kinds.join(" + ")} added for ${driverName(card.dataset.email)}`);
   await reload();
 }
 
@@ -865,9 +856,7 @@ function editStop(btn){
       <textarea class="note" data-rid="${woEsc(String(w.rid))}" data-kind="${woEsc(stopKind(w))}"
         data-orig="${woEsc(v)}" placeholder="Note for the driver">${woEsc(v)}</textarea>`;
   }).join("");
-  const svc = his.some(w => w.needsService);
   box.innerHTML = `<div class="stp-ed">
-    <label class="nl"><input type="checkbox" class="svc"${svc ? " checked" : ""}> Service required</label>
     ${eds}
     <div class="r">
       <select class="drv">${drivers.map(d =>
@@ -895,16 +884,12 @@ async function saveStop(btn){
   // is per order and only travels when that specific field was edited.
   const common = {scheduled_date: box.querySelector(".dt").value || null};
   if (drivers.length) common.assigned_to = drv.value;   // empty roster != unassign
-  const svcBox = box.querySelector(".svc");
   btn.disabled = true;
   let ok = 0, failed = 0, skipped = 0;
   for (const w of his){
     const k = stopKind(w);
     if (!k || !w.rid){ skipped++; continue; }
     const body = Object.assign({}, common);
-    // Only a delivery order carries the service flag. Applying it to a legacy
-    // Tech Support job order at the same site would be meaningless.
-    if (svcBox && k === "topup") body.needs_service = svcBox.checked;
     const ta = box.querySelector(`textarea[data-rid="${w.rid}"][data-kind="${k}"]`);
     if (ta){
       const typed = (ta.value || "").trim();

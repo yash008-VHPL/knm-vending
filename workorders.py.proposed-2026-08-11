@@ -350,12 +350,6 @@ def init_workorders_db():
     columns = [
         ("WO_DeliveryOrders", "ScheduledDate", "DATE"),
         ("WO_DeliveryOrders", "RouteSeq",      "INT"),
-        # 2026-08-11 — a service request is now a flag and a note ON the delivery
-        # order rather than a second WO_JobOrders row. ServiceNote is separate
-        # from Notes so folding an existing job order in cannot clobber a
-        # top-up note that is already there.
-        ("WO_DeliveryOrders", "NeedsService",  "BIT"),
-        ("WO_DeliveryOrders", "ServiceNote",   "NVARCHAR(MAX)"),
         ("WO_JobOrders",      "ScheduledDate", "DATE"),
         ("WO_JobOrders",      "RouteSeq",      "INT"),
         ("WO_MovementOrders", "ScheduledDate", "DATE"),
@@ -3198,15 +3192,15 @@ def api_stop_create():
         machine_code:  str   (required — must exist in MachineLookup)
         assigned_to:   str   (email; optional, a stop can be planned unassigned)
         scheduled_date:'YYYY-MM-DD' (defaults to today, SGT)
-        needs_service: bool — renders as a service request at the top of the sheet
+        kinds:         ["topup", "service"]  (at least one)
         note:          str   — becomes the job order's Diagnosis so the driver
                                reads it on the Work Order sheet, and the
                                delivery order's Notes.
         priority:      'low' | 'normal' | 'high'
 
-    One stop is ONE WO_DeliveryOrders row. Service is a flag and a note on it,
-    not a second order — a job order now only exists for the Tech Support path
-    (a customer complaint triaged into a WO).
+    Both orders are created in ONE transaction. A dispatcher who ticks both and
+    gets a half-write would have no way to tell, so this either creates
+    everything asked for or nothing.
     """
     data = request.get_json(silent=True) or {}
     code = (data.get("machine_code") or "").strip()
@@ -3215,15 +3209,15 @@ def api_stop_create():
     priority = (data.get("priority") or "normal").strip().lower()
     if priority not in ("low", "normal", "high"):
         priority = "normal"
-    # "service" is no longer a separate order. It is a flag on this one.
+    pcode = {"low": 0, "normal": 1, "high": 2}[priority]
     kinds = [k for k in (data.get("kinds") or []) if k in STOP_KINDS]
-    needs_service = bool(data.get("needs_service")) or ("service" in kinds)
     day = _parse_date(data.get("scheduled_date")) or _sgt_today()
     user = get_current_user()
 
     if not code:
         return jsonify({"error": "Pick a machine."}), 400
-    # Every stop is a visit to the machine; service is an attribute of it.
+    if not kinds:
+        return jsonify({"error": "Tick at least one type of work."}), 400
 
     conn = None
     try:
@@ -3246,58 +3240,80 @@ def api_stop_create():
         # table can be migrated while another is not. Probe per table or a
         # half-migrated schema turns into a 500 that loses the whole stop.
         dated_do = _has_col(cursor, "WO_DeliveryOrders", "ScheduledDate")
-        seq = _next_route_seq(cursor, assigned, day) if dated_do else None
+        dated_jo = _has_col(cursor, "WO_JobOrders", "ScheduledDate")
+        seq = _next_route_seq(cursor, assigned, day) if (dated_do and dated_jo) else None
         created = []
 
-        # ── ONE row per stop ────────────────────────────────────────────────
-        # The driver's sheet links one open delivery order per machine per day,
-        # so a second would be a ghost carrying a note nobody reads.
-        _dupq = ("SELECT TOP 1 DeliveryOrderID, AssignedTo FROM WO_DeliveryOrders "
-                 "WHERE MachineCode = %s AND Status <> 'completed'")
-        _dupp = [code]
-        if dated_do:
-            _dupq += " AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s"
-            _dupp += [day, day]
-        cursor.execute(_dupq + " ORDER BY CreatedAt", tuple(_dupp))
-        dup = cursor.fetchone()
-        if dup:
-            conn.close()
-            return jsonify({
-                "error": f"{name} already has an open stop on {day}"
-                         + (f" assigned to {dup[1]}" if dup[1] else " (unassigned)")
-                         + ". Edit it instead of adding a second.",
-                "existing_delivery_order_id": int(dup[0]),
-            }), 409
+        if "topup" in kinds:
+            # The driver's sheet links the OLDEST open delivery order for a
+            # machine (api_operator_location_detail, ORDER BY CreatedAt). A
+            # second one would never be opened, and this note would never be
+            # read — so refuse rather than create a ghost.
+            # Scoped to the SAME DAY. The driver's sheet links one open delivery
+            # order per machine, so two on the same day would leave one a ghost
+            # — but Tuesday's top-up must still be plannable while Monday's is
+            # open, which a machine-wide guard would block on a 130-machine fleet.
+            _dupq = ("SELECT TOP 1 DeliveryOrderID, AssignedTo FROM WO_DeliveryOrders "
+                     "WHERE MachineCode = %s AND Status <> 'completed'")
+            _dupp = [code]
+            if dated_do:
+                _dupq += " AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s"
+                _dupp += [day, day]
+            cursor.execute(_dupq + " ORDER BY CreatedAt", tuple(_dupp))
+            dup = cursor.fetchone()
+            if dup:
+                conn.close()
+                return jsonify({
+                    "error": f"{name} already has an open top-up on {day}"
+                             + (f" assigned to {dup[1]}" if dup[1] else " (unassigned)")
+                             + ". Edit that stop instead of adding a second.",
+                    "existing_delivery_order_id": int(dup[0]),
+                }), 409
 
-        cols = ["MachineName", "MachineCode", "AssignedTo", "Priority", "CreatedBy"]
-        vals = [name, code, assigned, priority, user]
-        # One note box on the composer, routed by the tick: a service request
-        # renders in the amber box at the top of the sheet, a plain note in the
-        # delivery section. Never both, so nothing is duplicated.
-        if needs_service:
-            cols += ["ServiceNote"]; vals += [note]
-        else:
-            cols += ["Notes"];       vals += [note]
-        if _has_col(cursor, "WO_DeliveryOrders", "NeedsService"):
-            cols += ["NeedsService"]; vals += [1 if needs_service else 0]
-        if dated_do:
-            cols += ["ScheduledDate", "RouteSeq"]; vals += [day, seq]
-        cursor.execute(
-            f"INSERT INTO WO_DeliveryOrders ({', '.join(cols)}) "
-            f"OUTPUT INSERTED.DeliveryOrderID VALUES ({', '.join(['%s'] * len(cols))})",
-            tuple(vals),
-        )
-        did = int(cursor.fetchone()[0])
-        _log_activity(cursor, "deliveryorder", did, "created",
-                      ("Service stop" if needs_service else "Top-up")
-                      + f" scheduled {day} for {assigned or '(unassigned)'} at {name}", user)
-        created.append({"kind": "service" if needs_service else "topup", "id": did})
+            cols = ["MachineName", "MachineCode", "Notes", "AssignedTo", "Priority", "CreatedBy"]
+            vals = [name, code, note, assigned, priority, user]
+            if dated_do:
+                cols += ["ScheduledDate", "RouteSeq"]; vals += [day, seq]
+            cursor.execute(
+                f"INSERT INTO WO_DeliveryOrders ({', '.join(cols)}) "
+                f"OUTPUT INSERTED.DeliveryOrderID VALUES ({', '.join(['%s'] * len(cols))})",
+                tuple(vals),
+            )
+            did = int(cursor.fetchone()[0])
+            _log_activity(cursor, "deliveryorder", did, "created",
+                          f"Top-up scheduled {day} for {assigned or '(unassigned)'} at {name}", user)
+            created.append({"kind": "topup", "id": did})
+
+        if "service" in kinds:
+            cols = ["MachineName", "MachineCode", "Notes", "Diagnosis", "AssignedTo",
+                    "Priority", "PriorityCode", "StatusCode", "CreatedBy"]
+            vals = [name, code, note, note, assigned, priority, pcode, 0, user]
+            if dated_jo:
+                cols += ["ScheduledDate", "RouteSeq"]; vals += [day, seq]
+            # Allocated BEFORE the insert, like api_joborder_create — taking the
+            # WO_Counters HOLDLOCK while already holding a row lock on
+            # WO_JobOrders inverts the lock order every other caller uses.
+            try:
+                cols.append("DisplayID"); vals.append(allocate_display_id(cursor, "WkO"))
+            except Exception as e:
+                print(f"[stops] display id allocation skipped: {e}")
+                cols.pop(); vals = vals[:len(cols)]
+            cursor.execute(
+                f"INSERT INTO WO_JobOrders ({', '.join(cols)}) "
+                f"OUTPUT INSERTED.JobOrderID VALUES ({', '.join(['%s'] * len(cols))})",
+                tuple(vals),
+            )
+            jid = int(cursor.fetchone()[0])
+            _log_activity(cursor, "joborder", jid, "created",
+                          f"Service scheduled {day} for {assigned or '(unassigned)'} at {name}", user)
+            created.append({"kind": "service", "id": jid})
 
         conn.commit()
         conn.close()
         return jsonify({"ok": True, "created": created, "machine_name": name,
                         "scheduled_date": day, "route_seq": seq,
-                        "dated": dated_do, "needs_service": needs_service})
+                        "dated": all((dated_do if k["kind"] == "topup" else dated_jo)
+                                     for k in created) if created else True})
     except Exception as e:
         if conn is not None:
             try:
@@ -3365,33 +3381,8 @@ def api_stop_update(kind, sid):
                 cursor.execute("SELECT TOP 1 VisitID FROM WO_VisitSessions WHERE LinkedDeliveryOrderID=%s", (sid,))
                 if cursor.fetchone():
                     conn.close(); return jsonify({"error": "A driver has this top-up open on a Work Order sheet; it cannot be reassigned."}), 400
-            if "needs_service" in data:
-                ns = 1 if data.get("needs_service") else 0
-                sets.append("NeedsService = %s"); params.append(ns)
-                log.append("service " + ("required" if ns else "not required"))
-                # Carry the existing text across with the flag. Without this the
-                # note stays in the column the new mode does not read, and it
-                # disappears from the sheet, the PDF and the board with no error.
-                if "note" not in data or data.get("note") is None:
-                    if ns:
-                        sets.append("ServiceNote = COALESCE(NULLIF(LTRIM(RTRIM(ServiceNote)),''), Notes)")
-                        sets.append("Notes = NULL")
-                    else:
-                        sets.append("Notes = COALESCE(NULLIF(LTRIM(RTRIM(Notes)),''), ServiceNote)")
-                        sets.append("ServiceNote = NULL")
             if note is not None:
-                # Written to whichever field the stop's current mode uses, so a
-                # service request never lands in the delivery-notes line and a
-                # top-up note never surfaces as an amber service request.
-                _ns = data.get("needs_service")
-                if _ns is None:
-                    cursor.execute("SELECT ISNULL(NeedsService,0) FROM WO_DeliveryOrders WHERE DeliveryOrderID=%s", (sid,))
-                    _r2 = cursor.fetchone(); _ns = bool(_r2 and _r2[0])
-                col   = "ServiceNote" if _ns else "Notes"
-                other = "Notes" if _ns else "ServiceNote"
-                sets.append(f"{col} = %s"); params.append((note or "").strip() or None)
-                sets.append(f"{other} = NULL")     # never leave a stale copy behind
-                log.append("note")
+                sets.append("Notes = %s"); params.append((note or "").strip() or None); log.append("note")
             if pri:
                 sets.append("Priority = %s"); params.append(pri); log.append(f"priority {pri}")
             table, idcol, ptype = "WO_DeliveryOrders", "DeliveryOrderID", "deliveryorder"
@@ -4719,13 +4710,6 @@ def api_operator_location_detail(code):
         _jo_dt = _dt if _has_col(cursor, "WO_JobOrders", "ScheduledDate") else ""
         _do_dt = _dt if _has_col(cursor, "WO_DeliveryOrders", "ScheduledDate") else ""
         _today = _sgt_today()
-        # init_workorders_db swallows each ALTER independently, so these two can
-        # be missing while everything else is fine. Unguarded, they would fail
-        # EVERY machine's sheet fleet-wide.
-        _svc_cols = ("ISNULL(NeedsService,0), ServiceNote"
-                     if (_has_col(cursor, "WO_DeliveryOrders", "NeedsService")
-                         and _has_col(cursor, "WO_DeliveryOrders", "ServiceNote"))
-                     else "CAST(0 AS BIT), NULL")
 
         # Machine info
         cursor.execute("""
@@ -4811,7 +4795,7 @@ def api_operator_location_detail(code):
         # Open delivery WO for me (max 1)
         cursor.execute("""
             SELECT TOP 1 DeliveryOrderID, Notes, Priority, Status,
-                         CreatedBy, CreatedAt, """ + _svc_cols + """
+                         CreatedBy, CreatedAt
             FROM WO_DeliveryOrders
             WHERE MachineCode = %s AND AssignedTo = %s AND Status <> 'completed' """ + _do_dt + """
             ORDER BY """ + ("CASE WHEN ScheduledDate = %s THEN 0 ELSE 1 END, " if _do_dt else "") + """CreatedAt
@@ -4820,8 +4804,6 @@ def api_operator_location_detail(code):
         delivery_wo = None
         if drow:
             delivery_wo = {
-                "needs_service": bool(drow[6]) if len(drow) > 6 else False,
-                "service_note":  drow[7] if len(drow) > 7 else None,
                 "id": drow[0], "notes": drow[1], "priority": drow[2],
                 "status": drow[3], "created_by": drow[4], "created_at": _iso(drow[5]),
                 "lines": [],
@@ -5202,11 +5184,6 @@ def api_visit_update(vid):
 
 # ── PDF generation (ReportLab — mirrors the KNM Work Order paper template) ────
 
-def _pdf_esc(v):
-    """reportlab Paragraphs are mini-HTML: a bare & or < in free text raises."""
-    return (str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
-
-
 def _build_visit_pdf(visit, service_wos, delivery_wo, delivery_items_with_qty):
     """Return PDF bytes for a finalised visit, modelled on KNM's 'Work Order 11May26.pdf'.
     delivery_items_with_qty: [{name, unit, content, qty_delivered}]
@@ -5270,8 +5247,8 @@ def _build_visit_pdf(visit, service_wos, delivery_wo, delivery_items_with_qty):
         for wo in service_wos:
             bits = []
             if wo.get("display_id"):  bits.append(f"<b>{wo['display_id']}</b>")
-            if wo.get("diagnosis"):   bits.append(f"<b>Diagnosis:</b> {_pdf_esc(wo['diagnosis'])}")
-            if wo.get("proposed_fix"):bits.append(f"<b>Proposed fix:</b> {_pdf_esc(wo['proposed_fix'])}")
+            if wo.get("diagnosis"):   bits.append(f"<b>Diagnosis:</b> {wo['diagnosis']}")
+            if wo.get("proposed_fix"):bits.append(f"<b>Proposed fix:</b> {wo['proposed_fix']}")
             if wo.get("attached_kb"): bits.append(f"<b>Ref KB:</b> {wo['attached_kb'].get('title')}")
             txt = "<br/>".join(bits)
             box = Table([[Paragraph("⚠ <b>Service requested to fix issue</b>", body),
@@ -5536,25 +5513,6 @@ def api_visit_finalize(vid):
                         wo["attached_kb"] = {"title": kt[0]}
                 service_wos.append(wo)
 
-        # A merged stop carries its service request on the delivery order rather
-        # than a job order. Feed it through the same shape so the signed PDF
-        # still shows the amber "Service requested" box.
-        if visit["linked_delivery_order_id"]:
-            try:
-                cursor.execute("""
-                    SELECT ISNULL(NeedsService,0), ServiceNote
-                    FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s
-                """, (visit["linked_delivery_order_id"],))
-                _dr = cursor.fetchone()
-                if _dr and _dr[0]:
-                    service_wos.append({
-                        "id": None, "display_id": None,
-                        "diagnosis": _dr[1] or "Service requested by dispatch",
-                        "proposed_fix": None, "attached_kb": None,
-                    })
-            except Exception as e:
-                print(f"[visit finalize] merged service note skipped: {e}")
-
         # Delivery items (all active + the qty_delivered from lines if linked)
         delivery_items_with_qty = []
         cursor.execute("""
@@ -5626,41 +5584,10 @@ def api_visit_finalize(vid):
                               + (" (customer unavailable)" if cust_unavail else ""), user)
                 # Mirror /deliveryorders/<id>/complete: keep MachineLookup's refill
                 # clock in step, otherwise "last refill" / "vends since" go stale.
-                # Only when something was actually delivered. Every stop is a
-                # delivery-order row now, so a service-only visit would
-                # otherwise stamp LastTopupTimestamp and overwrite
-                # PreviousTopupTimestamp — unrecoverable, and it drives
-                # "vends since last top-up" across the whole fleet.
-                _delivered = 0
-                try:
-                    cursor.execute("""
-                        SELECT ISNULL(SUM(ISNULL(QtyDelivered,0)),0)
-                        FROM WO_DeliveryOrderLines WHERE DeliveryOrderID = %s
-                    """, (visit["linked_delivery_order_id"],))
-                    _dr = cursor.fetchone()
-                    _delivered = int(_dr[0] or 0) if _dr else 0
-                except Exception:
-                    _delivered = 0
-                if not _delivered:
-                    try:
-                        cursor.execute("""
-                            SELECT ISNULL(Item1Qty,0)+ISNULL(Item2Qty,0)+ISNULL(Item3Qty,0)
-                                 + ISNULL(Item4Qty,0)+ISNULL(Item5Qty,0)+ISNULL(Item6Qty,0)
-                                 + ISNULL(Item7Qty,0)+ISNULL(Item8Qty,0)
-                            FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s
-                        """, (visit["linked_delivery_order_id"],))
-                        _lr = cursor.fetchone()
-                        _delivered = int(_lr[0] or 0) if _lr else 0
-                    except Exception:
-                        _delivered = 0
-                if visit["machine_code"] and _delivered:
+                if visit["machine_code"]:
                     topup_note = _sync_topup(cursor, str(visit["machine_code"]))
                     _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
                                   "topup_synced", topup_note, user)
-                elif visit["machine_code"]:
-                    _log_activity(cursor, "deliveryorder", visit["linked_delivery_order_id"],
-                                  "topup_skipped",
-                                  "Nothing delivered — refill clock left untouched", user)
 
         # Commit the record BEFORE touching SharePoint. The upload is a 60-120s
         # external HTTP call; doing it inside the transaction held write locks on

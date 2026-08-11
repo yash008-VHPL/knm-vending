@@ -177,15 +177,6 @@ def _fetch_sales(cur):
     return int(r[0]) if r and r[0] is not None else None
 
 
-def _has_do_col(cur, col):
-    try:
-        cur.execute("""SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-                       WHERE TABLE_NAME='WO_DeliveryOrders' AND COLUMN_NAME=%s""", (col,))
-        return cur.fetchone() is not None
-    except Exception:
-        return False
-
-
 def _wo_has_scheduled(cur, table):
     """The ScheduledDate columns are added by workorders.init_workorders_db,
     which swallows each ALTER independently — so one table can have them and
@@ -246,28 +237,19 @@ def _fetch_work(cur):
     except Exception:
         pass
     try:
-        _svc = ("ISNULL(NeedsService,0) AS NeedsService, ServiceNote"
-                if (_has_do_col(cur, "NeedsService") and _has_do_col(cur, "ServiceNote"))
-                else "CAST(0 AS BIT) AS NeedsService, NULL AS ServiceNote")
         cur.execute(f"""SELECT TOP 200 DeliveryOrderID, MachineName, MachineCode,
-                       AssignedTo, Priority, Status, Notes, {_svc},
-                       {_sd_cols(cur, "WO_DeliveryOrders")}
+                       AssignedTo, Priority, Status, Notes, {_sd_cols(cur, "WO_DeliveryOrders")}
                        FROM WO_DeliveryOrders ORDER BY CreatedAt DESC, DeliveryOrderID DESC""")
-        for did, mname, mcode, asg, pri, st, notes, needsvc, svcnote, sdate, rseq in cur.fetchall():
+        for did, mname, mcode, asg, pri, st, notes, sdate, rseq in cur.fetchall():
             done = (st or "").lower() == "completed"
-            _ns = bool(needsvc)
-            _n  = (svcnote if _ns else notes)
             work.append({"id": f"DEL-{did}", "kind": "delivery", "rid": int(did),
-                         # A stop that needs service reads as SERVICE on the
-                         # board even though it is one delivery-order row.
-                         "type": "service" if _ns else "delivery",
-                         "needsService": _ns,
+                         "type": "delivery",
                          "machine": str(mcode) if mcode else "?", "machineName": mname,
-                         "desc": (_n or "Refill / delivery")[:140],
+                         "desc": (notes or "Refill / delivery")[:140],
                          "priority": (pri or "normal").lower(),
                          "status": "done" if done else ("assigned" if asg else "new"),
                          "assignedTo": asg, "source": "Delivery",
-                         "note": _n,
+                         "note": notes,
                          "scheduledDate": str(sdate)[:10] if sdate else None,
                          "routeSeq": int(rseq) if rseq is not None else None})
     except Exception:
