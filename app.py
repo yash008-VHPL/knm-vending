@@ -31,6 +31,19 @@ def get_current_user():
     return config.DEV_USER_EMAIL.strip().lower() if config.DEV_USER_EMAIL else ""
 
 
+# 2026-08-11 — dispatch and field_manager are one person at KNM, so they are
+# ONE role everywhere. Normalising here rather than in ~30 template conditions
+# means the tab list, the landing tab and the role switcher cannot drift apart
+# again. To split them, delete this map and narrow the widened gates in
+# templates/index.html that name field_manager alongside dispatch.
+ROLE_ALIASES = {"dispatch": "field_manager"}
+
+
+def canon_role(r):
+    r = (r or "").strip().lower()
+    return ROLE_ALIASES.get(r, r)
+
+
 def get_all_roles(email=None):
     """Return all roles claims for the signed-in user. May contain duplicates
     or empties; caller can clean as needed."""
@@ -39,11 +52,11 @@ def get_all_roles(email=None):
     if principal:
         for claim in principal.get("claims", []):
             if claim.get("typ") == "roles":
-                v = (claim.get("val") or "").strip().lower()
+                v = canon_role(claim.get("val"))
                 if v and v not in out:
                     out.append(v)
     if not out and config.DEV_ROLE:
-        out = [config.DEV_ROLE.strip().lower()]
+        out = [canon_role(config.DEV_ROLE)]
     return out
 
 
@@ -61,6 +74,7 @@ def get_role(email=None):
     except RuntimeError:
         # No request context (e.g. unit tests); ignore cookie
         wanted = ""
+    wanted = canon_role(wanted)
     if wanted and wanted in roles:
         return wanted
     return roles[0]

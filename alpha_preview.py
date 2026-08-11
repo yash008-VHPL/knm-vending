@@ -63,6 +63,11 @@ def _current_user():
     return (getattr(config, "DEV_USER_EMAIL", "") or "").strip().lower()
 
 
+# dispatch and field_manager are one role (see app.ROLE_ALIASES); the beta app
+# must agree or the picker offers two entries for the same person.
+_ROLE_ALIASES = {"dispatch": "field_manager"}
+
+
 def _current_roles():
     out = []
     p = _current_principal()
@@ -70,10 +75,12 @@ def _current_roles():
         for c in p.get("claims", []):
             if c.get("typ") == "roles":
                 v = (c.get("val") or "").strip().lower()
+                v = _ROLE_ALIASES.get(v, v)
                 if v and v not in out:
                     out.append(v)
     if not out and getattr(config, "DEV_ROLE", ""):
-        out = [config.DEV_ROLE.strip().lower()]
+        _d = config.DEV_ROLE.strip().lower()
+        out = [_ROLE_ALIASES.get(_d, _d)]
     return out
 
 

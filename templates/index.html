@@ -375,8 +375,8 @@
 
 <div class="tab-bar">
     {# ── Sales / Messages / Topups / Heartbeat — admin, dispatch, sales, field_manager (heartbeat only for field_manager) ── #}
-    {% if role == 'admin' or role == 'dispatch' or role == 'sales' %}
-    <button class="tab-btn{% if role in ['admin','dispatch','sales'] %} active{% endif %}" onclick="switchTab('sales', this)">Sales</button>
+    {% if role in ['admin', 'dispatch', 'field_manager', 'sales'] %}
+    <button class="tab-btn{% if role in ['admin','dispatch','field_manager','sales'] %} active{% endif %}" onclick="switchTab('sales', this)">Sales</button>
     <button class="tab-btn"        onclick="switchTab('messages', this)">Messages</button>
     <button class="tab-btn"        onclick="switchTab('topups', this)">Topups</button>
     {% endif %}
@@ -387,7 +387,7 @@
     {% if role == 'admin' or role == 'dispatch' or role == 'field_manager' or role == 'customer_service' %}
     <button class="tab-btn{% if role == 'customer_service' %} active{% endif %}" onclick="switchTab('admin', this)">Locations</button>
     {% endif %}
-    {% if role == 'admin' or role == 'dispatch' %}
+    {% if role in ['admin', 'dispatch', 'field_manager'] %}
     <button class="tab-btn"        onclick="switchTab('dispatch', this)">Dispatch</button>
     {% endif %}
     {# ── Fault Report: everyone except pure operator (operators take WOs, don't file complaints) ── #}
@@ -437,7 +437,7 @@
     <!-- ══════════════════════════════════════════
          TAB: Sales
     ══════════════════════════════════════════ -->
-    <div id="tab-sales" class="tab-pane{% if role in ['admin','dispatch','sales'] %} active{% endif %}">
+    <div id="tab-sales" class="tab-pane{% if role in ['admin','dispatch','field_manager','sales'] %} active{% endif %}">
 
         <div class="card">
             <div class="controls">
@@ -688,7 +688,7 @@
     <!-- ══════════════════════════════════════════
          TAB: Dispatch (admin + dispatch only)
     ══════════════════════════════════════════ -->
-    {% if role == 'admin' or role == 'dispatch' %}
+    {% if role in ['admin', 'dispatch', 'field_manager'] %}
     <div id="tab-dispatch" class="tab-pane">
 
         <div class="card">
@@ -1207,7 +1207,7 @@
                 <td id="lon-${esc(loc.code)}">${loc.lon !== null ? loc.lon : ''}</td>
                 <td>
                     <div class="action-cell">
-                        {% if role == 'admin' or role == 'dispatch' %}
+                        {% if role in ['admin', 'dispatch', 'field_manager'] %}
                         <button class="btn btn-secondary btn-sm"
                             onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}', '${loc.lat ?? ''}', '${loc.lon ?? ''}')">
                             Edit
