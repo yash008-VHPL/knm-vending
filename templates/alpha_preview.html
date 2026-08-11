@@ -721,17 +721,17 @@ function renderPlan(){
   const comp = un.filter(w => w.kind === "complaint").length;
   const carry = openWork().filter(w => !w.scheduledDate).length;
 
-  const roster = drivers.map(d => d.toLowerCase());
-  const offRoster = [...new Set([
-      ...open.map(w => (w.assignedTo || "").toLowerCase()).filter(Boolean),
-      ...adhocDrivers,
-    ])].filter(e => e && !roster.includes(e));
+  // Every operator is schedulable. Whether Graph currently lists them under the
+  // Operator app role is not the board's business — dispatch decides who goes
+  // where. Cards = the roster, plus anyone already holding work, plus anyone
+  // added by hand.
+  const people = boardPeople();
 
   const noRoster = !drivers.length ? `<div class="legacy-note">
       <b>Driver roster did not load</b> — <code>/api/wo/technicians</code> is Graph-backed; check
       <code>MS_EASYAUTH_SP_OBJECT_ID</code> / <code>MS_OPERATOR_ROLE_ID</code>, or open
-      <code>/api/wo/technicians/diag</code> as admin. The cards below are built from whoever already
-      holds work and <b>can still be scheduled</b>. Add someone not shown:
+      <code>/api/wo/technicians/diag</code> as admin. Names show as email addresses until it
+      returns; scheduling works either way. Add a driver:
       <input id="adhocDrv" placeholder="operator@kopinearme.com" style="width:220px;display:inline-block;margin:0 6px;height:28px;font-size:.76rem">
       <button class="btn sm" onclick="addAdhocDriver()">Add card</button></div>` : "";
 
@@ -748,10 +748,12 @@ function renderPlan(){
       <button class="btn sm ghost" onclick="setBoardDate(sgtToday())">Today</button>
       ${carry ? `<label><input type="checkbox" ${showCarry ? "checked" : ""} onchange="toggleCarry(this)">
         Include ${carry} undated item${carry !== 1 ? "s" : ""}</label>` : ""}
+      <span style="flex:1"></span>
+      <input id="adhocDrv2" placeholder="add a driver by email" style="width:210px;height:30px;font-size:.76rem">
+      <button class="btn sm ghost" onclick="addAdhocDriver('adhocDrv2')">+ Driver</button>
     </div>
-    ${drivers.length || offRoster.length
-      ? `<div class="bd">${drivers.map(d => driverCard(d, false)).join("")}
-                        ${offRoster.map(d => driverCard(d, true)).join("")}</div>` : ""}
+    ${people.length ? `<div class="bd">${people.map(driverCard).join("")}</div>`
+                    : '<p class="empty">No drivers yet — add one above.</p>'}
     ${(() => { const cl = open.filter(w => (!w.machine || w.machine === "?") && w.assignedTo);
         return cl.length ? `<div class="legacy-note" style="margin-top:12px"><b>${cl.length} assigned item(s) have no machine code</b>
           and cannot appear on the board: ${cl.map(w => woEsc(w.id)).join(", ")}. Fix the machine code in the main dashboard.</div>` : ""; })()}
@@ -761,11 +763,10 @@ function renderPlan(){
     <p class="note">Live — every action writes through the same work-order API the main dashboard uses.</p>`;
 }
 
-function driverCard(email, off){
+function driverCard(email){
   const lc = (email || "").toLowerCase();
   const mine = BOARD_SITES.filter(s => s.items.some(w => (w.assignedTo || "").toLowerCase() === lc))
                           .sort((a, b) => seqOf(a) - seqOf(b));
-  if (off && !mine.length && !adhocDrivers.includes(lc)) return "";
 
   const stops = mine.map((s, i) => {
     const his = s.items.filter(w => (w.assignedTo || "").toLowerCase() === lc);
@@ -795,10 +796,9 @@ function driverCard(email, off){
 
   return `<div class="bd-c" data-email="${woEsc(email)}">
     <div class="bd-h"><span class="who"><b>${woEsc(driverName(email))}</b>${
-      off ? "" : `<span class="em">${woEsc(email)}</span>`}</span>
-      <span class="pill">${off ? "off roster · " : ""}${mine.length} stop${mine.length !== 1 ? "s" : ""}</span></div>
-    ${composer}${stops || (off ? "" : '<p class="note" style="margin:2px 0 0;font-size:.72rem">No stops yet.</p>')}
-    ${off ? '<p class="note" style="margin:6px 0 0;font-size:.7rem">Not listed in the Operator role in AAD — scheduling still works, but check the role assignment.</p>' : ""}</div>`;
+      driverName(email) === email ? "" : `<span class="em">${woEsc(email)}</span>`}</span>
+      <span class="pill">${mine.length} stop${mine.length !== 1 ? "s" : ""}</span></div>
+    ${composer}${stops || '<p class="note" style="margin:2px 0 0;font-size:.72rem">No stops yet.</p>'}</div>`;
 }
 
 /* Who the board can schedule for when Graph is unavailable: whoever already
@@ -809,8 +809,8 @@ const boardPeople = () => [...new Set([
   ...openWork().map(w => (w.assignedTo || "").toLowerCase()).filter(Boolean),
   ...adhocDrivers,
 ])].filter(Boolean);
-function addAdhocDriver(){
-  const el = $("#adhocDrv"), v = (el.value || "").trim().toLowerCase();
+function addAdhocDriver(id){
+  const el = $("#" + (id || "adhocDrv")), v = (el.value || "").trim().toLowerCase();
   if (!v || !v.includes("@")){ toast("Enter the operator's email address."); return; }
   if (!adhocDrivers.includes(v)) adhocDrivers.push(v);
   el.value = ""; render(); toast("Card added for " + v);

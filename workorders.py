@@ -3348,12 +3348,6 @@ def api_stop_update(kind, sid):
                 sets.append("ScheduledDate = %s"); params.append(day)
                 log.append(f"date {day or '(none)'}")
 
-        # Compare the VALUE, not just presence: saveStop always sends
-        # assigned_to, so a presence test would refuse a plain note correction
-        # on a stop the driver has open — the case where fixing it matters most.
-        _want = ((data.get("assigned_to") or "").strip().lower() or None) if "assigned_to" in data else None
-        def _reassign(cur_assigned):
-            return "assigned_to" in data and (cur_assigned or "").lower() != (_want or "")
         if kind == "topup":
             cursor.execute("SELECT Status, AssignedTo FROM WO_DeliveryOrders WHERE DeliveryOrderID=%s", (sid,))
             r = cursor.fetchone()
@@ -3361,10 +3355,6 @@ def api_stop_update(kind, sid):
                 conn.close(); return jsonify({"error": "Stop not found."}), 404
             if (r[0] or "").lower() == "completed":
                 conn.close(); return jsonify({"error": "This top-up is already completed."}), 400
-            if _reassign(r[1]):
-                cursor.execute("SELECT TOP 1 VisitID FROM WO_VisitSessions WHERE LinkedDeliveryOrderID=%s", (sid,))
-                if cursor.fetchone():
-                    conn.close(); return jsonify({"error": "A driver has this top-up open on a Work Order sheet; it cannot be reassigned."}), 400
             if "needs_service" in data:
                 ns = 1 if data.get("needs_service") else 0
                 sets.append("NeedsService = %s"); params.append(ns)
@@ -3404,10 +3394,6 @@ def api_stop_update(kind, sid):
                 conn.close(); return jsonify({"error": "This job order is in review or closed; it cannot be edited here."}), 400
             if note is not None and r[1]:
                 conn.close(); return jsonify({"error": "This job order came from a customer complaint; edit its diagnosis in Tech Support."}), 400
-            if _reassign(r[2]):
-                cursor.execute("SELECT TOP 1 VisitID FROM WO_VisitSession_JobOrders WHERE JobOrderID=%s", (sid,))
-                if cursor.fetchone():
-                    conn.close(); return jsonify({"error": "A driver has this job open on a Work Order sheet; it cannot be reassigned."}), 400
             if note is not None:
                 # Diagnosis is what the driver reads on the Work Order sheet.
                 sets.append("Diagnosis = %s"); params.append((note or "").strip() or None)
@@ -3461,10 +3447,15 @@ def api_stop_delete(kind, sid):
                 conn.close(); return jsonify({"error": "Stop not found."}), 404
             if (r[0] or "").lower() != "open":
                 conn.close(); return jsonify({"error": "This top-up has already been worked; it cannot be removed."}), 400
-            cursor.execute(
-                "SELECT TOP 1 VisitID FROM WO_VisitSessions WHERE LinkedDeliveryOrderID=%s", (sid,))
-            if cursor.fetchone():
-                conn.close(); return jsonify({"error": "A driver has this top-up open on a Work Order sheet; it cannot be removed."}), 400
+            # Dispatch can pull a stop after the shift has started — only a
+            # COMPLETED location is protected (the Status check above). If a
+            # driver has it open on an unsubmitted sheet, detach the link first
+            # so finalize does not later update a row that no longer exists.
+            cursor.execute("""
+                UPDATE WO_VisitSessions SET LinkedDeliveryOrderID = NULL
+                WHERE LinkedDeliveryOrderID = %s
+                  AND Status NOT IN ('signed', 'pending_email_signature')
+            """, (sid,))
             snap = _row_snapshot(cursor, "SELECT * FROM WO_DeliveryOrders WHERE DeliveryOrderID=%s", (sid,))
             cursor.execute("DELETE FROM WO_DeliveryOrderLines WHERE DeliveryOrderID=%s", (sid,))
             cursor.execute("DELETE FROM WO_Activity WHERE ParentType='deliveryorder' AND ParentID=%s", (sid,))
@@ -3481,9 +3472,14 @@ def api_stop_delete(kind, sid):
                 conn.close(); return jsonify({"error": "This service job has been started or submitted; it cannot be removed."}), 400
             if r[1]:
                 conn.close(); return jsonify({"error": "This job order came from a customer complaint. Close it in Tech Support instead."}), 400
-            cursor.execute("SELECT TOP 1 VisitID FROM WO_VisitSession_JobOrders WHERE JobOrderID=%s", (sid,))
-            if cursor.fetchone():
-                conn.close(); return jsonify({"error": "A driver has this job open on a Work Order sheet; it cannot be removed."}), 400
+            # Same rule for service: removable until the location is completed.
+            # Unhook it from any unsubmitted sheet rather than refusing.
+            cursor.execute("""
+                DELETE FROM WO_VisitSession_JobOrders
+                WHERE JobOrderID = %s AND VisitID IN (
+                    SELECT VisitID FROM WO_VisitSessions
+                    WHERE Status NOT IN ('signed', 'pending_email_signature'))
+            """, (sid,))
             # Full cascade + a restorable audit record, exactly like the admin
             # delete route. A bare DELETE would orphan tasks, images, the
             # SharePoint files behind them, and the activity trail.
