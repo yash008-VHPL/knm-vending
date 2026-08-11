@@ -27,7 +27,7 @@ import json as _json
 from datetime import datetime, timedelta
 
 import pymssql
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, redirect, render_template, request
 
 import config  # reuse the live app's DB creds
 
@@ -82,6 +82,57 @@ def _current_roles():
         _d = config.DEV_ROLE.strip().lower()
         out = [_ROLE_ALIASES.get(_d, _d)]
     return out
+
+
+def _active_role():
+    """The ONE role the server will actually enforce.
+
+    app.get_role() resolves it from the knm_active_role cookie, falling back to
+    the first claim. /alpha must render this and nothing else — deriving its own
+    answer is what put an operator on the Plan board while every /api/wo/* call
+    returned 403.
+
+    Imported lazily on purpose: app.py imports this module, so a module-level
+    import would be circular. By request time app is fully loaded.
+    """
+    try:
+        from app import get_role
+        return get_role(_current_user())
+    except Exception as e:
+        # Never fall back silently: get_role honours knm_active_role and this
+        # path did not, so a user who switched role would be handed their FIRST
+        # claim — reinstating the exact bug, with the UI confidently mislabelled.
+        import sys
+        print("[alpha] get_role unavailable, using cookie fallback:", e, file=sys.stderr)
+        r = _current_roles()
+        try:
+            w = (request.cookies.get("knm_active_role") or "").strip().lower()
+        except Exception:
+            w = ""
+        w = _ROLE_ALIASES.get(w, w)
+        if w and w in r:
+            return w
+        return r[0] if r else None
+
+
+def _gate():
+    """None when the caller may proceed, otherwise the response to return.
+
+    /alpha and /alpha/api/bootstrap were the only undecorated routes in the app:
+    bootstrap hands back the whole machine registry and every open order, so any
+    authenticated tenant user with zero app roles could read it.
+    """
+    if not _current_user():
+        return redirect("/.auth/login/aad?post_login_redirect_uri=/alpha")
+    if not _current_roles():
+        # Match app.login_required: a page gets the branded page, the API gets
+        # JSON. A browser tab full of {"error": ...} is not an answer.
+        if request.path.startswith("/alpha/api/"):
+            return jsonify({"error": "You are not authorised to use this app."}), 403
+        return ("<h2>Access Denied</h2><p>You are not authorised to use this app."
+                "<br>Please contact your administrator.</p>"
+                '<p><a href="/.auth/logout">Sign out</a></p>'), 403
+    return None
 
 
 def _conn():
@@ -327,12 +378,19 @@ def _fetch_work(cur, meta=None):
 
 @alpha_bp.route("/alpha")
 def alpha_index():
+    blocked = _gate()
+    if blocked is not None:
+        return blocked
     return render_template("alpha_preview.html",
-                           username=_current_user(), roles=_current_roles())
+                           username=_current_user(), roles=_current_roles(),
+                           active_role=_active_role())
 
 
 @alpha_bp.route("/alpha/api/bootstrap")
 def alpha_bootstrap():
+    blocked = _gate()
+    if blocked is not None:
+        return blocked
     conn = None
     try:
         conn = _conn()

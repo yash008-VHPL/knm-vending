@@ -84,9 +84,22 @@ def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         email = get_current_user()
+        # An API caller gets JSON. Answering fetch() with a login redirect or an
+        # HTML error page makes res.json() throw, which every caller in
+        # index.html reports as "Could not reach the server." — so a revoked
+        # role reads as a network outage and gets debugged as one.
+        # switch-role is under /api/ but the BROWSER navigates to it (the role
+        # pickers set location.href). Answering it with JSON strands an expired
+        # session on a white page of JSON instead of bouncing it to AAD.
+        wants_json = (request.path.startswith("/api/")
+                      and request.endpoint != "switch_role")
         if not email:
+            if wants_json:
+                return jsonify({"error": "Your sign-in expired. Reload the page."}), 401
             return redirect("/.auth/login/aad?post_login_redirect_uri=/")
         if not get_role(email):
+            if wants_json:
+                return jsonify({"error": f"{email} is not authorised to use this app."}), 403
             return (
                 f"<h2>Access Denied</h2><p>{email} is not authorised to use this app."
                 f"<br>Please contact your administrator.</p>"
@@ -637,10 +650,19 @@ def switch_role(new_role):
     role claims. Then redirect back to '/' so the page re-renders."""
     email = get_current_user()
     roles = get_all_roles(email)
-    new_role = (new_role or "").strip().lower()
+    # canon_role so a bookmarked /api/switch-role/dispatch still works:
+    # get_all_roles() has already folded dispatch into field_manager, so the raw
+    # value would match nothing and refuse a role the user genuinely holds.
+    new_role = canon_role((new_role or "").strip().lower())
     if new_role not in roles:
         return jsonify({"error": "You don't have that role."}), 403
-    resp = redirect("/")
+    # Allowlist, not validation. A startswith("/") guard is defeated because
+    # Werkzeug strips tabs and newlines from the Location header AFTER the check,
+    # so "/	/evil.com" is emitted as "//evil.com" — a live open redirect on a
+    # route that also sets a cookie. Embedded CR/LF additionally 500s. There are
+    # exactly two callers, so name them.
+    back = request.args.get("back") or "/"
+    resp = redirect(back if back in ("/", "/alpha") else "/")
     resp.set_cookie(
         "knm_active_role", new_role,
         max_age=60 * 60 * 24 * 7,   # 7 days

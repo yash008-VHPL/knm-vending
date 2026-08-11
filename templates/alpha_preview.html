@@ -325,12 +325,18 @@ const ROLE_LABEL={operator:"Operator (driver)",customer_service:"Customer Servic
    ROLE_NAV key and silently drop the user into the customer_service view. */
 const ROLE_ALIAS={dispatch:"field_manager"};
 const canonRole=r=>{const v=String(r||"").toLowerCase();return ROLE_ALIAS[v]||v;};
+/* The role the SERVER resolved for this request (app.get_role). Every /api/wo/*
+   call is authorised against this exact value, so the UI renders it verbatim
+   rather than picking its own — that disagreement is what rendered a Plan board
+   for an operator and then 403d every call it made. */
+const ACTIVE_ROLE=canonRole({{ (active_role or "") | tojson }});
 
 let state={role:"customer_service",area:"service",sub:{},seq:{REP:9000},salesVends:null};
 let machines=[], work=[], live=false;
 let techs=[];                    // [{email,name}] from /api/wo/technicians
 const techEmails=()=>techs.map(t=>t.email).filter(Boolean);
 let drivers=[];                  // assignment targets (emails) — filled at boot
+let techStatus=0, techErr="";     // why the roster is empty, if it is
 
 async function api(path,opts={}){
   try{
@@ -365,25 +371,45 @@ const mByCode=c=>machines.find(m=>m.code===c);
 const wName=w=>{const m=mByCode(w.machine);return m?m.name:(w.machineName||w.machine);};
 function statusTag(w){return w.status==="new"?'<span class="tag new">NEW</span>':w.status==="assigned"?'<span class="tag assigned">ASSIGNED</span>':'<span class="tag done">DONE</span>';}
 
-/* The /api/wo/* endpoints resolve the caller's role from the knm_active_role
-   cookie (app.py get_role). Alpha picks its role client-side, so without this
-   a stale cookie from the main dashboard 403s every work-order call. Only ever
-   set to a role the user actually holds — the server re-validates anyway. */
-function readRoleCookie(){
-  const m=document.cookie.match(/(?:^|;\s*)knm_active_role=([^;]*)/);
-  return m?canonRole(decodeURIComponent(m[1])):"";}
-function syncRoleCookie(){
-  if(!MYROLES.includes(state.role))return;
-  document.cookie="knm_active_role="+encodeURIComponent(state.role)+";path=/;max-age=604800;samesite=Lax";}
+/* knm_active_role is written by ONE place: /api/switch-role, which validates the
+   requested role against the user's real Easy Auth claims first. /alpha used to
+   write it too, from a role it derived itself, and the two disagreed.
+
+   The picker therefore offers only roles the user actually holds AND that this
+   UI can render, and switching is a round trip so the server re-resolves
+   everything — no client-side state can drift out of agreement with it. */
 function buildRolePicker(){
   const sel=$("#rolesel");sel.innerHTML="";
-  Object.keys(ROLE_NAV).forEach(r=>{const o=document.createElement("option");o.value=r;o.textContent=ROLE_LABEL[r];if(r===state.role)o.selected=true;sel.appendChild(o);});
-  sel.onchange=()=>{state.role=sel.value;syncRoleCookie();state.area=ROLE_HOME[state.role];state.sub={};render();toast("Switched to "+ROLE_LABEL[state.role]);};
+  const lbl=document.querySelector(".rolepick span"); if(lbl&&ME) lbl.textContent=ME;
+  const mine=Object.keys(ROLE_NAV).filter(r=>MYROLES.includes(r));
+  const list=mine.length?mine:[state.role];
+  list.forEach(r=>{const o=document.createElement("option");o.value=r;o.textContent=ROLE_LABEL[r]||r;if(r===state.role)o.selected=true;sel.appendChild(o);});
+  // Single-role users keep a visible, disabled indicator. Hiding it would leave
+  // the header reading "Signed in as" and nothing — this UI exists to make the
+  // active role obvious, not to hide it from the people who cannot change it.
+  sel.disabled = list.length < 2;
+  sel.onchange=()=>{const r=sel.value;
+    // Switching is a full navigation, so an open Work Order sheet with a typed
+    // signature and quantities would be destroyed without warning.
+    if($("#woBg").classList.contains("show")
+       && !confirm("Switching role reloads the page. Discard the open work order?")){
+      sel.value=state.role; return; }
+    location.href="/api/switch-role/"+encodeURIComponent(r)+"?back=/alpha";};
+}
+
+/* When the server enforces a role this UI has no screens for, say so instead of
+   rendering someone else's board and letting every call 403. */
+function roleNotice(){
+  if(!ACTIVE_ROLE || ACTIVE_ROLE===state.role) return "";
+  return `<div class="legacy-note"><b>Your active role is
+    ${woEsc(ROLE_LABEL[ACTIVE_ROLE]||ACTIVE_ROLE)}</b>, which this beta app has no screens for,
+    so it is showing ${woEsc(ROLE_LABEL[state.role]||state.role)} instead. Actions may be refused.
+    Use the selector at the top right to switch.</div>`;
 }
 function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
   ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});}
 function render(){buildTabs();const m=$("#main");
-  m.innerHTML=({service:renderService,machines:renderMachines,fleet:renderFleet,schedule:renderSchedule,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
+  m.innerHTML=roleNotice()+({service:renderService,machines:renderMachines,fleet:renderFleet,schedule:renderSchedule,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
   document.querySelectorAll("[data-sub]").forEach(b=>{b.onclick=()=>{state.sub[state.area]=b.dataset.sub;render();};});
   if(state.area==="fleet"&&subActive("fleet","status")==="sales") initSalesTab();
   /* The calendar and the dispatch rail read /api/wo/schedule directly rather
@@ -1057,6 +1083,25 @@ function renderRail(){
     ${railCard(dAdd(t, 1), "Tomorrow")}${railCard(dAdd(t, 2), "Day after")}</div>`;
 }
 
+/* Why the roster is empty, in the user's terms. Every branch names a different
+   remedy, because naming the wrong one costs an afternoon. */
+function rosterProblem(){
+  if(drivers.length) return "";
+  if(techStatus===403){
+    const mine=`<b>${woEsc(ROLE_LABEL[state.role]||state.role)}</b>`;
+    // Telling a Dispatch / Field Manager to switch to Dispatch / Field Manager
+    // is the same class of useless advice this whole change exists to kill.
+    return (state.role==="field_manager"||state.role==="admin")
+      ? `The server refused the roster for your active role (${mine}). Reload the page; if it persists, your role assignment in Azure AD has changed.`
+      : `Your active role is ${mine}, which cannot load the driver roster. Switch to Dispatch / Field Manager or Admin with the selector at the top right — if it is not there, ask an admin to grant you that role.`;
+  }
+  if(techStatus===401) return "Your sign-in expired. Reload the page.";
+  if(techStatus===0)   return `The roster request did not complete — ${woEsc(techErr)}.`;
+  if(techStatus>=500)  return `The roster service returned HTTP ${techStatus}. If a deploy is running, retry in a minute.`;
+  if(techErr)          return woEsc(techErr);   // the server's own diagnosis, verbatim
+  return "No users hold the Operator app role in Azure AD, so there is nobody to list.";
+}
+
 function renderPlan(){
   // The unassigned list is scoped to the board's day (plus undated carry-overs).
   // Unscoped, every future occurrence of every sales repeat would queue here
@@ -1082,11 +1127,10 @@ function renderPlan(){
   // added by hand.
   const people = boardPeople();
 
-  const noRoster = !drivers.length ? `<div class="legacy-note">
-      <b>Driver roster did not load</b> — <code>/api/wo/technicians</code> is Graph-backed; check
-      <code>MS_EASYAUTH_SP_OBJECT_ID</code> / <code>MS_OPERATOR_ROLE_ID</code>, or open
-      <code>/api/wo/technicians/diag</code> as admin. Names show as email addresses until it
-      returns; scheduling works either way. Add a driver:
+  const why = rosterProblem();
+  const noRoster = why ? `<div class="legacy-note">
+      <b>Driver roster did not load</b> — ${why}
+      Names show as email addresses until it returns; scheduling works either way. Add a driver:
       <input id="adhocDrv" placeholder="operator@kopinearme.com" style="width:220px;display:inline-block;margin:0 6px;height:28px;font-size:.76rem">
       <button class="btn sm" onclick="addAdhocDriver()">Add card</button></div>` : "";
 
@@ -1361,7 +1405,7 @@ async function assignSite(code, email, verb, onlyFrom){
 }
 
 async function autoPlan(){
-  if(!drivers.length){toast("No technicians found to assign — configure the Technician lookup.");return;}
+  if(!drivers.length){toast(rosterProblem().replace(/<[^>]+>/g,""));return;}
   // Round-robin by SITE, not by work item. Assigning item-by-item would split a
   // machine across two drivers, which the board cannot represent and which makes
   // the per-driver clear button destructive.
@@ -1579,23 +1623,35 @@ function setBanner(h){const b=$("#banner");live=!!(h&&h.live);
 async function boot(){
   // Honour a role the user already chose in the main dashboard; only write the
   // cookie when there isn't a valid one, so /alpha never silently switches them.
-  const ck=readRoleCookie();
-  state.role = (MYROLES.includes(ck)&&ROLE_NAV[ck] ? ck : MYROLES.find(r=>ROLE_NAV[r])) || state.role;
-  if(ck!==state.role) syncRoleCookie();
+  // Render what the server enforces. ROLE_NAV[...] is still required because a
+  // claim outside the five known roles has no tab list, and buildTabs would
+  // throw on undefined and leave a blank page.
+  state.role = (ROLE_NAV[ACTIVE_ROLE] ? ACTIVE_ROLE : "")
+            || MYROLES.filter(r=>ROLE_NAV[r])[0] || state.role;
   buildRolePicker();state.area=ROLE_HOME[state.role];
   try{
     const res=await fetch("/alpha/api/bootstrap");const d=await res.json();
+    // A refusal is valid JSON with no .machines, which the old code reported as
+    // "no rows returned" — an authorisation problem dressed up as empty data.
+    if(!res.ok||d.error) throw new Error(d.error||("HTTP "+res.status));
     machines=(d.machines||[]).map(m=>({vendsSince:null,...m}));
     work=d.work||[];
     state.salesVends=d.health?d.health.salesVends:null;
     if(!machines.length){demoSeed();setBanner({live:false,reason:"no rows returned"});}
     else setBanner(d.health);
   }catch(e){demoSeed();setBanner({live:false,reason:String(e)});}
-  try{  // assignment targets — managers only; non-managers just get free-text
-    const t=await(await fetch("/api/wo/technicians")).json();
-    techs=(t&&t.technicians||[]).map(u=>({email:(u.email||u.mail||u.userPrincipalName||"").toLowerCase(),name:u.display_name||u.displayName||u.name||null})).filter(u=>u.email);
-    drivers=techEmails();
-  }catch(e){techs=[];drivers=[];}
+  // A 403 body is valid JSON, so the old code parsed it happily, found no
+  // .technicians, and reported an empty roster — which the board then blamed on
+  // Microsoft Graph. Keep the status; it is the whole diagnosis.
+  try{
+    const res=await fetch("/api/wo/technicians");
+    techStatus=res.status;
+    let t=null; try{t=await res.json();}catch(_){t=null;}
+    if(!res.ok||!t){ techErr=(t&&t.error)||("HTTP "+res.status); techs=[]; }
+    else { techErr=t.error||"";
+           techs=(t.technicians||[]).map(u=>({email:(u.email||u.mail||u.userPrincipalName||"").toLowerCase(),name:u.display_name||u.displayName||u.name||null})).filter(u=>u.email); }
+  }catch(e){ techStatus=0; techErr="could not reach the server ("+e+")"; techs=[]; }
+  drivers=techEmails();
   render();
 }
 boot();
