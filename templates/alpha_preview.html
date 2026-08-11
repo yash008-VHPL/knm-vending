@@ -78,6 +78,22 @@
   .sales-controls .field{flex:1;min-width:130px;margin-bottom:0}
   .datetime-row{display:flex;gap:5px}
   .datetime-row input{flex:1}
+  /* One control height for the whole toolbar. The row is bottom-aligned
+     (align-items:flex-end) around four DIFFERENT intrinsic heights otherwise --
+     measured in Chrome: <select> 35.0px, <input type=date|time> 38.3px (it
+     reserves room for the picker widget), .btn 31.0px, .view-toggle 30.0px.
+     Bottom-aligning those pushed the "Location" label 3.3px below "Start"/"End"
+     and left both buttons floating ~7px off the inputs' baseline. Equal heights
+     make flex-end and flex-start identical, so the labels line up too. */
+  .sales-controls input,.sales-controls select,
+  .sales-controls .btn,.sales-controls .view-toggle{height:38px}
+  /* Centre explicitly. Dropping the 7px vertical padding is safe today only
+     because <button> UA styling centres its own content box -- neither the
+     flex parent (.view-toggle sets no align-items) nor a line-height does it.
+     Spelling it out means swapping these for <a>/<div> later cannot silently
+     top-align the labels. */
+  .sales-controls .view-toggle button{height:100%;padding:0 12px;
+    display:flex;align-items:center;justify-content:center}
   .view-toggle{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;flex-shrink:0}
   .view-toggle button{border:none;background:#fff;padding:7px 11px;font-size:.78rem;font-weight:600;cursor:pointer;color:var(--mut)}
   .view-toggle button.on{background:var(--blue);color:#fff}
