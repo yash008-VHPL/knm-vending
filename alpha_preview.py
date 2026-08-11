@@ -381,9 +381,14 @@ def alpha_index():
     blocked = _gate()
     if blocked is not None:
         return blocked
+    # `role` is what the embedded main-dashboard screens expect (index.html's
+    # own context name) — the Locations pane gates its Edit/Delete/Add controls
+    # on it. Same value as active_role; both are passed so neither template half
+    # has to know about the other's naming.
+    _r = _active_role()
     return render_template("alpha_preview.html",
                            username=_current_user(), roles=_current_roles(),
-                           active_role=_active_role())
+                           active_role=_r, role=_r)
 
 
 @alpha_bp.route("/alpha/api/bootstrap")

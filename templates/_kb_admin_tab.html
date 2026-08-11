@@ -108,9 +108,9 @@
     </div>
 
     <div class="kb-toolbar">
-        <input type="search" id="kbSearch" placeholder="Search title / symptom / cause / action…" oninput="renderKB()">
-        <input type="number" id="kbFilterCode" placeholder="Filter by event code" oninput="renderKB()">
-        <select id="kbFilterKind" onchange="renderKB()">
+        <input type="search" id="kbSearch" placeholder="Search title / symptom / cause / action…" oninput="window.__kbRender()">
+        <input type="number" id="kbFilterCode" placeholder="Filter by event code" oninput="window.__kbRender()">
+        <select id="kbFilterKind" onchange="window.__kbRender()">
             <option value="all">All kinds</option>
             <option value="cmp">Complaints (6xxxxx)</option>
             <option value="wko">Work orders (8xxxxx)</option>
@@ -169,6 +169,7 @@
         }).catch(function(e){ showMsg(esc(e.message), 'error'); });
     }
 
+    window.__kbRender = renderKB;
     function renderKB(){
         var search   = (document.getElementById('kbSearch').value || '').toLowerCase();
         var codeFilt = document.getElementById('kbFilterCode').value;

@@ -267,12 +267,125 @@
   .rail-c h4{margin:0 0 2px;font-size:.78rem;font-weight:800}
   .rail-c .sub{font-size:.66rem;color:var(--mut);margin-bottom:8px;display:block}
   .rail-c.tmr{border-color:var(--blue)}
+  /* ── embedded legacy screens ────────────────────────────────────────────────
+     The 6 partials and _legacy_tabs.html cannot live inside <main id="main">:
+     render() rewrites its innerHTML on every navigation, which would delete
+     them (and their event wiring) on the first tab click. They sit in their own
+     host instead and alpha only toggles which one is visible. */
+  #embhost{display:none;max-width:1180px;margin:0 auto;padding:0 4px 40px}
+  #embhost.on{display:block}
+  .emb-pane{display:none}
+  .emb-pane.on{display:block}
+  /* Every embedded screen was written against index.html's TYPE-SCOPED control
+     rules (fixed 40px height, per-type widths). _legacy_tabs.html scopes those
+     under `.lgc`, which the 6 partials are not inside — so without this block
+     they inherit alpha's `input,select,textarea{width:100%}` and every toolbar
+     that was one flex row becomes a stack of full-width boxes. The checkbox rule
+     is not cosmetic: alpha's bare `input` selector stretched the "Also delete
+     all KB entries" confirmation on the Wipe All panel into a 924px bar. */
+  #embhost select,
+  #embhost input[type="text"], #embhost input[type="search"], #embhost input[type="number"],
+  #embhost input[type="date"], #embhost input[type="time"], #embhost input[type="datetime-local"]{
+    box-sizing:border-box;width:auto;height:40px;border:1px solid #d1d5db;border-radius:6px;
+    padding:0 12px;font-size:.875rem;color:#111827;background:#fff;vertical-align:top}
+  #embhost select{min-width:180px}
+  #embhost input[type="text"]{width:110px}
+  #embhost input[type="date"]{width:150px}
+  #embhost select:focus,
+  #embhost input[type="text"]:focus, #embhost input[type="search"]:focus,
+  #embhost input[type="number"]:focus, #embhost input[type="date"]:focus,
+  #embhost input[type="time"]:focus, #embhost input[type="datetime-local"]:focus{
+    outline:none;border-color:#1a56db;box-shadow:0 0 0 3px rgba(26,86,219,.15)}
+  #embhost input[type="checkbox"], #embhost input[type="radio"]{width:auto;height:auto}
+  /* index.html's button variants, which alpha's .btn has no equivalent for. */
+  #embhost .btn-primary{background:#1a56db;color:#fff}
+  #embhost .btn-secondary{background:#e5e7eb;color:#374151}
+
+  /* ── fault reports (customer service) ───────────────────────────────────── */
+  .fx-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:11px}
+  .fx-tools select{width:auto;min-width:130px}
+  .fx-tools input[type=search]{flex:1;min-width:150px}
+  .fx-r{display:flex;justify-content:space-between;gap:12px;align-items:center;
+    border:1px solid var(--line);border-radius:10px;background:#fff;padding:10px 13px;margin-bottom:7px;cursor:pointer}
+  .fx-r:hover{border-color:var(--blue);box-shadow:0 2px 8px rgba(0,0,0,.07)}
+  .fx-r .rid{font-family:ui-monospace,monospace;font-size:.68rem;color:var(--mut)}
+  .fx-r .rt{font-weight:700;font-size:.85rem;margin-top:2px}
+  .fx-r .rs{font-size:.7rem;color:var(--mut);margin-top:2px}
+  .fx-r .rr{display:flex;flex-direction:column;gap:3px;align-items:flex-end}
+  .fx-b{font-size:.62rem;font-weight:800;text-transform:uppercase;letter-spacing:.03em;
+    padding:2px 8px;border-radius:20px;white-space:nowrap}
+  .fx-b.s0{background:#fef3c7;color:#b45309}.fx-b.s1{background:#dbeafe;color:#1e40af}
+  .fx-b.s2{background:#dcfce7;color:#15803d}.fx-b.s3{background:#f3f4f6;color:#4b5563}
+  .fx-b.u0{background:#f3f4f6;color:#6b7280}.fx-b.u1{background:#e0e7ff;color:#3730a3}
+  .fx-b.u2{background:#fee2e2;color:#b91c1c}
+  .fx-b.money{background:#fef9c3;color:#78350f}.fx-b.grp{background:#e0e7ff;color:#3730a3}
+  .fx-bg{display:none;position:fixed;inset:0;background:rgba(17,24,39,.55);z-index:60;overflow-y:auto;padding:22px 12px}
+  .fx-bg.show{display:flex;align-items:flex-start;justify-content:center}
+  .fx-m{background:var(--bg);border-radius:12px;width:100%;max-width:660px;margin:auto;overflow:hidden;
+    box-shadow:0 14px 44px rgba(0,0,0,.32)}
+  .fx-h{background:var(--blue);color:#fff;padding:12px 17px;display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+  .fx-h h3{margin:0;font-size:.98rem;font-weight:800}
+  .fx-h .sub{font-size:.72rem;opacity:.85;margin-top:2px;font-family:ui-monospace,monospace}
+  .fx-h button{background:rgba(255,255,255,.2);color:#fff;border:0;width:26px;height:26px;border-radius:5px;
+    font-size:1.05rem;line-height:1;cursor:pointer}
+  .fx-body{padding:15px 17px;max-height:calc(100vh - 160px);overflow-y:auto}
+  .fx-ro{background:#f3f4f6;color:#4b5563}
+  .fx-refund{background:#fef9c3;border:1px solid #fde68a;border-radius:8px;padding:9px 12px;margin-bottom:12px}
+  .fx-refund label{display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:700;color:#78350f;font-size:.84rem;text-transform:none}
+  .fx-refund input{width:17px;height:17px;flex:0 0 auto;cursor:pointer}
+  .fx-imgs{display:flex;flex-wrap:wrap;gap:7px;margin-top:3px}
+  .fx-th{position:relative;width:84px;height:84px;border-radius:6px;overflow:hidden;border:1px solid var(--line)}
+  .fx-th img{width:100%;height:100%;object-fit:cover;display:block}
+  .fx-th button{position:absolute;top:2px;right:2px;border:0;border-radius:4px;width:19px;height:19px;
+    background:rgba(17,24,39,.72);color:#fff;font-size:.8rem;line-height:1;cursor:pointer}
+  .fx-add{width:84px;height:84px;border:2px dashed #cbd5e1;border-radius:6px;background:#f8fafc;color:#64748b;
+    font-size:.66rem;font-weight:700;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px}
+  .fx-add:hover{border-color:var(--blue);color:var(--blue)}
+  .fx-act{display:flex;gap:7px;justify-content:flex-end;flex-wrap:wrap;margin-top:8px}
+  .fx-log{font-size:.76rem;color:#374151}
+  .fx-log div{padding:4px 0;border-bottom:1px solid #f3f4f6}
+  nav.tabs button.oldapp{margin-left:auto;color:#7c3aed;font-weight:700}
+  /* Inner section toggle inside a sub-tab (Event log, Refill status). Visually
+     lighter than .subnav so the hierarchy reads sub-tab > section. */
+  .subnav.secnav{margin:-4px 0 12px}
+  .subnav.secnav button{font-size:.72rem;padding:4px 10px;border-radius:6px}
+  /* Live status */
+  .fh-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  .fh-badge{border:1px solid var(--line);background:#fff;border-radius:20px;padding:4px 12px;
+    font-size:.8rem;font-weight:700;cursor:pointer;color:var(--ink)}
+  .fh-badge small{font-weight:500;color:var(--mut);margin-left:2px}
+  .fh-badge.on{outline:2px solid var(--mut)}
+  .fh-badge.on.green{background:#bbf7d0}.fh-badge.on.yellow{background:#fde68a}.fh-badge.on.red{background:#fecaca}
+  .fh-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px}
+  .fh-c{border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:4px}
+  .fh-c.green{background:#f0fdf4;border:1px solid #bbf7d0}
+  .fh-c.yellow{background:#fefce8;border:1px solid #fde68a}
+  .fh-c.red{background:#fef2f2;border:1px solid #fecaca}
+  .fh-c .ic{font-size:1.4rem;line-height:1}
+  .fh-c .nm{font-weight:700;font-size:.82rem;line-height:1.3}
+  .fh-c .sub{font-size:.72rem;color:var(--mut)}
+  /* Total Fleet */
+  table.tf-t{width:100%;border-collapse:collapse;font-size:.82rem;background:#fff;
+    border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  table.tf-t th{text-align:left;font-size:.66rem;text-transform:uppercase;letter-spacing:.05em;
+    color:var(--mut);padding:9px 12px;background:#f9fafb;border-bottom:1px solid var(--line)}
+  table.tf-t td{padding:9px 12px;border-bottom:1px solid #f3f4f6;vertical-align:middle}
+  table.tf-t tbody tr{cursor:pointer}
+  table.tf-t tbody tr:hover{background:#f8fafc}
+  table.tf-t tbody tr.nodrill{cursor:default}
+  table.tf-t tbody tr.nodrill:hover{background:transparent}
+  table.tf-t .right,table.tf-t th.right{text-align:right}
+  table.tf-t .mono{font-family:ui-monospace,monospace;font-size:.74rem;color:var(--mut)}
+  table.tf-t .dot{display:inline-block;vertical-align:-1px;margin-right:5px}
 </style>
+<!-- Leaflet: only the embedded Dispatch route map uses it (was in index.html's head). -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 </head>
 <body>
 
 <header>
-  <div class="brand">KNM Ops <small>streamlined — beta</small></div>
+  <div class="brand">KNM Ops <small>vending operations</small></div>
   <div class="rolepick">
     <span>Signed in as</span>
     <select id="rolesel"></select>
@@ -282,6 +395,19 @@
 
 <nav class="tabs" id="tabs"></nav>
 <main id="main"></main>
+
+<!-- Screens lifted whole from the main dashboard. Each partial is self-contained
+     (own namespaced CSS, own IIFE, no Jinja, no dependency on index.html's
+     globals) and publishes a single window.__xxInit(); alpha shows one pane at a
+     time and calls that init once. See EMBEDS in the script below. -->
+<div id="embhost">
+  {% set MGR = role in ['admin', 'dispatch', 'field_manager'] %}
+  {% if MGR %}<div class="emb-pane" id="emb-tech">{% include "_tech_support_tab.html" %}</div>{% endif %}
+  {% if MGR %}<div class="emb-pane" id="emb-kb">{% include "_kb_admin_tab.html" %}</div>{% endif %}
+  {% if MGR or role == 'operator' %}<div class="emb-pane" id="emb-movements">{% include "_movements_tab.html" %}</div>{% endif %}
+  {% if role == 'admin' %}<div class="emb-pane" id="emb-cleanup">{% include "_admin_delete_tab.html" %}</div>{% endif %}
+  {% include "_legacy_tabs.html" %}
+</div>
 
 <div class="drawer-bg" id="drawerbg" onclick="closeDrawer()"></div>
 <div class="drawer" id="drawer"><button class="x" onclick="closeDrawer()">×</button><div id="drawerc"></div></div>
@@ -297,6 +423,13 @@
     <button class="btn" onclick="woSigConfirm()">Sign &amp; submit</button>
   </div>
 </div></div>
+<div class="fx-bg" id="fxBg" onclick="if(event.target===this)fxClose()">
+  <div class="fx-m">
+    <div class="fx-h"><div><h3 id="fxTitle">Fault report</h3><div class="sub" id="fxSub"></div></div>
+      <button onclick="fxClose()" aria-label="Close">&times;</button></div>
+    <div class="fx-body" id="fxBody"></div>
+  </div>
+</div>
 <div class="toast" id="toast"></div>
 
 <script>
@@ -307,15 +440,15 @@ const ME = {{ (username or "") | tojson }};
 const MYROLES = ({{ (roles or []) | tojson }}).map(r=>String(r||"").toLowerCase())
   .map(r=>({dispatch:"field_manager"}[r]||r)).filter((v,i,a)=>a.indexOf(v)===i);
 
-const AREAS={fleet:"Fleet",machines:"Machines",service:"Service",schedule:"Schedule",plan:"Plan",admin:"Admin"};
+const AREAS={fleet:"Fleet",service:"Service",schedule:"Schedule",plan:"Plan",admin:"Admin"};
 const ROLE_NAV={
-  operator:["service","machines"], customer_service:["service","machines"],
-  field_manager:["plan","schedule","service","fleet","machines"],
+  operator:["service","fleet"], customer_service:["service","fleet"],
+  field_manager:["plan","schedule","service","fleet"],
   /* Sales lands on Schedule: keying the week's top-ups is the job. She reaches
      the same /api/wo/schedule routes dispatch does, but the server refuses her
      an assigned_to — naming a driver stays dispatch's call. */
-  sales:["schedule","fleet","service","machines"],
-  admin:["plan","schedule","service","fleet","machines","admin"]};
+  sales:["schedule","fleet","service"],
+  admin:["plan","schedule","service","fleet","admin"]};
 /* dispatch is merged into field_manager (app.ROLE_ALIASES): one entry, one tab
    order, one landing tab — Plan, because the board is the morning job. */
 const ROLE_HOME={operator:"service",customer_service:"service",field_manager:"plan",sales:"schedule",admin:"plan"};
@@ -408,28 +541,101 @@ function roleNotice(){
     Use the selector at the top right to switch.</div>`;
 }
 function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
-  ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});}
-function render(){buildTabs();const m=$("#main");
-  m.innerHTML=roleNotice()+({service:renderService,machines:renderMachines,fleet:renderFleet,schedule:renderSchedule,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
+  ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});
+  /* The main dashboard, still the app at "/" — alpha has NOT been cut over.
+     New tab on purpose: it boots its own script and its own stylesheet, so
+     navigating there in-place and back would re-run alpha's boot() and lose the
+     board's day and filters. */
+  const old=document.createElement("button");old.textContent="Old App";old.className="oldapp";
+  old.title="The previous dashboard (read/write, same database)";
+  old.onclick=()=>window.open("/","_blank","noopener");nav.appendChild(old);}
+
+/* ── Embedded legacy screens ──────────────────────────────────────────────────
+   key = "<area>:<sub>". el = the pane id inside #embhost. init = the one-shot
+   the partial published on window; each partial guards its own re-entry, so
+   calling it on every visit is safe and cheap. */
+const EMBEDS={
+  "service:tech":       {el:"emb-tech",      init:()=>window.__tsInit&&window.__tsInit()},
+  "service:kb":         {el:"emb-kb",        init:()=>window.__kbInit&&window.__kbInit()},
+  "service:movements":  {el:"emb-movements", init:()=>window.__mvInit&&window.__mvInit()},
+  "fleet:locations":    {el:"lgc-locations", init:()=>window.__lgcInit&&window.__lgcInit("locations")},
+  /* Inner SECTIONS of a sub-tab, deliberately keyed outside the "<area>:<sub>"
+     namespace: "fleet:events" and "fleet:refill" are embeds in only one of their
+     two states, so a plain sub-tab lookup must never find them. */
+  "fleet:events#messages":{el:"lgc-messages",init:()=>window.__lgcInit&&window.__lgcInit("messages")},
+  "fleet:refill#topups": {el:"lgc-topups",   init:()=>window.__lgcInit&&window.__lgcInit("topups")},
+  /* Same pane as fleet:refill#topups. Two keys onto one element is fine —
+     showEmbed clears every pane and lights exactly one — but it IS one shared
+     DOM instance, so a half-filled form carries between the two entry points. */
+  "plan:topups":        {el:"lgc-topups",    init:()=>window.__lgcInit&&window.__lgcInit("topups")},
+  "plan:routes":        {el:"lgc-dispatch",  init:()=>window.__lgcInit&&window.__lgcInit("dispatch")},
+  "admin:cleanup":      {el:"emb-cleanup",   init:()=>window.__adInit&&window.__adInit()}};
+
+/* Set by a render<Area>() when the visible sub-tab is an embedded screen. Read
+   once, immediately after #main is written, then cleared. */
+let pendingEmbed=null;
+function showEmbed(key){
+  const host=$("#embhost");
+  document.querySelectorAll("#embhost .emb-pane, #embhost .lgc-pane").forEach(el=>el.classList.remove("on"));
+  /* Live status polls on a 2-minute interval. It is native alpha code now, so
+     nothing in the embedded partials clears it — this must, on EVERY render,
+     including back into Live status itself (fhLoad restarts it). Leave it
+     running and it writes into a #fhGrid that render() already destroyed, once
+     every two minutes, forever. */
+  fhStop();
+  const cfg=key&&EMBEDS[key];
+  if(!cfg){host.classList.remove("on");return;}
+  const el=document.getElementById(cfg.el);
+  if(!el){host.classList.remove("on");toast("That screen did not load — reload the page.");return;}
+  host.classList.add("on");el.classList.add("on");
+  try{cfg.init();}catch(e){console.error("[alpha] embed init failed:",key,e);toast("This screen failed to start.");}
+}
+function render(){pendingEmbed=null;buildTabs();const m=$("#main");
+  /* #fxBg is a sibling of #main, not part of any pane, so nothing else takes it
+     down: navigating with it open left a modal floating over an unrelated
+     screen, swallowing every click on the page. */
+  if($("#fxBg")&&$("#fxBg").classList.contains("show"))fxClose();
+  m.innerHTML=roleNotice()+({service:renderService,fleet:renderFleet,schedule:renderSchedule,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
+  showEmbed(pendingEmbed);
   document.querySelectorAll("[data-sub]").forEach(b=>{b.onclick=()=>{state.sub[state.area]=b.dataset.sub;render();};});
+  /* data-sec = an inner section WITHIN a sub-tab. Bound separately because the
+     [data-sub] handler above writes state.sub[area], which would silently
+     replace the sub-tab the section belongs to. */
+  document.querySelectorAll("[data-sec]").forEach(b=>{b.onclick=()=>{
+    const [a,k]=b.dataset.sec.split(":");FLEETSEC[a]=k;render();};});
   if(state.area==="fleet"&&subActive("fleet","status")==="sales") initSalesTab();
   /* The calendar and the dispatch rail read /api/wo/schedule directly rather
      than bootstrap's work[] — that list is capped and unbounded in date, so a
      quarter of keyed schedule would push the far weeks out of it silently. */
   if(state.area==="schedule") ensureSchedule();
   if(state.area==="plan")     ensureRail();
+  /* showEmbed() above stopped the Live status poller. Restart it here — after
+     the screen exists — and only when Live status is what is on screen. */
+  if(fleetCur()==="status") fhStart();
 }
 const subActive=(a,d)=>state.sub[a]||d;
 
 /* SERVICE */
 function renderService(){const r=state.role;let modes;
-  if(r==="operator")modes=[["myjobs","My Jobs"],["kb","Knowledge Base"]];
-  else if(r==="field_manager"||r==="admin")modes=[["triage","Triage board"],["kb","Knowledge Base"]];
-  else modes=[["report","Report a problem"],["mine","My reports"]];
-  const cur=subActive("service",modes[0][0]);
-  const body=({report:svcReport,mine:svcMine,triage:svcTriage,myjobs:svcMyJobs,kb:svcKB}[cur]||(()=>""))();
+  /* Sub-tab set per role. "faults" is native (below); tech / movements / kb are
+     the main dashboard's own screens, embedded — see EMBEDS. Two exclusions are
+     deliberate: an operator gets no Fault Reports tab (scope=all downgrades to
+     mine for a driver anyway, and raising complaints is not a driver's job), and
+     Knowledge Base is manager-only because the embedded screen is the CAR
+     EDITOR — it has no internal role gating, it relied on index.html hiding the
+     tab, and every one of its Save/Delete buttons 403s for anyone else. */
+  if(r==="operator")modes=[["myjobs","My Jobs"],["movements","Movements"]];
+  else if(r==="field_manager"||r==="admin")modes=[["triage","Triage board"],["faults","Fault Reports"],["tech","Tech Support"],["movements","Movements"],["kb","Knowledge Base"]];
+  else if(r==="customer_service")modes=[["faults","Fault Reports"],["report","Quick report"],["mine","My reports"]];
+  else modes=[["faults","Fault Reports"],["report","Report a problem"],["mine","My reports"]];
+  let cur=subActive("service",modes[0][0]);
+  /* A role switch can leave state.sub pointing at a tab the new role has no
+     button for — that rendered a blank screen with no way back. */
+  if(!modes.some(([k])=>k===cur)){cur=modes[0][0];state.sub.service=cur;}
+  if(EMBEDS["service:"+cur])pendingEmbed="service:"+cur;
+  const body=pendingEmbed?"":({report:svcReport,mine:svcMine,triage:svcTriage,myjobs:svcMyJobs,kb:svcKB,faults:renderFaults}[cur]||(()=>""))();
   return `<div class="screen-h"><div><h2>Service</h2><div class="crumb">Report · Triage · Do — one work record across roles</div></div></div>
-   <div class="legacy-note">Replaces Fault Report + Tech Support + Work Orders + Manage KB; retires the legacy Work Orders app.</div>
+   <div class="legacy-note">One work record across roles — Fault Reports, Triage, Tech Support, Movements and the KB in one place.</div>
    <div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>${body}`;}
 function svcReport(){const opts=machines.filter(m=>m.active).map(m=>`<option value="${woEsc(m.code)}">${woEsc(m.name)}</option>`).join("");
   return `<div class="card" style="max-width:560px">
@@ -703,17 +909,6 @@ function listWork(arr,empty){if(!arr.length)return `<p class="empty">${empty||"N
     <div class="grow"><b>${woEsc(wName(w))} — ${woEsc(w.desc)}</b><div class="meta">${woEsc(w.id)} · ${woEsc(driverName(w.assignedTo))} · ${woEsc(w.source)}</div></div>
     <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>${statusTag(w)}</div>`;}).join("")}</div>`;}
 
-/* MACHINES */
-function machinesFor(){const cur=subActive("machines","active")==="decom"?"decom":"active";const q=(state.mq||"").trim().toLowerCase();
-  return machines.filter(m=>(cur==="active"?m.active:!m.active) &&
-    (!q || (m.name||"").toLowerCase().includes(q) || (m.code||"").toLowerCase().includes(q)));}
-function machineRowsHtml(){const canEdit=["admin","dispatch","field_manager"].includes(state.role);const list=machinesFor();
-  if(!list.length) return '<p class="empty">No machines match your search.</p>';
-  return list.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b>
-    <div class="meta">${m.code} · ${m.lat??'?'}, ${m.lon??'?'} · last refill ${m.lastRefill}</div></div>
-    <button class="btn sm ghost" onclick="openMachine('${m.code}')">Info · History${canEdit?' · Edit':''}</button></div>`).join("");}
-function renderMachineList(){const el=document.getElementById("mList");if(el)el.innerHTML=machineRowsHtml();
-  const c=document.getElementById("mCount");if(c)c.textContent=machinesFor().length;}
 /* PROPERTIES — the five attributes, owned by Sales. Loaded on demand: the
    board's bootstrap does not carry them and most sessions never open this. */
 let props=null, propsErr="", propsQ="", propsOnlyMissing=false, propsLoading=false;
@@ -838,55 +1033,390 @@ async function propsUpload(apply,btn){
   if(apply){propsFile=null;await loadProps(true);toast(d.ok+" machine(s) updated");}
 }
 
-function renderMachines(){const cur=CAN_PROPS()?subActive("machines",state.role==="sales"?"props":"active"):"active";const canEdit=["admin","dispatch","field_manager"].includes(state.role);
-  return `<div class="screen-h"><div><h2>Machines</h2><div class="crumb">One registry — Locations + Historic Locations + Machine History</div></div>${state.role==="admin"&&cur==="active"?'<button class="btn ghost" onclick="openAddMachine()">+ Add machine</button>':''}</div>
-    <div class="subnav"><button data-sub="active" class="${cur==='active'?'on':''}">Active (${machines.filter(m=>m.active).length})</button>
-      <button data-sub="decom" class="${cur==='decom'?'on':''}">Decommissioned (${machines.filter(m=>!m.active).length})</button>
-      ${CAN_PROPS()?`<button data-sub="props" class="${cur==='props'?'on':''}">Properties${props&&props.incomplete?` (${props.incomplete})`:""}</button>`:""}</div>
-    ${cur==="props"?renderProps():""}
-    ${cur==="props"?"":`<input id="mSearch" type="search" placeholder="Search machine name or code…" value="${(state.mq||'').replace(/"/g,'&quot;')}"
-      oninput="state.mq=this.value;renderMachineList()" style="width:280px;margin-bottom:8px">
-    <div class="meta" style="margin-bottom:8px"><b id="mCount">${machinesFor().length}</b> shown</div>
-    <div class="rows" id="mList">${machineRowsHtml()}</div>`}`;}
-function openMachine(code){const m=mByCode(code);const wos=work.filter(w=>w.machine===code);
-  drawer(`<h3>${woEsc(m.name)}</h3><span class="pill">${woEsc(m.code)}</span> <span class="pill">${m.active?'active':'decommissioned'}</span>
-    <div class="grid2" style="margin-top:12px"><div class="field"><label>Name</label><input value="${woEsc(m.name)}"></div>
-      <div class="field"><label>Code</label><input value="${m.code}"></div><div class="field"><label>Lat</label><input value="${m.lat??''}"></div>
-      <div class="field"><label>Lon</label><input value="${m.lon??''}"></div></div>
-    <h3 style="font-size:.92rem;margin:8px 0 8px">History (work + visits)</h3>
-    <div class="timeline">${wos.length?wos.map(w=>`<div><b>${woEsc(w.id)} · ${tagTxt(w.type)} · ${woEsc(w.status)}</b>${woEsc(w.desc)}</div>`).join(""):'<div class="meta">No work recorded.</div>'}</div>
-    <p class="note">Info / History / status in one drawer. (Edits are preview-only.)</p>`);}
-
-function openAddMachine(){
-  drawer(`<h3>Add machine</h3><p class="note">Registers the machine in the live registry and opens its location history at the current site.</p>
-    <div class="field"><label>Location name (required)</label><input id="am_name" placeholder="e.g. UPS House"></div>
-    <div class="field"><label>Machine code (required)</label><input id="am_code" placeholder="e.g. 54020502"></div>
-    <div class="grid2"><div class="field"><label>Lat</label><input id="am_lat" placeholder="1.3402"></div>
-      <div class="field"><label>Lon</label><input id="am_lon" placeholder="103.8896"></div></div>
-    <button class="btn" onclick="submitAddMachine()">Add machine</button>`);}
-async function submitAddMachine(){
-  const name=($("#am_name").value||"").trim(), code=($("#am_code").value||"").trim();
-  const lat=($("#am_lat").value||"").trim(), lon=($("#am_lon").value||"").trim();
-  if(!name||!code){toast("Location name and machine code are required.");return;}
-  if(!live){toast("Demo mode — backend unreachable, nothing saved.");return;}
-  const r=await api("/api/admin/locations",{method:"POST",body:{name,code,lat:lat||null,lon:lon||null}});
-  if(!r)return; closeDrawer(); await reload(); toast(name+" ("+code+") added");}
 
 /* FLEET */
-function renderFleet(){const cur=subActive("fleet","status");
-  const A=machines.filter(m=>m.active);const g=A.filter(m=>m.status==="g").length,y=A.filter(m=>m.status==="y").length,r=A.filter(m=>m.status==="r").length;
-  let body;
-  if(cur==="sales")body=renderSalesUI();
-  else if(cur==="events")body=`<div class="rows">${A.filter(m=>m.status!=="g").slice(0,12).map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${m.status==='r'?'silent past threshold':'recent error/exception'}</div></div></div>`).join("")||'<p class="empty">No active alerts.</p>'}</div><p class="note">Derived from heartbeat (was Messages tab).</p>`;
-  else if(cur==="refill")body=`<div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${m.vendsSince==null?'vends since refill: —':m.vendsSince+' vends since refill'} · last ${m.lastRefill}</div></div></div>`).join("")}</div><p class="note">Read-only refill status so Sales keeps top-up visibility. Logging happens in Plan / My Jobs.</p>`;
-  else body=`<div class="kpis"><div class="kpi"><b style="color:var(--ok)">${g}</b><small>🟢 online</small></div><div class="kpi"><b style="color:var(--warn)">${y}</b><small>🟡 warning</small></div><div class="kpi"><b style="color:var(--bad)">${r}</b><small>🔴 silent</small></div></div>
-    <div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span><div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${m.status==='r'?'silent — needs attention':m.status==='y'?'warning':'online'}</div></div>${m.status!=='g'?`<button class="btn sm ghost" onclick="fleetReport('${m.code}')">Report fault</button>`:''}</div>`).join("")}</div>
-    <p class="note">Live heartbeat (was Heartbeat tab). "Report fault" opens Service ▸ Report.</p>`;
-  return `<div class="screen-h"><div><h2>Fleet</h2><div class="crumb">Monitor — Sales + Messages + Heartbeat (+ refill status)</div></div></div>
-    <div class="subnav"><button data-sub="status" class="${cur==='status'?'on':''}">Live status</button><button data-sub="sales" class="${cur==='sales'?'on':''}">Sales</button>
-      <button data-sub="events" class="${cur==='events'?'on':''}">Event log</button><button data-sub="refill" class="${cur==='refill'?'on':''}">Refill status</button></div>${body}`;}
-function fleetReport(code){if(!ROLE_NAV[state.role].includes("service")){toast("This role has read-only Fleet.");return;}
-  state.area="service";state.sub.service=(state.role==="field_manager"||state.role==="admin")?"triage":"report";render();if($("#rep_m"))$("#rep_m").value=code;toast("Reporting fault on "+code);}
+
+/* ══ FLEET — monitoring + the machine registry, merged ════════════════════════
+   Absorbs the old Machines area and the old Ops area. Sub-tabs are role-gated
+   AND the gate must agree with each pane's own gate: offering a sub-tab whose
+   embedded pane Jinja never rendered gives a blank screen, not a permission
+   message.
+
+   Two sub-tabs carry an inner section toggle (Event log: alerts|messages,
+   Refill: status|top-ups). Those toggles are emitted in the always-rendered
+   prefix, NOT in `body` — renderFleet drops `body` whenever an embed is active,
+   so a toggle placed there would vanish the moment you used it, with no way
+   back. They also use `data-sec`, not `data-sub`: render() binds every
+   `[data-sub]` to state.sub[area], which would overwrite the sub-tab itself. */
+let FLEETSEC={events:"alerts",refill:"status"};
+
+/* Roles that may reach Plan, i.e. that already have top-up logging there. The
+   Refill ▸ Log a top-up section exists only for the roles that do not. */
+const HAS_PLAN=()=>(ROLE_NAV[state.role]||[]).includes("plan");
+/* index.html gated Topups and Messages to these four roles, and the server does
+   NOT: /api/topups and /api/messages are only @login_required. Merging Machines
+   and Ops into one area gave operator and customer service a Fleet tab for the
+   first time, so without this gate a driver could rewrite any machine's
+   LastTopupTimestamp and read the whole vend/message log. */
+const CAN_OPS=()=>["admin","field_manager","sales"].includes(state.role);
+/* /api/wo/manager/equipment-log is @require_roles(*OPERATOR_ROLES). Sales and
+   customer service are NOT in that set — they get the light drawer. */
+const CAN_HISTORY=()=>["operator","field_manager","admin"].includes(state.role);
+/* record-move / delete-move / recommission / historic are all MANAGER_ROLES. */
+const CAN_MOVE=()=>["field_manager","admin"].includes(state.role);
+const CAN_SALES_TAB=()=>["admin","field_manager","sales"].includes(state.role);
+
+function fleetModes(){
+  const m=[["status","Live status"],["total","Total Fleet"],["events","Event log"]];
+  if(CAN_SALES_TAB())m.push(["sales","Sales"]);
+  m.push(["refill","Refill status"]);
+  if(CAN_PROPS())m.push(["props",`Properties${props&&props.incomplete?` (${props.incomplete})`:""}`]);
+  /* _legacy_tabs.html renders #lgc-locations only for these four roles. */
+  if(["admin","field_manager","customer_service"].includes(state.role))m.push(["locations","Locations"]);
+  return m;
+}
+
+/* The fleet sub-tab actually being shown, after the role gate and the
+   invalid-sub fallback. render() needs this to decide whether the Live status
+   poller should be running, so it cannot live inside renderFleet. */
+function fleetCur(){
+  if(state.area!=="fleet")return null;
+  const modes=fleetModes();
+  const cur=subActive("fleet",state.role==="sales"?"props":"status");
+  return modes.some(([k])=>k===cur)?cur:modes[0][0];
+}
+function renderFleet(){
+  const modes=fleetModes();
+  let cur=fleetCur();
+  if(subActive("fleet",state.role==="sales"?"props":"status")!==cur)state.sub.fleet=cur;
+
+  let sec="",body="";
+  if(cur==="events"){
+    const modesE=[["alerts","Alerts"]];
+    if(CAN_OPS())modesE.push(["messages","Messages"]);
+    let s=FLEETSEC.events;
+    if(!modesE.some(([k])=>k===s)){s="alerts";FLEETSEC.events=s;}
+    sec=modesE.length>1?secNav("events",modesE,s):"";
+    if(s==="messages")pendingEmbed="fleet:events#messages";
+    else body=fleetAlerts();
+  }else if(cur==="refill"){
+    const modesR=[["status","Refill status"]];
+    if(CAN_OPS()&&!HAS_PLAN())modesR.push(["topups","Log a top-up"]);
+    let s=FLEETSEC.refill;
+    if(!modesR.some(([k])=>k===s)){s="status";FLEETSEC.refill=s;}
+    sec=modesR.length>1?secNav("refill",modesR,s):"";
+    if(s==="topups")pendingEmbed="fleet:refill#topups";
+    else body=fleetRefill();
+  }else if(EMBEDS["fleet:"+cur]){
+    pendingEmbed="fleet:"+cur;
+  }else{
+    body=({status:fleetStatus,total:fleetTotal,sales:renderSalesUI,props:renderProps}[cur]||(()=>""))();
+  }
+
+  return `<div class="screen-h"><div><h2>Fleet</h2>
+      <div class="crumb">Live status · the whole registry · event log · sales · refill</div></div></div>
+    <div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>
+    ${sec}${pendingEmbed?"":body}`;
+}
+const secNav=(area,list,cur)=>`<div class="subnav secnav">${list.map(([k,l])=>
+  `<button data-sec="${area}:${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>`;
+
+/* ── Live status ─────────────────────────────────────────────────────────────
+   Everything on this screen comes from /api/heartbeat, including the KPI
+   counts. Bootstrap also carries a status letter, but it is fetched once at
+   boot and only refreshed after a write, while this grid self-refreshes every
+   two minutes — rendering the two side by side would show "18 online" above six
+   red cards. Bootstrap's letter stays for Total Fleet and the Plan board. */
+let FH={rows:null,counts:null,threshold:null,err:"",filter:null,q:"",timer:null,loading:false,at:0};
+
+function fleetStatus(){
+  /* Refetch on entry when the snapshot is older than one poll interval —
+     otherwise coming back to this screen after an hour shows an hour-old grid
+     for up to two minutes. */
+  const stale=FH.at&&(Date.now()-FH.at)>120000;
+  if((FH.rows===null||stale)&&!FH.loading)setTimeout(fhLoad,0);
+  const c=FH.counts||{green:0,yellow:0,red:0};
+  const badge=(k,icon,label)=>`<button class="fh-badge ${FH.filter===k?"on "+k:""}" onclick="fhToggle('${k}')">
+    ${icon} ${c[k]||0} <small>${label}</small></button>`;
+  const err=FH.err?`<div class="legacy-note"><b>Could not load the heartbeat</b> — ${woEsc(FH.err)}
+      <button class="btn sm ghost" style="margin-left:8px" onclick="fhLoad()">Retry</button></div>`:"";
+  return `${err}<div class="fh-bar">
+      ${badge("green","💚","online")}${badge("yellow","💛","warning")}${badge("red","❤️","silent")}
+      <span style="flex:1"></span>
+      <input type="search" id="fhSearch" placeholder="Search location…" value="${woEsc(FH.q)}"
+        oninput="FH.q=this.value;fhPaint()" style="width:220px">
+      <button class="btn sm ghost" onclick="fhLoad()">Refresh</button>
+    </div>
+    <div class="fh-grid" id="fhGrid">${FH.rows===null?'<p class="empty">Loading…</p>':fhCards()}</div>
+    <p class="note">Auto-refreshes every 2 minutes. Threshold: ${FH.threshold==null?"—":FH.threshold} min silence = ❤️.
+      Click a badge to filter.</p>`;
+}
+
+async function fhLoad(){
+  FH.loading=true;
+  try{
+    const res=await fetch("/api/heartbeat",{headers:{Accept:"application/json"}});
+    const d=await res.json();
+    if(!res.ok||d.error)throw new Error(d.error||("HTTP "+res.status));
+    FH.rows=d.machines||[];FH.counts=d.counts||null;FH.threshold=d.threshold_minutes;FH.err="";
+  }catch(e){FH.err=String(e&&e.message||e);FH.rows=FH.rows||[];}
+  FH.loading=false;FH.at=Date.now();
+  /* Only repaint if the user is still on this screen — a refresh that fires
+     after they navigated away must not touch a #main that now holds something
+     else. render() restarts the timer (see the tail of render); starting it
+     HERE would create an interval that render()'s own fhStop() destroys in the
+     same tick, which is how this screen ended up never auto-refreshing. */
+  if(fleetCur()==="status")render();
+}
+function fhToggle(k){FH.filter=FH.filter===k?null:k;render();}
+function fhPaint(){const g=document.getElementById("fhGrid");if(g)g.innerHTML=fhCards();}
+function fhAge(min){
+  if(min===null||min===undefined)return "Never";
+  if(min<1)return "Just now";
+  if(min<60)return Math.round(min)+"m ago";
+  const h=Math.floor(min/60),m=Math.round(min%60);
+  if(h<24)return m>0?`${h}h ${m}m ago`:`${h}h ago`;
+  return `${Math.floor(h/24)}d ${h%24}h ago`;
+}
+function fhLabel(m){
+  if(m.status==="red")return m.last_any_min===null?"No data on record":`Silent for ${fhAge(m.last_any_min)}`;
+  if(m.status==="yellow")return `Error/exception ${fhAge(m.last_err_min)}`;
+  return `Last seen ${fhAge(m.last_any_min)}`;
+}
+function fhCards(){
+  const q=(FH.q||"").toLowerCase();
+  let rows=(FH.rows||[]).filter(m=>(!FH.filter||m.status===FH.filter)&&(!q||(m.name||"").toLowerCase().includes(q)));
+  if(!rows.length)return '<p class="empty">No machines match.</p>';
+  const order={red:0,yellow:1,green:2};
+  rows=[...rows].sort((a,b)=>{
+    const d=order[a.status]-order[b.status];if(d)return d;
+    if(a.status==="red"){                       // longest silence first, no-data last
+      if(a.last_any_min===null&&b.last_any_min===null)return a.name.localeCompare(b.name);
+      if(a.last_any_min===null)return 1;
+      if(b.last_any_min===null)return -1;
+      return b.last_any_min-a.last_any_min;}
+    return a.name.localeCompare(b.name);});
+  const icon=s=>s==="green"?"💚":s==="yellow"?"💛":"❤️";
+  return rows.map(m=>`<div class="fh-c ${m.status}"><div class="ic">${icon(m.status)}</div>
+    <div class="nm">${woEsc(m.name)}</div><div class="sub">${woEsc(fhLabel(m))}</div></div>`).join("");
+}
+/* The Heartbeat tab used to be an embedded pane whose interval showEmbed
+   cleared for it. Native code needs its own teardown: showEmbed calls fhStop()
+   on EVERY render and the tail of render() restarts it only when Live status is
+   the screen actually showing. Without that pairing the timer outlives the
+   screen, writes into a #fhGrid render() already destroyed, and stacks a new
+   poller on every visit. */
+function fhStart(){fhStop();FH.timer=setInterval(fhLoad,120000);}
+function fhStop(){if(FH.timer){clearInterval(FH.timer);FH.timer=null;}}
+
+/* ── Total Fleet ─────────────────────────────────────────────────────────────
+   One table for the whole registry, replacing the separate Active /
+   Decommissioned / Machine History / Historic Locations screens. */
+let TF={filter:"all",q:"",hist:null,histErr:"",histLoading:false,det:null,detErr:"",detCode:null};
+
+function tfRows(){
+  const q=(TF.q||"").toLowerCase();
+  return machines
+    .filter(m=>TF.filter==="all"||(TF.filter==="active"?m.active:!m.active))
+    .filter(m=>!q||(m.name||"").toLowerCase().includes(q)||String(m.code).includes(q))
+    .sort((a,b)=>String(a.name||"").localeCompare(String(b.name||"")));
+}
+function fleetTotal(){
+  /* Decommissioned date, reason and lifetime vends live only on
+     /api/wo/locations/historic — bootstrap has none of them, and the lifetime
+     count is a per-machine COUNT(DISTINCT ...) over the vend table, so it is
+     fetched lazily for the decommissioned view instead of on every boot. */
+  if(TF.filter==="decom"&&CAN_MOVE()&&TF.hist===null&&!TF.histLoading)setTimeout(tfLoadHistoric,0);
+  const rows=tfRows(),hist=TF.hist||{};
+  const nA=machines.filter(m=>m.active).length,nD=machines.length-nA;
+  const chip=(k,l)=>`<button class="btn sm ${TF.filter===k?"":"ghost"}" onclick="TF.filter='${k}';render()">${l}</button>`;
+  const decom=TF.filter==="decom";
+  const body=tfBodyHtml();
+  const err=TF.histErr?`<div class="legacy-note"><b>Could not load decommission details</b> — ${woEsc(TF.histErr)}</div>`:"";
+  return `<div class="fh-bar">
+      ${chip("all",`All (${machines.length})`)}${chip("active",`Active (${nA})`)}${chip("decom",`Decommissioned (${nD})`)}
+      <span style="flex:1"></span>
+      <input type="search" id="tfSearch" placeholder="Search name or code…" value="${woEsc(TF.q)}"
+        oninput="TF.q=this.value;tfPaint()" style="width:240px">
+    </div>${err}
+    <table class="tf-t"><thead><tr>
+      <th>Machine</th><th>Code</th><th>Status</th>
+      ${decom?"<th>Decommissioned</th><th>Reason</th><th class='right'>Lifetime vends</th>"
+             :"<th class='right'>Vends since refill</th><th>Last refill</th><th>Lat, lon</th>"}
+    </tr></thead><tbody id="tfBody">${body}</tbody></table>
+    <p class="note" id="tfCount">${tfNote(rows.length,decom)}</p>`;
+}
+const tfNote=(n,decom)=>`${n} shown.${CAN_HISTORY()?" Click a row for its location and work history.":""}${
+  decom&&!CAN_MOVE()?" Decommission details are manager-only.":""}${
+  decom&&CAN_MOVE()&&TF.histLoading?" Loading decommission details…":""}`;
+/* Repaint only the rows. `render()` rewrites #main, which destroyed the search
+   box mid-keystroke and dropped focus after the first character. */
+function tfPaint(){
+  const b=document.getElementById("tfBody");if(!b)return;
+  b.innerHTML=tfBodyHtml();
+  const c=document.getElementById("tfCount");
+  if(c)c.textContent=tfNote(tfRows().length,TF.filter==="decom");
+}
+/* Row markup only, so tfPaint() can refresh the table without render()
+   rebuilding (and un-focusing) the search box above it. */
+function tfBodyHtml(){
+  const rows=tfRows(),hist=TF.hist||{},decom=TF.filter==="decom";
+  return rows.length?rows.map(m=>{
+    const h=hist[m.code]||{};
+    return `<tr ${CAN_HISTORY()?`onclick="openMachineDrawer('${woEsc(m.code)}')"`:'class="nodrill"'}>
+      <td><b>${woEsc(m.name)}</b></td>
+      <td class="mono">${woEsc(m.code)}</td>
+      <td>${m.active
+        ? `<span class="dot ${m.status}"></span> ${m.status==="r"?"silent":m.status==="y"?"warning":"online"}`
+        : '<span class="tag done">decommissioned</span>'}</td>
+      ${decom
+        ? `<td>${woEsc(h.decommissioned_at||"—")}</td><td>${woEsc(h.decommission_reason||"—")}</td>
+           <td class="right">${h.lifetime_vends==null?"—":Number(h.lifetime_vends).toLocaleString()}</td>`
+        : `<td class="right">${!m.active||m.vendsSince==null?"—":m.vendsSince}</td>
+           <td>${m.active?woEsc(m.lastRefill):"—"}</td>
+           <td class="mono">${m.lat==null?"—":Number(m.lat).toFixed(4)+", "+Number(m.lon).toFixed(4)}</td>`}
+    </tr>`;}).join(""):`<tr><td colspan="6" class="empty" style="padding:18px">Nothing matches.</td></tr>`;
+}
+
+async function tfLoadHistoric(){
+  TF.histLoading=true;
+  /* The lifetime-vend figure is a per-machine COUNT(DISTINCT ...) over the vend
+     table, so this is not instant on a real fleet. Say so — three columns of
+     "—" otherwise reads as "no data recorded". */
+  {const c=document.getElementById("tfCount");if(c)c.textContent=tfNote(tfRows().length,true);}
+  const r=await api("/api/wo/locations/historic");
+  TF.histLoading=false;
+  if(!r){TF.histErr="request failed";TF.hist={};render();return;}
+  TF.histErr="";TF.hist={};
+  (Array.isArray(r)?r:[]).forEach(x=>{TF.hist[String(x.code)]=x;});
+  render();
+}
+
+/* ── Machine drawer: facts, location history, work history ──────────────────*/
+async function openMachineDrawer(code){
+  const m=machines.find(x=>String(x.code)===String(code));
+  TF.detCode=code;TF.det=null;TF.detErr="";
+  drawer(machineDrawerHtml(m,null));
+  if(!CAN_HISTORY())return;
+  const d=await api(`/api/wo/manager/equipment-log?machine_code=${encodeURIComponent(code)}`);
+  if(TF.detCode!==code)return;               // user opened another machine meanwhile
+  if(!d){TF.detErr="Could not load this machine's history.";}
+  else TF.det=d;
+  drawer(machineDrawerHtml(m,TF.det));
+}
+function machineDrawerHtml(m,d){
+  if(!m)return "<p class='empty'>Machine not found.</p>";
+  const fact=(l,v)=>`<div class="row"><div class="grow"><b>${l}</b></div><span class="meta">${v}</span></div>`;
+  let head=`<h3>${woEsc(m.name)}</h3><span class="pill">${woEsc(m.code)}</span>
+    ${m.active?"":'<span class="tag done" style="margin-left:6px">decommissioned</span>'}
+    <div class="rows" style="margin-top:10px">
+      ${m.active?fact("Status",m.status==="r"?"🔴 silent":m.status==="y"?"🟡 warning":"🟢 online"):""}
+      ${m.active?fact("Vends since refill",m.vendsSince==null?"—":m.vendsSince):""}
+      ${m.active?fact("Last refill",woEsc(m.lastRefill)):""}
+      ${fact("Lat, lon",m.lat==null?"—":Number(m.lat).toFixed(5)+", "+Number(m.lon).toFixed(5))}
+    </div>`;
+
+  if(CAN_MOVE()&&!m.active)
+    head+=`<button class="btn sm" style="margin-top:10px" onclick="tfRecommission('${woEsc(m.code)}')">Recommission</button>`;
+
+  /* Unreachable for sales / customer service — their rows are not clickable at
+     all (see tfBodyHtml). Kept as a guard so a future caller cannot open a
+     drawer that would only 403 on /api/wo/manager/equipment-log. */
+  if(!CAN_HISTORY())return head;
+  if(TF.detErr)return head+`<div class="legacy-note" style="margin-top:12px">${woEsc(TF.detErr)}</div>`;
+  if(!d)return head+'<p class="empty" style="margin-top:12px">Loading history…</p>';
+
+  const c=d.counts||{};
+  const loc=(d.location_history||[]).map(h=>`<div class="row"><div class="grow">
+      <b>${woEsc(h.location)}</b>${h.current?' <span class="tag new">current</span>':""}
+      ${h.source==="record-move"?' <span class="pill">recorded</span>':""}
+      <div class="meta">${woEsc(h.from)} → ${woEsc(h.to||"now")}</div></div>
+      ${CAN_MOVE()&&h.source==="record-move"&&h.history_id
+        ? `<button class="btn sm danger" onclick="tfDeleteMove('${woEsc(m.code)}',${h.history_id})">Delete</button>`:""}
+    </div>`).join("")||'<p class="empty">No recorded location history.</p>';
+
+  const evAll=d.events||[];
+  const ev=evAll.slice(0,60).map(e=>`<div class="row"><div class="grow">
+      <b>${woEsc(e.display_id||("#"+e.id))}</b> <span class="tag ${e.type==="complaint"?"new":"svc"}">${woEsc(e.type)}</span>
+      <div class="meta">${woEsc(e.action)} · ${woEsc(e.by||"—")} · ${woEsc((e.at||"").replace("T"," ").slice(0,16))}
+        ${e.summary?"<br>"+woEsc(e.summary):""}</div></div></div>`).join("")||'<p class="empty">No work recorded.</p>';
+
+  const move=CAN_MOVE()?`<h4 style="margin:16px 0 6px;font-size:.85rem">Record a past move</h4>
+    <p class="note" style="margin:0 0 8px">Splits this machine's history at the date it actually moved.</p>
+    <div class="grid2">
+      <div class="field"><label>Previous location</label><input id="tfPrev" placeholder="Where it was before"></div>
+      <div class="field"><label>Moved on</label><input type="date" id="tfWhen"></div>
+    </div>
+    <button class="btn sm" onclick="tfRecordMove('${woEsc(m.code)}',this)">Add move</button>`:"";
+
+  return head+`
+    <div class="kpis" style="margin-top:12px">
+      <div class="kpi"><b>${c.complaints||0}</b><small>complaints</small></div>
+      <div class="kpi"><b>${c.job_orders||0}</b><small>work orders</small></div>
+      <div class="kpi"><b>${c.delivery_orders||0}</b><small>deliveries</small></div>
+      <div class="kpi"><b>${c.movement_orders||0}</b><small>movements</small></div>
+    </div>
+    <h4 style="margin:16px 0 6px;font-size:.85rem">Location history</h4><div class="rows">${loc}</div>
+    ${move}
+    <h4 style="margin:16px 0 6px;font-size:.85rem">Work history</h4><div class="rows">${ev}</div>
+    ${evAll.length>60?`<p class="note">Showing the 60 most recent of ${evAll.length} events.</p>`:""}`;
+}
+async function tfRecordMove(code,btn){
+  const prev=($("#tfPrev").value||"").trim(),when=$("#tfWhen").value;
+  if(!prev||!when){toast("Previous location and date are both required.");return;}
+  /* Second click posts the same move again; the server rejects it with
+     "Move date must be AFTER the start of the covering interval", which reads
+     as a data problem rather than a double-click. */
+  if(btn){btn.disabled=true;btn.textContent="Saving…";}
+  const r=await api(`/api/wo/manager/machine/${encodeURIComponent(code)}/record-move`,
+    {method:"POST",body:{previous_location:prev,moved_on:when}});
+  if(!r){if(btn){btn.disabled=false;btn.textContent="Add move";}return;}
+  toast("Move recorded");openMachineDrawer(code);
+}
+async function tfDeleteMove(code,hid){
+  if(!confirm("Delete this recorded move? The history either side of it is re-joined."))return;
+  const r=await api(`/api/wo/manager/machine/${encodeURIComponent(code)}/recorded-move/${hid}`,{method:"DELETE"});
+  if(!r)return;
+  toast("Recorded move deleted");openMachineDrawer(code);
+}
+async function tfRecommission(code){
+  if(!confirm("Bring this machine back into service?"))return;
+  const r=await api(`/api/wo/locations/${encodeURIComponent(code)}/recommission`,{method:"POST",body:{}});
+  if(!r)return;
+  closeDrawer();TF.hist=null;toast("Recommissioned");
+  await reload();
+}
+
+/* ── Event log ▸ Alerts, and Refill status (both native, unchanged logic) ────*/
+function fleetAlerts(){
+  const A=machines.filter(m=>m.active&&m.status!=="g");
+  /* An operator has no Fault Reports screen, so the button could only refuse. */
+  const canReport=state.role!=="operator";
+  return `<div class="rows">${A.slice(0,40).map(m=>`<div class="row"><span class="dot ${m.status}"></span>
+      <div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${
+        m.status==="r"?"silent past threshold":"recent error/exception"}</div></div>
+      ${canReport?`<button class="btn sm ghost" onclick="fleetReport('${m.code}')">Report fault</button>`:""}</div>`).join("")
+    ||'<p class="empty">No active alerts.</p>'}</div>
+    <p class="note">${A.length>40?`Showing the first 40 of ${A.length} alerts. `:""}Derived from the last heartbeat.${
+      CAN_OPS()?" The Messages section is the raw machine log.":""}</p>`;
+}
+function fleetRefill(){
+  const A=machines.filter(m=>m.active);
+  return `<div class="rows">${A.map(m=>`<div class="row"><span class="dot ${m.status}"></span>
+      <div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${
+        m.vendsSince==null?"vends since refill: —":m.vendsSince+" vends since refill"} · last ${woEsc(m.lastRefill)}</div></div>
+    </div>`).join("")}</div>
+    <p class="note">Read-only refill status. Logging happens in ${HAS_PLAN()?"Plan ▸ Log a top-up":"the Log a top-up section above"}.</p>`;
+}
+
+function fleetReport(code){
+  /* Under the merged nav every role has Service, so the old
+     ROLE_NAV.includes("service") guard could never fire. What actually matters
+     is whether this role HAS a Fault Reports tab — an operator does not, and
+     forcing state.sub.service="faults" for them opened the create modal over
+     the My Jobs screen. */
+  if(state.role==="operator"){toast("Ask customer service to raise a fault report.");return;}
+  state.area="service";state.sub.service="faults";render();fxOpenCreate(code);}
 
 /* PLAN */
 const openWork = () => work.filter(w => w.status !== "done");
@@ -1204,7 +1734,7 @@ function rosterProblem(){
   return "No users hold the Operator app role in Azure AD, so there is nobody to list.";
 }
 
-function renderPlan(){
+function renderPlanBoard(){
   // The unassigned list is scoped to the board's day (plus undated carry-overs).
   // Unscoped, every future occurrence of every sales repeat would queue here
   // with no date on the row, and Assign — which rewrites ScheduledDate to the
@@ -1268,6 +1798,22 @@ function renderPlan(){
                 : '<p class="empty">Nothing unassigned.</p>'}
     <p class="note">Live — every action writes through the same work-order API the main dashboard uses.</p>
     </div>${renderRail()}</div>`;
+}
+
+/* Plan = the board (native) + the legacy route planner & map, which alpha has
+   no equivalent for (Leaflet, /api/dispatch/plan, drag reordering). */
+function renderPlan(){
+  const modes=[["board","Day board"],["routes","Route planner + map"],["topups","Log a top-up"]];
+  let cur=subActive("plan","board");
+  if(!modes.some(([k])=>k===cur)){cur=modes[0][0];state.sub.plan=cur;}
+  const nav=`<div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>`;
+  const CRUMB={routes:"Pick machines, pick a driver count, let the planner cut the routes.",
+               topups:"Record a refill against a machine, and see when every machine was last topped up."};
+  if(EMBEDS["plan:"+cur]){pendingEmbed="plan:"+cur;
+    return `<div class="screen-h"><div><h2>Plan</h2><div class="crumb">${CRUMB[cur]||""}</div></div></div>${nav}`;}
+  /* The board builds one long string ending in the rail; the subnav belongs
+     between its header and the grid, so it is spliced at the wrapper. */
+  return renderPlanBoard().replace('<div class="plan-wrap">', nav+'<div class="plan-wrap">');
 }
 
 function driverCard(email){
@@ -1532,6 +2078,9 @@ async function autoPlan(){
 
 /* ADMIN */
 function renderAdmin(){const cur=subActive("admin","cleanup");let body;
+  if(cur==="cleanup"){pendingEmbed="admin:cleanup";
+    return `<div class="screen-h"><div><h2>Admin</h2><div class="crumb">Maintenance &amp; config — admin only</div></div></div>
+      <div class="subnav"><button data-sub="cleanup" class="on">Data cleanup</button><button data-sub="items">Delivery items</button></div>`;}
   if(cur==="items")body=`<div class="rows"><div class="row"><div class="grow"><b>Kopi-O sachet</b><div class="meta">unit: sachet · 18g</div></div><button class="btn sm ghost">Edit</button></div>
     <div class="row"><div class="grow"><b>Cup pack (12oz)</b><div class="meta">unit: sleeve · 50</div></div><button class="btn sm ghost">Edit</button></div></div><p class="note">Delivery item catalogue (config) — admin only. Demo.</p>`;
   else body=`<div class="card" style="border-color:#fecaca"><b style="color:#b91c1c">Cascade-delete test data</b>
@@ -1541,6 +2090,185 @@ function renderAdmin(){const cur=subActive("admin","cleanup");let body;
   return `<div class="screen-h"><div><h2>Admin</h2><div class="crumb">Maintenance &amp; config — admin only</div></div></div>
     <div class="subnav"><button data-sub="cleanup" class="${cur==='cleanup'?'on':''}">Data cleanup</button><button data-sub="items" class="${cur==='items'?'on':''}">Delivery items</button></div>${body}`;}
 function checkDel(){$("#del_btn").disabled=$("#del_confirm").value.trim()!=="DELETE";}
+
+/* ══ FAULT REPORTS (customer service) ═════════════════════════════════════════
+   The main dashboard's Fault Report tab, rebuilt in this app's idiom. Same
+   endpoints, same payload, same server validation — /api/wo/complaints{,/<id>,
+   /<id>/refund} and /api/wo/images/<id>.
+
+   Two things here are deliberate and easy to undo by accident:
+   * The machine picker is built from bootstrap's machines[], not a second call
+     to /api/wo/machines. Bootstrap already carries code+name+active.
+   * scope=all is offered only to manager roles. The server silently downgrades
+     it to "mine" for anyone else (workorders.py), so showing the option to
+     sales / customer service would look like an empty "all" list rather than a
+     permission boundary. */
+let FX={rows:[],loaded:false,err:false,status:"all",scope:"mine",q:"",photos:[]};
+const fxIsMgr=()=>["field_manager","admin"].includes(state.role);
+
+function renderFaults(){
+  if(!fxIsMgr()&&FX.scope==="all")FX.scope="mine";
+  const opt=(v,l,cur)=>`<option value="${v}"${v===cur?" selected":""}>${l}</option>`;
+  /* renderFaults() always emits an empty #fxList, so something has to fill it
+     on EVERY render — not just the first. fxSubmit() ends in reload() → render(),
+     which is exactly the moment the list was going blank after a submit. */
+  setTimeout(()=>{FX.loaded?fxRenderList():fxRefresh();},0);
+  return `<div class="fx-tools">
+      <button class="btn" onclick="fxOpenCreate()">+ New fault report</button>
+      <select onchange="FX.status=this.value;fxRefresh()">
+        ${opt("all","All statuses",FX.status)}${opt("fresh","Fresh",FX.status)}${opt("assigned","Assigned",FX.status)}${opt("closed","Closed",FX.status)}</select>
+      ${fxIsMgr()?`<select onchange="FX.scope=this.value;fxRefresh()">
+        ${opt("mine","My submissions",FX.scope)}${opt("all","All reports",FX.scope)}</select>`:""}
+      <input type="search" placeholder="Search description, machine or id…" value="${woEsc(FX.q)}"
+        oninput="FX.q=this.value;fxRenderList()">
+      <button class="btn ghost sm" onclick="fxRefresh()">Refresh</button>
+    </div>
+    <div id="fxList"><p class="empty">Loading…</p></div>
+    <p class="note">Live — writes through the same complaint API the main dashboard uses. Photos upload with the report.</p>`;
+}
+
+async function fxRefresh(){
+  const rows=await api(`/api/wo/complaints?scope=${encodeURIComponent(FX.scope)}&status=${encodeURIComponent(FX.status)}`);
+  /* Only mark the screen loaded on SUCCESS. Setting it before the await meant a
+     single failed request latched "No fault reports." for the rest of the
+     session — indistinguishable from an empty queue once the toast faded, and
+     this is customer service's landing screen. */
+  if(!Array.isArray(rows)){FX.loaded=false;FX.err=true;fxRenderList();return;}
+  FX.loaded=true;FX.err=false;FX.rows=rows;
+  fxRenderList();
+}
+
+function fxRenderList(){
+  const el=document.getElementById("fxList");if(!el)return;
+  const q=(FX.q||"").toLowerCase();
+  const hit=r=>!q||[r.description,r.machine_name,r.display_id].some(v=>String(v||"").toLowerCase().includes(q));
+  const rows=FX.rows.filter(hit);
+  if(FX.err){el.innerHTML=`<div class="legacy-note"><b>Could not load fault reports.</b>
+    <button class="btn sm ghost" style="margin-left:8px" onclick="fxRefresh()">Retry</button></div>`;return;}
+  if(!rows.length){el.innerHTML='<p class="empty">No fault reports.</p>';return;}
+  el.innerHTML=rows.map(r=>{
+    const d=String(r.description||"");
+    return `<div class="fx-r" onclick="fxOpenDetail(${r.id})">
+      <div><div class="rid">${woEsc(r.display_id||("#"+r.id))}</div>
+        <div class="rt">${woEsc(d.slice(0,110))}${d.length>110?"…":""}</div>
+        <div class="rs">${woEsc(r.machine_name||"(no machine)")} · ${woEsc(r.submitter||"—")} · ${woEsc(fxDT(r.submitted_at))}${r.image_count?" · 📎 "+r.image_count:""}</div></div>
+      <div class="rr"><span class="fx-b s${r.status_code}">${woEsc(r.status_label)}</span>
+        <span class="fx-b u${r.perceived_urgency_code}">${woEsc(r.perceived_urgency_label)}</span>
+        ${r.refund_issued?'<span class="fx-b money">💵 refunded</span>':""}
+        ${r.group_id?`<span class="fx-b grp">🔗 group ${woEsc(r.group_id)}</span>`:""}</div></div>`;}).join("");
+}
+
+function fxDT(s){if(!s)return "—";try{return new Date(s).toLocaleString();}catch(e){return String(s);}}
+function fxModal(title,sub,html){$("#fxTitle").textContent=title;$("#fxSub").textContent=sub||"";
+  $("#fxBody").innerHTML=html;$("#fxBg").classList.add("show");}
+function fxClose(){$("#fxBg").classList.remove("show");FX.photos=[];}
+
+function fxOpenCreate(preCode){
+  const opts=['<option value="">— select machine —</option>'].concat(
+    machines.filter(m=>m.active).map(m=>`<option value="${woEsc(m.code)}" data-name="${woEsc(m.name)}"${m.code===preCode?" selected":""}>${woEsc(m.name)} (${woEsc(m.code)})</option>`)).join("");
+  /* datetime-local wants LOCAL wall-clock. toISOString() would hand it UTC and
+     silently back-date every report by 8 hours in SGT. */
+  const n=new Date();n.setMinutes(n.getMinutes()-n.getTimezoneOffset());
+  FX.photos=[];
+  fxModal("New fault report","",`
+    <div class="field"><label>Machine *</label><select id="fx_m">${opts}</select></div>
+    <div class="grid2">
+      <div class="field"><label>First reported at *</label><input type="datetime-local" id="fx_when" value="${n.toISOString().slice(0,16)}"></div>
+      <div class="field"><label>Reported by</label><input id="fx_by" placeholder="Customer name / contact"></div>
+    </div>
+    <div class="field"><label>Verbatim report *</label><textarea id="fx_desc" rows="3" placeholder="What did the customer say? Exact symptoms…"></textarea></div>
+    <div class="grid2">
+      <div class="field"><label>Perceived urgency</label><select id="fx_urg"><option value="0">Low</option><option value="1" selected>Normal</option><option value="2">High</option></select></div>
+      <div class="field"><label>Impact severity (optional)</label><select id="fx_sev"><option value="">—</option>
+        <option value="1">1 — Minimal</option><option value="2">2 — Minor</option><option value="3">3 — Moderate</option>
+        <option value="4">4 — Significant</option><option value="5">5 — Critical</option></select></div>
+    </div>
+    <div class="field"><label>Impact description (optional)</label><textarea id="fx_imp" rows="2" placeholder="Lost dispenses, customer walked away, safety concern…"></textarea></div>
+    <div class="fx-refund"><label><input type="checkbox" id="fx_ref">Refund issued to customer (a manager still reviews the complaint)</label></div>
+    <div class="field"><label>Photos</label><div class="fx-imgs" id="fx_imgs"></div></div>
+    <div class="fx-act"><button class="btn ghost" onclick="fxClose()">Cancel</button>
+      <button class="btn" id="fx_go" onclick="fxSubmit()">Submit report</button></div>`);
+  fxPhotos();
+}
+
+function fxPhotos(){
+  const el=document.getElementById("fx_imgs");if(!el)return;
+  el.innerHTML=FX.photos.map((p,i)=>`<div class="fx-th"><img src="${p}"><button onclick="fxDropPhoto(${i})" title="Remove">&times;</button></div>`).join("")
+    +`<div class="fx-add" onclick="document.getElementById('fx_file').click()"><span style="font-size:1.2rem;line-height:1">+</span><span>Add photo</span></div>
+      <input type="file" id="fx_file" accept="image/*" capture="environment" style="display:none" onchange="fxPickPhoto(event)">`;
+}
+function fxDropPhoto(i){FX.photos.splice(i,1);fxPhotos();}
+function fxPickPhoto(ev){
+  const f=ev.target.files&&ev.target.files[0];if(!f)return;
+  /* The data-URL ships inline in the create POST. A 12MP phone photo is ~6MB
+     raw and ~8MB base64-encoded, which the app gateway rejects as a body-size
+     error the user reads as "submit failed". */
+  if(f.size>4*1024*1024){toast("That photo is over 4 MB — take a smaller one.");ev.target.value="";return;}
+  const rd=new FileReader();
+  rd.onload=e=>{FX.photos.push(e.target.result);fxPhotos();};
+  rd.onerror=()=>toast("Could not read that photo.");
+  rd.readAsDataURL(f);
+}
+
+async function fxSubmit(){
+  const sel=$("#fx_m"),code=sel.value;
+  const name=sel.selectedIndex>=0&&sel.options[sel.selectedIndex]?sel.options[sel.selectedIndex].dataset.name:"";
+  const desc=$("#fx_desc").value.trim();
+  if(!code){toast("Pick a machine.");return;}
+  if(!desc){toast("Describe the complaint.");return;}
+  const btn=$("#fx_go");btn.disabled=true;btn.textContent="Submitting…";
+  const r=await api("/api/wo/complaints",{method:"POST",body:{
+    machine_code:code,machine_name:name||null,description:desc,
+    first_reported_at:$("#fx_when").value||null,
+    reported_by:$("#fx_by").value.trim()||null,
+    perceived_urgency:parseInt($("#fx_urg").value,10),
+    impact_severity:$("#fx_sev").value||null,
+    impact_description:$("#fx_imp").value.trim()||null,
+    refund_issued:$("#fx_ref").checked,
+    images:FX.photos,source:"self"}});
+  /* api() has already toasted the reason. Re-enable rather than closing, so a
+     rejected report is edited instead of retyped. */
+  if(!r){btn.disabled=false;btn.textContent="Submit report";return;}
+  fxClose();
+  toast(`Submitted ${r.display_id||("#"+r.id)}${r.images_uploaded?` · ${r.images_uploaded} photo(s)`:""}`);
+  await fxRefresh();
+  await reload();
+}
+
+async function fxToggleRefund(id,checked,el){
+  const r=await api(`/api/wo/complaints/${id}/refund`,{method:"POST",body:{refund_issued:checked}});
+  if(!r){if(el)el.checked=!checked;return;}
+  toast(checked?"Marked as refunded":"Refund mark removed");
+  fxRefresh();
+}
+
+async function fxOpenDetail(id){
+  const d=await api(`/api/wo/complaints/${id}`);if(!d)return;
+  const imgs=(d.images||[]).map(im=>`<div class="fx-th"><img src="/api/wo/images/${im.id}" alt="attachment"></div>`).join("")
+    ||'<p class="empty" style="padding:8px 0">No photos.</p>';
+  const log=(d.activity||[]).map(a=>`<div><b>${woEsc(a.action)}</b> by ${woEsc(a.by)} · ${woEsc(fxDT(a.at))}${
+    a.detail?`<br><span style="color:var(--mut)">${woEsc(a.detail)}</span>`:""}</div>`).join("")
+    ||'<span style="color:var(--mut)">No activity yet.</span>';
+  const ro=(label,val)=>`<div class="field"><label>${label}</label><input class="fx-ro" readonly value="${woEsc(val)}"></div>`;
+  fxModal("Fault report",d.display_id||("#"+d.id),`
+    <div class="grid2">
+      <div class="field"><label>Status</label><div><span class="fx-b s${d.status_code}">${woEsc(d.status_label)}</span>
+        ${d.group_id?` <span class="fx-b grp">🔗 group ${woEsc(d.group_id)}</span>`:""}</div></div>
+      <div class="field"><label>Urgency</label><div><span class="fx-b u${d.perceived_urgency_code}">${woEsc(d.perceived_urgency_label)}</span></div></div>
+    </div>
+    ${ro("Linked work order",d.job_order_id?("#"+d.job_order_id):"—")}
+    <div class="fx-refund"><label><input type="checkbox" ${d.refund_issued?"checked":""}
+      onchange="fxToggleRefund(${d.id},this.checked,this)">Refund issued to customer</label></div>
+    ${d.closed_reason?`<div class="field"><label>Closed</label><textarea class="fx-ro" readonly rows="2">${woEsc(d.closed_reason)}${
+        d.closed_by?` (by ${d.closed_by} at ${fxDT(d.closed_at)})`:""}</textarea></div>`:""}
+    ${ro("Machine",`${d.machine_name||""} (${d.machine_code||""})`)}
+    <div class="grid2">${ro("First reported",fxDT(d.first_reported_at))}${ro("Reported by",d.reported_by||"—")}</div>
+    <div class="field"><label>Description</label><textarea class="fx-ro" readonly rows="3">${woEsc(d.description||"")}</textarea></div>
+    <div class="grid2">${ro("Event code",d.event_code||"—")}${ro("Impact severity",d.impact_severity==null?"—":d.impact_severity+" / 5")}</div>
+    ${d.impact_description?`<div class="field"><label>Impact description</label><textarea class="fx-ro" readonly rows="2">${woEsc(d.impact_description)}</textarea></div>`:""}
+    <div class="field"><label>Photos</label><div class="fx-imgs">${imgs}</div></div>
+    <div class="field"><label>Activity</label><div class="fx-log">${log}</div></div>`);
+}
 
 /* drawer */
 function drawer(h){$("#drawerc").innerHTML=h;$("#drawer").classList.add("show");$("#drawerbg").classList.add("show");}
@@ -1745,7 +2473,11 @@ async function boot(){
   // A 403 body is valid JSON, so the old code parsed it happily, found no
   // .technicians, and reported an empty roster — which the board then blamed on
   // Microsoft Graph. Keep the status; it is the whole diagnosis.
-  try{
+  /* @require_roles(*DISPATCH_ROLES). Sales and customer service now load this
+     app too, and asking anyway put a 403 in the access log on every page view
+     and an error in their console. They have no board, so they need no roster. */
+  if(!["field_manager","admin"].includes(state.role)){techs=[];techStatus=0;techErr="";}
+  else try{
     const res=await fetch("/api/wo/technicians");
     techStatus=res.status;
     let t=null; try{t=await res.json();}catch(_){t=null;}

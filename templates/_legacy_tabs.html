@@ -1,0 +1,1199 @@
+<!--
+  Legacy core tabs — Messages · Topups · Dispatch routes · Locations.
+
+  Lifted verbatim (2026-08-11) out of templates/index.html so the alpha app can
+  offer them without re-implementing them. Three deliberate changes, nothing else:
+    * every CSS rule is scoped under `.lgc`, and index's `*`, `body`, `header`,
+      `.tab-*` and `.container` rules are dropped — otherwise index's globals
+      (bare `input`, `table`, `.card`, `.btn`) would restyle the whole alpha UI.
+    * the JS is wrapped in an IIFE and the names the inline `onclick=` attributes
+      need are re-exported to `window`. Without the IIFE, `let _salesView` here
+      and in alpha_preview.html is a SyntaxError that kills BOTH scripts.
+    * "Undo Last Topup" is Jinja-gated. /api/topups is only @login_required, so
+      the server will happily let a driver rewrite any machine's LastTopupTimestamp.
+
+  NOT here: the Heartbeat tab. It is now native alpha code (Fleet ▸ Live status)
+  because that screen needs `last_any_min` / `last_err_min` from /api/heartbeat,
+  which bootstrap does not carry. Keeping a second copy here would have put two
+  `filterHeartbeat`/`loadHeartbeat` on `window` and two `#hbGrid` in the document.
+
+  Panes are `.lgc-pane` (hidden by default); alpha shows exactly one via
+  window.__lgcInit(key). Needs `role` in the template context.
+-->
+
+<style>
+/* ── pane shell (alpha owns visibility) ───────────────────────────────────── */
+.lgc-pane { display: none; }
+.lgc-pane.on { display: block; }
+.lgc { color: #111827; font-size: 0.9rem; }
+.lgc .card { max-width: 1100px; margin-left: auto; margin-right: auto; }
+/* index.html markup uses .btn-primary/.btn-secondary; alpha's .btn has neither. */
+.lgc .btn-primary   { background: #1a56db; color: #fff; }
+.lgc .btn-secondary { background: #e5e7eb; color: #374151; }
+
+/* ── scoped copy of index.html's stylesheet (lines 8-346) ─────────────────── */
+.lgc .logout-btn:hover { background: rgba(255,255,255,0.25); }
+.lgc .card {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+.lgc .card-title {
+            font-size: 0.95rem;
+            font-weight: 700;
+            color: #111827;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #f3f4f6;
+        }
+.lgc .controls {
+            display: flex;
+            gap: 16px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+        }
+.lgc .field-group { display: flex; flex-direction: column; gap: 6px; }
+.lgc .field-label {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: #6b7280;
+            letter-spacing: 0.06em;
+        }
+.lgc .datetime-row { display: flex; gap: 8px; }
+.lgc select, .lgc input[type="text"], .lgc input[type="search"], .lgc input[type="number"], .lgc input[type="date"], .lgc input[type="time"], .lgc input[type="datetime-local"] {
+            box-sizing: border-box;
+            height: 40px;               /* fixed so native select / date / time / search all line up */
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            padding: 0 12px;
+            font-size: 0.875rem;
+            color: #111827;
+            background: white;
+            vertical-align: top;        /* consistent baseline when sat side by side */
+        }
+.lgc select { min-width: 180px; }
+.lgc input[type="text"] { width: 110px; }
+.lgc input[type="date"] { width: 150px; }
+.lgc select:focus, .lgc input[type="text"]:focus, .lgc input[type="search"]:focus, .lgc input[type="number"]:focus, .lgc input[type="date"]:focus, .lgc input[type="time"]:focus, .lgc input[type="datetime-local"]:focus {
+            outline: none;
+            border-color: #1a56db;
+            box-shadow: 0 0 0 3px rgba(26,86,219,0.15);
+        }
+.lgc .btn {
+            border: none;
+            border-radius: 6px;
+            padding: 8px 20px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s;
+            white-space: nowrap;
+        }
+.lgc .btn-primary { background: #1a56db; color: white; }
+.lgc .btn-primary:hover { background: #1e429f; }
+.lgc .btn-secondary { background: #f3f4f6; color: #374151; border: 1px solid #d1d5db; }
+.lgc .btn-secondary:hover { background: #e5e7eb; }
+.lgc .btn-danger { background: #dc2626; color: white; }
+.lgc .btn-danger:hover { background: #b91c1c; }
+.lgc .btn-success { background: #16a34a; color: white; }
+.lgc .btn-success:hover { background: #15803d; }
+.lgc .btn-sm { padding: 5px 12px; font-size: 0.8rem; }
+.lgc .btn:disabled { background: #9ca3af !important; cursor: not-allowed; color: white; }
+.lgc .status {
+            font-size: 0.85rem;
+            padding: 10px 14px;
+            border-radius: 6px;
+            margin-top: 16px;
+        }
+.lgc .status.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+.lgc .status.loading { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+.lgc .status.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+.lgc .summary { display: flex; gap: 16px; margin-bottom: 24px; flex-wrap: wrap; }
+.lgc .stat-box {
+            background: #f9fafb;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 14px 22px;
+            min-width: 140px;
+        }
+.lgc .stat-box .value { font-size: 2rem; font-weight: 700; color: #1a56db; line-height: 1; }
+.lgc .stat-box .label { font-size: 0.75rem; color: #6b7280; margin-top: 4px; }
+.lgc table { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+.lgc thead tr { border-bottom: 2px solid #e5e7eb; }
+.lgc th {
+            text-align: left;
+            padding: 10px 16px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: #6b7280;
+            letter-spacing: 0.06em;
+            background: #f9fafb;
+        }
+.lgc th.right, .lgc td.right { text-align: right; }
+.lgc tbody tr { border-bottom: 1px solid #f3f4f6; transition: background 0.1s; }
+.lgc tbody tr:hover { background: #f8faff; }
+.lgc td { padding: 12px 16px; color: #374151; vertical-align: middle; }
+.lgc tfoot tr { border-top: 2px solid #e5e7eb; background: #f9fafb; }
+.lgc tfoot td { font-weight: 700; color: #111827; }
+.lgc .bar-cell { width: 130px; }
+.lgc .bar-bg { background: #e5e7eb; border-radius: 4px; height: 8px; overflow: hidden; }
+.lgc .bar-fill { background: #1a56db; height: 100%; border-radius: 4px; transition: width 0.5s ease; }
+.lgc .admin-table td input[type="text"] {
+            width: 100%;
+            padding: 5px 8px;
+            font-size: 0.875rem;
+        }
+.lgc .action-cell { display: flex; gap: 6px; }
+.lgc .add-form {
+            display: flex;
+            gap: 12px;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #f3f4f6;
+        }
+.lgc .add-form input[type="text"] { width: 150px; }
+.lgc .never-tag { color: #9ca3af; font-style: italic; }
+.lgc .view-toggle {
+            display: flex;
+            gap: 0;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+.lgc .view-toggle button {
+            border: none;
+            padding: 7px 18px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            cursor: pointer;
+            background: white;
+            color: #6b7280;
+            transition: background 0.15s, color 0.15s;
+        }
+.lgc .view-toggle button + button { border-left: 1px solid #d1d5db; }
+.lgc .view-toggle button.active { background: #1a56db; color: white; }
+.lgc .view-toggle button:hover:not(.active) { background: #f3f4f6; }
+.lgc .txn-date { white-space: nowrap; color: #374151; }
+.lgc .txn-time { white-space: nowrap; font-family: monospace; font-size: 0.82rem; color: #6b7280; }
+.lgc .txn-item { font-weight: 500; }
+.lgc .txn-mach { font-size: 0.82rem; color: #6b7280; }
+.lgc .cap-note {
+            font-size: 0.8rem; color: #92400e;
+            background: #fffbeb; border: 1px solid #fde68a;
+            border-radius: 6px; padding: 8px 14px; margin-bottom: 12px;
+        }
+.lgc #mapSection { margin-top: 0; }
+.lgc #dispatchMap { height: 440px; border-radius: 8px; border: 1px solid #e5e7eb; }
+.lgc .route-editor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 12px;
+            margin-top: 4px;
+        }
+.lgc .editor-route-card {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+.lgc .editor-route-header {
+            padding: 8px 12px;
+            font-weight: 600;
+            font-size: 0.82rem;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+.lgc .editor-stop-row {
+            display: flex;
+            align-items: center;
+            padding: 5px 10px;
+            border-bottom: 1px solid #f3f4f6;
+            font-size: 0.8rem;
+            gap: 6px;
+        }
+.lgc .editor-stop-row:last-child { border-bottom: none; }
+.lgc .stop-num {
+            font-weight: 700;
+            min-width: 20px;
+            text-align: right;
+            font-size: 0.75rem;
+        }
+.lgc .stop-name { flex: 1; }
+.lgc .stop-actions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.lgc .stop-actions button {
+            background: #f9fafb;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-size: 0.7rem;
+            cursor: pointer;
+            line-height: 1.4;
+        }
+.lgc .stop-actions button:hover { background: #e5e7eb; }
+.lgc .stop-actions button:disabled { opacity: 0.35; cursor: default; }
+.lgc .stop-actions select {
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-size: 0.7rem;
+            max-width: 90px;
+        }
+.lgc .editor-maps-row {
+            padding: 8px 10px;
+            border-top: 1px solid #e5e7eb;
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+</style>
+
+<div class="lgc">
+    <div id="lgc-messages" class="lgc-pane">
+
+        <div class="card">
+            <div class="controls">
+                <div class="field-group">
+                    <div class="field-label">Start</div>
+                    <div class="datetime-row">
+                        <input type="date" id="msgStartDate">
+                        <input type="time" id="msgStartTime" value="00:00">
+                    </div>
+                </div>
+                <div class="field-group">
+                    <div class="field-label">End</div>
+                    <div class="datetime-row">
+                        <input type="date" id="msgEndDate">
+                        <input type="time" id="msgEndTime" value="23:59">
+                    </div>
+                </div>
+            </div>
+            <div class="controls" style="margin-top:16px">
+                <div class="field-group">
+                    <div class="field-label">Machine</div>
+                    <select id="msgMachineSelect">
+                        <option value="">All Machines</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <div class="field-label">Message Type</div>
+                    <select id="msgTypeSelect">
+                        <option value="">-- Select Type --</option>
+                        <option value="error">Error</option>
+                        <option value="exception">Exception</option>
+                        <option value="event">Event</option>
+                        <option value="message">Message</option>
+                    </select>
+                </div>
+                <button class="btn btn-primary" id="msgSearchBtn" onclick="searchMessages()">Search</button>
+            </div>
+            <div id="msgStatus" style="display:none"></div>
+        </div>
+
+        <div id="msgResults" style="display:none">
+            <div class="card">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width:200px">Timestamp</th>
+                            <th style="width:200px">Machine</th>
+                            <th>Message</th>
+                        </tr>
+                    </thead>
+                    <tbody id="msgBody"></tbody>
+                </table>
+                <div id="msgCount" style="margin-top:12px;font-size:0.8rem;color:#6b7280"></div>
+            </div>
+        </div>
+
+    </div><!-- /lgc-messages -->
+
+    <div id="lgc-topups" class="lgc-pane">
+
+        <!-- Log Topup form -->
+        <div class="card">
+            <div class="card-title">Log Topup</div>
+            <div class="controls">
+                <div class="field-group">
+                    <div class="field-label">Machine</div>
+                    <select id="topupMachineSelect">
+                        <option value="">-- Select Machine --</option>
+                    </select>
+                </div>
+                <div class="field-group">
+                    <div class="field-label">Topup Date &amp; Time</div>
+                    <div class="datetime-row">
+                        <input type="date" id="topupDate">
+                        <input type="time" id="topupTime" value="12:00">
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="logTopup()">Log Topup</button>
+                {% if role in ['admin', 'dispatch', 'field_manager', 'sales'] %}
+                <button class="btn btn-danger"  onclick="undoTopup()">Undo Last Topup</button>
+                {% endif %}
+            </div>
+            <div id="topupFormStatus" style="display:none"></div>
+        </div>
+
+        <!-- Topup status table -->
+        <div class="card">
+            <div class="card-title">Topup Status — All Machines</div>
+            <div id="topupTableStatus" style="display:none"></div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Machine</th>
+                        <th>Last Topup</th>
+                        <th class="right">Vends Before Topup</th>
+                        <th class="right">Vends Since Topup</th>
+                    </tr>
+                </thead>
+                <tbody id="topupTableBody">
+                    <tr><td colspan="4" style="color:#9ca3af;padding:16px">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+    </div><!-- /lgc-topups -->
+
+    {% if role in ['admin', 'dispatch', 'field_manager'] %}
+    <div id="lgc-dispatch" class="lgc-pane">
+
+        <div class="card">
+            <div class="card-title">Plan Dispatch Routes</div>
+            <div class="controls" style="margin-bottom:16px">
+                <button class="btn btn-secondary btn-sm" onclick="dispatchSelectAll()">Select All</button>
+                <button class="btn btn-secondary btn-sm" onclick="dispatchClearAll()">Clear All</button>
+                <div style="flex:1"></div>
+                <div class="field-group">
+                    <div class="field-label">Number of Drivers</div>
+                    <input type="number" id="numDrivers" value="2" min="1" max="20"
+                           style="width:80px;border:1px solid #d1d5db;border-radius:6px;padding:8px 12px;font-size:0.875rem">
+                </div>
+                <button class="btn btn-primary" id="planBtn" onclick="planRoutes()">Plan Routes</button>
+            </div>
+            <div id="dispatchStatus" style="display:none"></div>
+
+            <!-- Checkbox list -->
+            <div id="dispatchList" style="max-height:420px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px">
+                <div style="color:#9ca3af;padding:16px">Loading locations…</div>
+            </div>
+        </div>
+
+        <!-- Route output cards -->
+        <div id="dispatchRoutes"></div>
+
+        <!-- Interactive map + route editor (shown after planning) -->
+        <div id="mapSection" style="display:none">
+            <div class="card">
+                <div class="card-title">Route Map</div>
+                <div id="dispatchMap"></div>
+            </div>
+            <div class="card">
+                <div class="card-title" style="display:flex;align-items:center;gap:12px">
+                    Route Editor
+                    <span style="font-size:0.75rem;font-weight:400;color:#6b7280">Reorder stops or move them between drivers — the map updates live.</span>
+                </div>
+                <div class="route-editor-grid" id="routeEditor"></div>
+            </div>
+        </div>
+
+    </div><!-- /lgc-dispatch -->
+    {% endif %}
+
+    {% if role == 'admin' or role == 'dispatch' or role == 'field_manager' or role == 'customer_service' %}
+    <div id="lgc-locations" class="lgc-pane">
+    <div class="card">
+        <div class="card-title">Location Management</div>
+        <div id="adminStatus" style="display:none"></div>
+
+        <table class="admin-table">
+            <thead>
+                <tr>
+                    <th>Location Name</th>
+                    <th style="width:140px">Machine Code</th>
+                    <th style="width:110px">Latitude</th>
+                    <th style="width:110px">Longitude</th>
+                    <th style="width:150px"></th>
+                </tr>
+            </thead>
+            <tbody id="adminTableBody">
+                <tr><td colspan="5" style="color:#9ca3af;padding:16px">Loading…</td></tr>
+            </tbody>
+        </table>
+
+        {% if role == 'admin' %}
+        <div class="add-form">
+            <div class="field-group">
+                <div class="field-label">Location Name</div>
+                <input type="text" id="newName" placeholder="e.g. Marina Bay">
+            </div>
+            <div class="field-group">
+                <div class="field-label">Machine Code</div>
+                <input type="text" id="newCode" placeholder="e.g. 43020634">
+            </div>
+            <div class="field-group">
+                <div class="field-label">Latitude</div>
+                <input type="text" id="newLat" placeholder="e.g. 1.2847">
+            </div>
+            <div class="field-group">
+                <div class="field-label">Longitude</div>
+                <input type="text" id="newLon" placeholder="e.g. 103.8481">
+            </div>
+            <button class="btn btn-primary" onclick="addLocation()">Add Location</button>
+        </div>
+        {% endif %}
+    </div>
+    </div><!-- /lgc-locations -->
+    {% endif %}
+</div><!-- /lgc -->
+
+<script>
+(function () {
+    'use strict';
+
+    const USER_ROLE = "{{ role }}";
+
+    // ── Date defaults ──────────────────────────────────────────────────────────
+    const now   = new Date();
+    const yyyy  = now.getFullYear();
+    const mm    = String(now.getMonth() + 1).padStart(2, '0');
+    const dd    = String(now.getDate()).padStart(2, '0');
+    const today = `${yyyy}-${mm}-${dd}`;
+
+    ['startDate', 'endDate', 'msgStartDate', 'msgEndDate', 'topupDate'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.value = today;
+    });
+
+    // ── Status helper ──────────────────────────────────────────────────────────
+    function setStatus(msg, type, elId) {
+        const el = document.getElementById(elId || 'status');
+        if (!el) return;
+        el.style.display = msg ? 'block' : 'none';
+        el.className = 'status ' + (type || '');
+        el.textContent = msg;
+    }
+
+    // ── Load locations (populates all dropdowns + admin table) ─────────────────
+    async function loadLocations() {
+        try {
+            const resp = await fetch('/api/locations');
+            const data = await resp.json();
+            if (data.error) return;
+
+            // Messages dropdown — still filters by machine code (with "All" option in HTML)
+            {
+                const sel = document.getElementById('msgMachineSelect');
+                if (sel) {
+                    while (sel.options.length > 1) sel.remove(1);
+                    data.forEach(loc => {
+                        const opt = document.createElement('option');
+                        opt.value = loc.code;
+                        opt.textContent = loc.name;
+                        sel.appendChild(opt);
+                    });
+                }
+            }
+
+            // Topup dropdown (no "all" option — one machine required)
+            const topupSel = document.getElementById('topupMachineSelect');
+            if (topupSel) {
+                topupSel.innerHTML = '<option value="">-- Select Machine --</option>';
+                data.forEach(loc => {
+                    const opt = document.createElement('option');
+                    opt.value = loc.code;
+                    opt.textContent = loc.name;
+                    topupSel.appendChild(opt);
+                });
+            }
+
+            if (['admin','dispatch','field_manager','customer_service'].indexOf(USER_ROLE) >= 0) renderAdminTable(data);
+        } catch (e) { /* silently ignore */ }
+    }
+    loadLocations();
+
+    // ══════════════════════════════════════════
+    // MESSAGES
+    // ══════════════════════════════════════════
+
+    async function searchMessages() {
+        const start   = `${document.getElementById('msgStartDate').value} ${document.getElementById('msgStartTime').value}`;
+        const end     = `${document.getElementById('msgEndDate').value} ${document.getElementById('msgEndTime').value}`;
+        const machine = document.getElementById('msgMachineSelect').value;
+        const type    = document.getElementById('msgTypeSelect').value;
+
+        if (!document.getElementById('msgStartDate').value || !document.getElementById('msgEndDate').value) {
+            setStatus('Please enter a start and end date.', 'error', 'msgStatus');
+            return;
+        }
+        if (!type) {
+            setStatus('Please select a message type.', 'error', 'msgStatus');
+            return;
+        }
+
+        const btn = document.getElementById('msgSearchBtn');
+        btn.disabled = true;
+        setStatus('Querying database…', 'loading', 'msgStatus');
+        document.getElementById('msgResults').style.display = 'none';
+
+        try {
+            let url = `/api/messages?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&type=${type}`;
+            if (machine) url += `&machine=${encodeURIComponent(machine)}`;
+            const resp = await fetch(url);
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'msgStatus'); return; }
+            setStatus('', '', 'msgStatus');
+            renderMessages(data.results);
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'msgStatus');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function renderMessages(results) {
+        const tbody = document.getElementById('msgBody');
+        if (results.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="2" style="text-align:center;color:#9ca3af;padding:32px">No messages found in this time range.</td></tr>`;
+        } else {
+            tbody.innerHTML = results.map(r => `
+                <tr>
+                    <td>${esc(r.timestamp)}</td>
+                    <td>${esc(r.machine)}</td>
+                    <td>${esc(r.name)}</td>
+                </tr>
+            `).join('');
+        }
+        document.getElementById('msgCount').textContent = results.length
+            ? `${results.length.toLocaleString()} record${results.length !== 1 ? 's' : ''} found`
+            : '';
+        document.getElementById('msgResults').style.display = 'block';
+    }
+
+    // ══════════════════════════════════════════
+    // TOPUPS
+    // ══════════════════════════════════════════
+
+    async function loadTopups() {
+        setStatus('Loading…', 'loading', 'topupTableStatus');
+        try {
+            const resp = await fetch('/api/topups');
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'topupTableStatus'); return; }
+            setStatus('', '', 'topupTableStatus');
+            renderTopupTable(data.machines);
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'topupTableStatus');
+        }
+    }
+
+    function renderTopupTable(machines) {
+        const tbody = document.getElementById('topupTableBody');
+        if (!machines || machines.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" style="color:#9ca3af;padding:16px">No machines found.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = machines.map(m => `
+            <tr>
+                <td>${esc(m.name)}</td>
+                <td>${m.last_topup
+                        ? esc(m.last_topup)
+                        : '<span class="never-tag">Never</span>'}</td>
+                <td class="right">${m.vends_before !== null && m.last_topup
+                        ? m.vends_before.toLocaleString()
+                        : '<span style="color:#9ca3af">—</span>'}</td>
+                <td class="right">${m.vends_since.toLocaleString()}</td>
+            </tr>
+        `).join('');
+    }
+
+    async function logTopup() {
+        const code = document.getElementById('topupMachineSelect').value;
+        const date = document.getElementById('topupDate').value;
+        const time = document.getElementById('topupTime').value;
+
+        if (!code) { setStatus('Please select a machine.', 'error', 'topupFormStatus'); return; }
+        if (!date) { setStatus('Please select a date.', 'error', 'topupFormStatus'); return; }
+
+        setStatus('Saving topup…', 'loading', 'topupFormStatus');
+        try {
+            const resp = await fetch(`/api/topups/${encodeURIComponent(code)}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ timestamp: `${date} ${time}` }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'topupFormStatus'); return; }
+            setStatus('Topup logged successfully.', 'success', 'topupFormStatus');
+            setTimeout(() => setStatus('', '', 'topupFormStatus'), 3000);
+            loadTopups();
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'topupFormStatus');
+        }
+    }
+
+    async function undoTopup() {
+        const code = document.getElementById('topupMachineSelect').value;
+        if (!code) { setStatus('Please select a machine.', 'error', 'topupFormStatus'); return; }
+
+        const machineName = document.getElementById('topupMachineSelect').selectedOptions[0].text;
+        if (!confirm(`Undo the last topup for "${machineName}"? This cannot be undone.`)) return;
+
+        setStatus('Reversing topup…', 'loading', 'topupFormStatus');
+        try {
+            const resp = await fetch(`/api/topups/${encodeURIComponent(code)}`, { method: 'DELETE' });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'topupFormStatus'); return; }
+            setStatus('Last topup reversed.', 'success', 'topupFormStatus');
+            setTimeout(() => setStatus('', '', 'topupFormStatus'), 3000);
+            loadTopups();
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'topupFormStatus');
+        }
+    }
+
+    // ══════════════════════════════════════════
+    // ADMIN: Location management
+    // ══════════════════════════════════════════
+
+    function renderAdminTable(locations) {
+        const tbody = document.getElementById('adminTableBody');
+        if (!tbody) return;
+        if (locations.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="5" style="color:#9ca3af;padding:16px">No locations found.</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = locations.map(loc => `
+            <tr id="row-${esc(loc.code)}">
+                <td id="name-${esc(loc.code)}">${esc(loc.name)}</td>
+                <td id="code-${esc(loc.code)}">${esc(loc.code)}</td>
+                <td id="lat-${esc(loc.code)}">${loc.lat !== null ? loc.lat : ''}</td>
+                <td id="lon-${esc(loc.code)}">${loc.lon !== null ? loc.lon : ''}</td>
+                <td>
+                    <div class="action-cell">
+                        {% if role in ['admin', 'dispatch', 'field_manager'] %}
+                        <button class="btn btn-secondary btn-sm"
+                            onclick="startEdit('${esc(loc.code)}', '${esc(loc.name)}', '${loc.lat ?? ''}', '${loc.lon ?? ''}')">
+                            Edit
+                        </button>
+                        {% endif %}
+                        {% if role == 'admin' %}
+                        <button class="btn btn-danger btn-sm"
+                            onclick="deleteLocation('${esc(loc.code)}', '${esc(loc.name)}')">
+                            Delete
+                        </button>
+                        {% endif %}
+                    </div>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function startEdit(code, name, lat, lon) {
+        window._origLocName = window._origLocName || {};
+        window._origLocName[code] = name;
+        const row      = document.getElementById(`row-${code}`);
+        const nameCell = document.getElementById(`name-${code}`);
+        const codeCell = document.getElementById(`code-${code}`);
+        const latCell  = document.getElementById(`lat-${code}`);
+        const lonCell  = document.getElementById(`lon-${code}`);
+        const actCell  = row.querySelector('.action-cell');
+
+        nameCell.innerHTML = `<input type="text" value="${esc(name)}" id="edit-name-${esc(code)}" style="width:100%;padding:5px 8px">`;
+        codeCell.innerHTML = `<input type="text" value="${esc(code)}" id="edit-code-${esc(code)}" style="width:100%;padding:5px 8px" placeholder="Machine code">`;
+        latCell.innerHTML  = `<input type="text" value="${esc(lat)}"  id="edit-lat-${esc(code)}"  style="width:100%;padding:5px 8px" placeholder="e.g. 1.2847">`;
+        lonCell.innerHTML  = `<input type="text" value="${esc(lon)}"  id="edit-lon-${esc(code)}"  style="width:100%;padding:5px 8px" placeholder="e.g. 103.8481">`;
+        actCell.innerHTML  = `
+            <button class="btn btn-primary btn-sm" onclick="saveEdit('${esc(code)}')">Save</button>
+            <button class="btn btn-secondary btn-sm" onclick="loadLocations()">Cancel</button>
+        `;
+    }
+
+    async function saveEdit(code) {
+        const name     = document.getElementById(`edit-name-${code}`).value.trim();
+        const new_code = document.getElementById(`edit-code-${code}`).value.trim();
+        const lat      = document.getElementById(`edit-lat-${code}`).value.trim();
+        const lon      = document.getElementById(`edit-lon-${code}`).value.trim();
+        if (!name) { setStatus('Location name cannot be empty.', 'error', 'adminStatus'); return; }
+        // A name change must be declared as a RENAME (same site, label fixed)
+        // or a MOVE (machine physically relocated) so location history stays
+        // correct: a move closes the old location at the move time and opens
+        // the new one there; a rename keeps history continuous.
+        let extra = {};
+        const orig = (window._origLocName || {})[code];
+        if (orig !== undefined && name !== orig) {
+            const isMove = confirm(
+                `Name change: "${orig}" \u2192 "${name}".\n\n` +
+                `Has this machine PHYSICALLY MOVED to a different site?\n\n` +
+                `OK = MOVE \u2014 sales history splits at the move time\n` +
+                `Cancel = RENAME \u2014 same site, label corrected, history stays continuous`);
+            if (isMove) {
+                // default the move time to NOW in SGT regardless of browser TZ
+                const p = n => String(n).padStart(2, '0');
+                const d = new Date(Date.now() + (480 + new Date().getTimezoneOffset()) * 60000);
+                const nowStr = `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+                const eff = prompt('When did the move happen? (SGT, YYYY-MM-DD HH:MM)\nLeave as-is if it is happening now.', nowStr);
+                if (eff === null) { setStatus('Save cancelled.', 'error', 'adminStatus'); return; }
+                extra = { name_change_mode: 'move', effective: eff.trim() };
+            } else {
+                if (!confirm(`Confirm RENAME: "${orig}" \u2192 "${name}" at the SAME site.\n\nOK = apply rename\nCancel = abort (no change saved)`)) {
+                    setStatus('Save cancelled.', 'error', 'adminStatus'); return;
+                }
+                extra = { name_change_mode: 'rename' };
+            }
+        }
+        try {
+            const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, new_code: new_code || null, lat: lat || null, lon: lon || null, ...extra }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
+            setStatus('Location updated.', 'success', 'adminStatus');
+            setTimeout(() => setStatus('', '', 'adminStatus'), 3000);
+            loadLocations();
+        } catch (e) {
+            setStatus('Failed to save.', 'error', 'adminStatus');
+        }
+    }
+
+    async function deleteLocation(code, name) {
+        if (!confirm(`Delete "${name}" (code: ${code})?\n\nThis cannot be undone and will remove the machine from all dashboards.`)) return;
+        try {
+            const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, { method: 'DELETE' });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
+            setStatus(`"${name}" deleted.`, 'success', 'adminStatus');
+            setTimeout(() => setStatus('', '', 'adminStatus'), 4000);
+            loadLocations();
+        } catch (e) {
+            setStatus('Failed to delete.', 'error', 'adminStatus');
+        }
+    }
+
+    async function addLocation() {
+        const name = document.getElementById('newName').value.trim();
+        const code = document.getElementById('newCode').value.trim();
+        const lat  = document.getElementById('newLat').value.trim();
+        const lon  = document.getElementById('newLon').value.trim();
+        if (!name || !code) {
+            setStatus('Location name and machine code are required.', 'error', 'adminStatus');
+            return;
+        }
+        try {
+            const resp = await fetch('/api/admin/locations', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, code, lat: lat || null, lon: lon || null }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'adminStatus'); return; }
+            setStatus('Location added.', 'success', 'adminStatus');
+            setTimeout(() => setStatus('', '', 'adminStatus'), 3000);
+            ['newName', 'newCode', 'newLat', 'newLon'].forEach(id => {
+                document.getElementById(id).value = '';
+            });
+            loadLocations();
+        } catch (e) {
+            setStatus('Failed to add.', 'error', 'adminStatus');
+        }
+    }
+
+    // ══════════════════════════════════════════
+    // DISPATCH
+    // ══════════════════════════════════════════
+
+    let _dispatchData   = [];
+    let _dispatchSortBy  = 'name';
+    let _dispatchSortDir = 1; // 1=asc, -1=desc
+
+    async function loadDispatchList() {
+        const resp = await fetch('/api/topups');
+        const data = await resp.json();
+        if (data.error) {
+            setStatus('Error loading locations: ' + data.error, 'error', 'dispatchStatus');
+            return;
+        }
+        _dispatchData = data.machines.filter(m => m.code);
+        renderDispatchTable();
+    }
+
+    function renderDispatchTable() {
+        const list = document.getElementById('dispatchList');
+        if (!_dispatchData.length) {
+            list.innerHTML = '<div style="color:#9ca3af;padding:16px">No machines found.</div>';
+            return;
+        }
+
+        // Preserve checked state across re-renders
+        const checked = new Set(
+            [...document.querySelectorAll('.dispatch-cb:checked')].map(cb => cb.value)
+        );
+        // On first render, check everything
+        const firstRender = checked.size === 0 &&
+            document.querySelectorAll('.dispatch-cb').length === 0;
+
+        const sorted = [..._dispatchData].sort((a, b) => {
+            let av, bv;
+            if (_dispatchSortBy === 'name') {
+                av = (a.name || '').toLowerCase(); bv = (b.name || '').toLowerCase();
+            } else if (_dispatchSortBy === 'last_topup') {
+                av = a.last_topup || ''; bv = b.last_topup || '';
+            } else if (_dispatchSortBy === 'vends_since') {
+                av = a.vends_since ?? -1; bv = b.vends_since ?? -1;
+            } else if (_dispatchSortBy === 'vends_before') {
+                av = a.vends_before ?? -1; bv = b.vends_before ?? -1;
+            }
+            return av < bv ? -_dispatchSortDir : av > bv ? _dispatchSortDir : 0;
+        });
+
+        const sortIcon = col => _dispatchSortBy === col
+            ? (_dispatchSortDir === 1 ? ' ▲' : ' ▼') : '';
+
+        const headerStyle = 'padding:8px 12px;font-size:0.7rem;font-weight:700;text-transform:uppercase;color:#6b7280;letter-spacing:0.06em;background:#f9fafb;cursor:pointer;white-space:nowrap;user-select:none';
+
+        list.innerHTML = `
+        <table style="width:100%;border-collapse:collapse">
+            <thead>
+                <tr style="border-bottom:2px solid #e5e7eb">
+                    <th style="${headerStyle};width:36px">
+                        <input type="checkbox" id="dispatchAllCb" title="Select all"
+                               style="width:15px;height:15px;cursor:pointer"
+                               onchange="document.querySelectorAll('.dispatch-cb').forEach(cb => cb.checked = this.checked)">
+                    </th>
+                    <th style="${headerStyle}" onclick="dispatchSort('name')">Location${sortIcon('name')}</th>
+                    <th style="${headerStyle}" onclick="dispatchSort('last_topup')">Last Topup${sortIcon('last_topup')}</th>
+                    <th style="${headerStyle};text-align:right" onclick="dispatchSort('vends_before')">Vends Before${sortIcon('vends_before')}</th>
+                    <th style="${headerStyle};text-align:right" onclick="dispatchSort('vends_since')">Vends Since${sortIcon('vends_since')}</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${sorted.map(m => {
+                    const isChecked = firstRender || checked.has(m.code) ? 'checked' : '';
+                    return `<tr style="border-bottom:1px solid #f3f4f6">
+                        <td style="padding:8px 12px;text-align:center">
+                            <input type="checkbox" class="dispatch-cb" value="${esc(m.code)}" ${isChecked}
+                                   style="width:15px;height:15px;cursor:pointer">
+                        </td>
+                        <td style="padding:8px 12px;font-size:0.875rem;font-weight:500">${esc(m.name)}</td>
+                        <td style="padding:8px 12px;font-size:0.85rem;color:#6b7280">
+                            ${m.last_topup ? esc(m.last_topup) : '<span style="color:#9ca3af">Never</span>'}
+                        </td>
+                        <td style="padding:8px 12px;font-size:0.85rem;text-align:right">
+                            ${m.vends_before !== null && m.last_topup ? m.vends_before.toLocaleString() : '<span style="color:#9ca3af">—</span>'}
+                        </td>
+                        <td style="padding:8px 12px;font-size:0.85rem;font-weight:600;text-align:right">
+                            ${m.vends_since.toLocaleString()}
+                        </td>
+                    </tr>`;
+                }).join('')}
+            </tbody>
+        </table>`;
+    }
+
+    function dispatchSort(col) {
+        if (_dispatchSortBy === col) {
+            _dispatchSortDir *= -1;
+        } else {
+            _dispatchSortBy  = col;
+            _dispatchSortDir = col === 'vends_since' ? -1 : 1; // default vends desc, others asc
+        }
+        renderDispatchTable();
+    }
+
+    function dispatchSelectAll() {
+        document.querySelectorAll('.dispatch-cb').forEach(cb => cb.checked = true);
+        const allCb = document.getElementById('dispatchAllCb');
+        if (allCb) allCb.checked = true;
+    }
+    function dispatchClearAll() {
+        document.querySelectorAll('.dispatch-cb').forEach(cb => cb.checked = false);
+        const allCb = document.getElementById('dispatchAllCb');
+        if (allCb) allCb.checked = false;
+    }
+
+    async function planRoutes() {
+        const codes = [...document.querySelectorAll('.dispatch-cb:checked')].map(cb => cb.value);
+        if (!codes.length) {
+            setStatus('Please select at least one location.', 'error', 'dispatchStatus');
+            return;
+        }
+        const numDrivers = parseInt(document.getElementById('numDrivers').value) || 1;
+        const btn = document.getElementById('planBtn');
+        btn.disabled = true;
+        setStatus('Planning routes…', 'loading', 'dispatchStatus');
+        document.getElementById('dispatchRoutes').innerHTML = '';
+
+        try {
+            const resp = await fetch('/api/dispatch/plan', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ machine_codes: codes, num_drivers: numDrivers }),
+            });
+            const data = await resp.json();
+            if (data.error) { setStatus('Error: ' + data.error, 'error', 'dispatchStatus'); return; }
+
+            // Show warnings inline
+            if (data.warnings && data.warnings.length) {
+                setStatus(data.warnings.join('  |  '), 'error', 'dispatchStatus');
+            } else {
+                setStatus('', '', 'dispatchStatus');
+            }
+            renderRoutes(data.routes);
+            initDispatchMap(data.routes);
+        } catch (e) {
+            setStatus('Could not reach the server.', 'error', 'dispatchStatus');
+        } finally {
+            btn.disabled = false;
+        }
+    }
+
+    function renderRoutes(routes) {
+        const container = document.getElementById('dispatchRoutes');
+        container.innerHTML = routes.map(r => {
+            const shiftTag = r.within_shift
+                ? `<span style="color:#166534;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:12px;padding:2px 10px;font-size:0.72rem">Within shift</span>`
+                : `<span style="color:#991b1b;background:#fef2f2;border:1px solid #fecaca;border-radius:12px;padding:2px 10px;font-size:0.72rem">Exceeds shift</span>`;
+
+            const rows = r.stops.map((s, i) => `
+                <tr>
+                    <td style="color:#9ca3af">${i + 1}</td>
+                    <td><strong>${esc(s.name)}</strong></td>
+                    <td>${s.last_topup ? esc(s.last_topup) : '<span style="color:#9ca3af">Never</span>'}</td>
+                    <td class="right">${s.vends_since.toLocaleString()}</td>
+                </tr>`).join('');
+
+            const mapsBtn = r.maps_url
+                ? `<a href="${r.maps_url}" target="_blank" class="btn btn-secondary btn-sm">Open in Google Maps</a>`
+                : '';
+            const mapsBtn2 = r.maps_url_2
+                ? `<a href="${r.maps_url_2}" target="_blank" class="btn btn-secondary btn-sm">Open in Google Maps (cont.)</a>`
+                : '';
+
+            return `
+            <div class="card" style="border-left:4px solid ${esc(r.colour)}">
+                <div class="card-title" style="display:flex;align-items:center;gap:12px">
+                    <span>Driver ${r.driver} — ${r.stop_count} stop${r.stop_count !== 1 ? 's' : ''}</span>
+                    <span style="font-size:0.8rem;color:#6b7280">Est. ${r.estimated_hours}h</span>
+                    ${shiftTag}
+                </div>
+                <table>
+                    <thead><tr>
+                        <th style="width:32px">#</th>
+                        <th>Location</th>
+                        <th style="width:130px">Last Topup</th>
+                        <th class="right" style="width:120px">Vends Since</th>
+                    </tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+                <div style="margin-top:14px;display:flex;gap:10px">
+                    ${mapsBtn}${mapsBtn2}
+                </div>
+            </div>`;
+        }).join('');
+    }
+
+    // ── Dispatch Map ───────────────────────────────────────────────────────────
+    const DEPOT_LAT = 1.3407711524195856;
+    const DEPOT_LON = 103.8896748329062;
+
+    let _leafletMap   = null;
+    let _mapLayers    = [];
+    let _editableRoutes = [];   // mutable copy of routes for the editor
+
+    function initDispatchMap(routes) {
+        _editableRoutes = routes.map(r => ({
+            driver: r.driver,
+            colour: r.colour,
+            stops:  r.stops.map(s => ({ ...s })),
+        }));
+
+        document.getElementById('mapSection').style.display = '';
+
+        if (!_leafletMap) {
+            _leafletMap = L.map('dispatchMap').setView([1.3521, 103.8198], 12);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+                maxZoom: 18,
+            }).addTo(_leafletMap);
+        }
+
+        renderMapLayers();
+        renderRouteEditor();
+    }
+
+    function renderMapLayers() {
+        _mapLayers.forEach(l => _leafletMap.removeLayer(l));
+        _mapLayers = [];
+
+        // Depot marker
+        const depotIcon = L.divIcon({
+            html: `<div style="background:#1f2937;color:white;border-radius:6px;padding:2px 5px;font-weight:700;font-size:10px;white-space:nowrap;box-shadow:0 2px 4px rgba(0,0,0,0.4)">DEPOT</div>`,
+            iconSize: [46, 22], iconAnchor: [23, 11], className: '',
+        });
+        _mapLayers.push(
+            L.marker([DEPOT_LAT, DEPOT_LON], { icon: depotIcon })
+             .bindPopup('<strong>Depot (Factory)</strong>')
+             .addTo(_leafletMap)
+        );
+
+        _editableRoutes.forEach(route => {
+            const { colour, stops, driver } = route;
+            if (!stops.length) return;
+
+            // Polyline: depot → each stop → back to depot
+            const pts = [[DEPOT_LAT, DEPOT_LON], ...stops.map(s => [s.lat, s.lon]), [DEPOT_LAT, DEPOT_LON]];
+            _mapLayers.push(
+                L.polyline(pts, { color: colour, weight: 4, opacity: 0.8 })
+                 .addTo(_leafletMap)
+            );
+
+            stops.forEach((s, i) => {
+                const icon = L.divIcon({
+                    html: `<div style="background:${colour};color:white;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:11px;border:2px solid white;box-shadow:0 1px 4px rgba(0,0,0,0.35)">${i + 1}</div>`,
+                    iconSize: [26, 26], iconAnchor: [13, 13], className: '',
+                });
+                _mapLayers.push(
+                    L.marker([s.lat, s.lon], { icon })
+                     .bindPopup(`<strong>Driver ${driver} — Stop ${i + 1}</strong><br>${s.name}`)
+                     .addTo(_leafletMap)
+                );
+            });
+        });
+    }
+
+    function renderRouteEditor() {
+        const grid = document.getElementById('routeEditor');
+        grid.innerHTML = _editableRoutes.map((route, ri) => {
+            const otherRoutes = _editableRoutes.filter((_, j) => j !== ri);
+            const stopRows = route.stops.map((s, si) => {
+                const upDisabled  = si === 0                      ? 'disabled' : '';
+                const dnDisabled  = si === route.stops.length - 1 ? 'disabled' : '';
+                const xferOptions = otherRoutes.map(r2 =>
+                    `<option value="${r2.driver}">Driver ${r2.driver}</option>`
+                ).join('');
+                const xferControls = otherRoutes.length ? `
+                    <select id="xfer_${ri}_${si}">${xferOptions}</select>
+                    <button onclick="transferStop(${ri},${si})" title="Move to selected driver">→</button>
+                ` : '';
+                return `
+                <div class="editor-stop-row">
+                    <span class="stop-num" style="color:${route.colour}">${si + 1}</span>
+                    <span class="stop-name">${esc(s.name)}</span>
+                    <span class="stop-actions">
+                        <button onclick="moveStop(${ri},${si},-1)" ${upDisabled}>▲</button>
+                        <button onclick="moveStop(${ri},${si},1)"  ${dnDisabled}>▼</button>
+                        ${xferControls}
+                    </span>
+                </div>`;
+            }).join('');
+
+            const mapsUrls = buildClientMapsUrl(route.stops);
+            const mapsBtn  = mapsUrls[0]
+                ? `<a href="${mapsUrls[0]}" target="_blank" class="btn btn-secondary btn-sm">Maps${mapsUrls[1] ? ' (1)' : ''}</a>`
+                : '';
+            const mapsBtn2 = mapsUrls[1]
+                ? `<a href="${mapsUrls[1]}" target="_blank" class="btn btn-secondary btn-sm">Maps (cont.)</a>`
+                : '';
+
+            return `
+            <div class="editor-route-card">
+                <div class="editor-route-header" style="background:${route.colour}">
+                    <span>Driver ${route.driver}</span>
+                    <span>${route.stops.length} stop${route.stops.length !== 1 ? 's' : ''}</span>
+                </div>
+                ${stopRows}
+                <div class="editor-maps-row">${mapsBtn}${mapsBtn2}</div>
+            </div>`;
+        }).join('');
+    }
+
+    function buildClientMapsUrl(stops) {
+        const BASE = 'https://www.google.com/maps/dir/?api=1&travelmode=driving';
+        const depotStr = `${DEPOT_LAT},${DEPOT_LON}`;
+        const fmt = s => `${s.lat},${s.lon}`;
+
+        function makeUrl(orig, wps, dest) {
+            let url = `${BASE}&origin=${orig}&destination=${dest}`;
+            if (wps.length) url += '&waypoints=' + wps.map(fmt).join('|');
+            return url;
+        }
+
+        if (!stops.length) return [null, null];
+        if (stops.length <= 9) {
+            return [makeUrl(depotStr, stops, depotStr), null];
+        }
+        return [
+            makeUrl(depotStr, stops.slice(0, 8), fmt(stops[8])),
+            makeUrl(fmt(stops[8]), stops.slice(9), depotStr),
+        ];
+    }
+
+    function moveStop(ri, si, dir) {
+        const route = _editableRoutes[ri];
+        const newSi = si + dir;
+        if (newSi < 0 || newSi >= route.stops.length) return;
+        [route.stops[si], route.stops[newSi]] = [route.stops[newSi], route.stops[si]];
+        renderMapLayers();
+        renderRouteEditor();
+    }
+
+    function transferStop(ri, si) {
+        const selectEl = document.getElementById(`xfer_${ri}_${si}`);
+        if (!selectEl) return;
+        const targetDriver = parseInt(selectEl.value);
+        const targetRi = _editableRoutes.findIndex(r => r.driver === targetDriver);
+        if (targetRi === -1) return;
+        const [stop] = _editableRoutes[ri].stops.splice(si, 1);
+        _editableRoutes[targetRi].stops.push(stop);
+        renderMapLayers();
+        renderRouteEditor();
+    }
+
+    // ── Escape HTML ────────────────────────────────────────────────────────────
+    function esc(str) {
+        return String(str)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    /* ── exports ──────────────────────────────────────────────────────────────
+       The lifted markup calls these from inline onclick=/onchange= attributes,
+       which resolve against `window` only. Inside the IIFE they are locals, so
+       each one is re-published by hand. Adding a handler to the markup without
+       adding it here fails at click time, not at load time. */
+    window.addLocation = addLocation;
+    window.deleteLocation = deleteLocation;
+    window.dispatchClearAll = dispatchClearAll;
+    window.dispatchSelectAll = dispatchSelectAll;
+    window.dispatchSort = dispatchSort;
+    window.loadLocations = loadLocations;
+    window.logTopup = logTopup;
+    window.moveStop = moveStop;
+    window.planRoutes = planRoutes;
+    window.saveEdit = saveEdit;
+    window.searchMessages = searchMessages;
+    window.startEdit = startEdit;
+    window.transferStop = transferStop;
+    window.undoTopup = undoTopup;
+    window.__lgcInit = function (key) {
+        /* loadLocations() also runs once at IIFE time, but it is the ONLY thing
+           that fills #topupMachineSelect and it swallows its own errors. Without
+           this call, one failed page-load fetch left top-up logging permanently
+           unusable with no recovery short of a reload. */
+        if (key === 'topups')    { loadLocations(); loadTopups(); }
+        if (key === 'dispatch')  loadDispatchList();
+        if (key === 'locations') loadLocations();
+        if (key === 'messages')  loadLocations();
+    };
+})();
+</script>
