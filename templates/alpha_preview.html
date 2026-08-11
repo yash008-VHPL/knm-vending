@@ -208,6 +208,65 @@
   .stp-ed select,.stp-ed input[type=date]{height:28px;font-size:.72rem;padding:2px 6px}
   .stp-ed .btn{flex:1}
   .kpi small b{display:inline;font-size:inherit;font-weight:800;color:var(--ink);line-height:inherit}
+
+  /* ── SALES SCHEDULE (.sc-*) + DISPATCH RAIL (.rail-*) ───────────────────── */
+  /* Namespaced so nothing here can reach the Plan board's .bd-* / .stp rules. */
+  .sc-wk{margin-bottom:14px}
+  .sc-wkh{display:flex;align-items:baseline;gap:9px;margin:0 0 7px;font-size:.78rem;font-weight:800}
+  .sc-wkh .sub{font-weight:600;color:var(--mut);font-size:.72rem}
+  .sc-wkh .now{background:var(--blue);color:#fff;border-radius:999px;padding:1px 8px;font-size:.62rem;
+               letter-spacing:.05em}
+  .sc-grid{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:9px}
+  @media(max-width:1080px){.sc-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
+  @media(max-width:620px){.sc-grid{grid-template-columns:1fr}}
+  .sc-day{border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px 9px;
+          display:flex;flex-direction:column;min-height:132px}
+  .sc-day.today{border-color:var(--blue);box-shadow:0 0 0 2px rgba(37,99,235,.12)}
+  .sc-day.past{background:#f8fafc}
+  .sc-day.past .sc-add{display:none}
+  .sc-dh{display:flex;align-items:baseline;justify-content:space-between;gap:6px;margin-bottom:6px}
+  .sc-dh b{font-size:.72rem;letter-spacing:.03em}
+  .sc-dh span{font-size:.66rem;color:var(--mut);font-weight:700}
+  .sc-add{position:relative;margin-top:auto}
+  .sc-add>input{height:30px;font-size:.73rem;padding:3px 8px}
+  .sc-add .sres{top:auto;bottom:32px}
+  .sc-it{display:flex;align-items:flex-start;gap:6px;border:1px solid var(--line);border-radius:7px;
+         padding:5px 6px;margin-bottom:5px;background:#fff;font-size:.72rem}
+  .sc-it.svc{border-color:var(--amber-br);background:#fffbeb}
+  .sc-it.asg{border-color:#bbf7d0;background:#f0fdf4}
+  .sc-it .g{flex:1;min-width:0}
+  /* Wrap, don't ellipsis: a day cell is ~150px and "Beam Suntory / UPS Alps"
+     truncates to "Beam Suntory / UP…", which is the same prefix as several
+     other sites. Sales has to be able to tell them apart at a glance. */
+  .sc-it .g b{display:block;font-weight:700;overflow-wrap:anywhere;line-height:1.25}
+  .sc-it .g small{display:block;color:var(--mut);font-size:.66rem;white-space:normal}
+  .sc-it .x{background:none;border:none;color:#94a3b8;cursor:pointer;font-size:.95rem;line-height:1;padding:0 1px}
+  .sc-it .x:hover{color:var(--bad)}
+  .sc-rep{font-size:.6rem;font-weight:800;letter-spacing:.05em;color:var(--blue);text-transform:uppercase}
+  .sc-empty{font-size:.68rem;color:var(--mut);font-style:italic;margin:0 0 6px}
+  .sc-comp{border:1.5px solid var(--blue);border-radius:9px;padding:9px 10px;margin-bottom:8px;background:#f8faff}
+  .sc-comp .t{font-size:.76rem;font-weight:800;line-height:1.25}
+  .sc-comp .c{font-size:.66rem;color:var(--mut);margin-bottom:6px}
+  .sc-comp label{font-size:.7rem;font-weight:600;display:flex;gap:5px;align-items:center;margin:0 0 5px}
+  .sc-comp label input[type=checkbox]{width:14px;height:14px;accent-color:var(--blue)}
+  .sc-comp textarea{min-height:36px;font-size:.72rem;padding:4px 7px;margin-bottom:5px}
+  .sc-comp select,.sc-comp input[type=number]{height:28px;font-size:.72rem;padding:2px 6px}
+  .sc-comp .r{display:flex;gap:5px;margin-top:5px}
+  .sc-comp .r .btn{flex:1}
+  /* A day cell is ~150px wide, so the repeat controls stack. Side by side, the
+     select clipped to "Wee" and the frequency became unreadable. */
+  .sc-rw{display:grid;grid-template-columns:1fr;gap:4px;margin-bottom:5px}
+  .sc-occ{display:flex;align-items:center;gap:5px;font-size:.68rem;color:var(--mut);font-weight:600}
+  .sc-occ input{width:52px;flex:0 0 auto}
+
+  .plan-wrap{display:flex;gap:14px;align-items:flex-start}
+  .plan-main{flex:1;min-width:0}
+  .plan-rail{flex:0 0 268px;position:sticky;top:12px}
+  @media(max-width:1100px){.plan-wrap{display:block}.plan-rail{width:100%;margin-top:14px;position:static}}
+  .rail-c{border:1px solid var(--line);border-radius:11px;background:#fff;padding:10px 11px;margin-bottom:11px}
+  .rail-c h4{margin:0 0 2px;font-size:.78rem;font-weight:800}
+  .rail-c .sub{font-size:.66rem;color:var(--mut);margin-bottom:8px;display:block}
+  .rail-c.tmr{border-color:var(--blue)}
 </style>
 </head>
 <body>
@@ -248,14 +307,18 @@ const ME = {{ (username or "") | tojson }};
 const MYROLES = ({{ (roles or []) | tojson }}).map(r=>String(r||"").toLowerCase())
   .map(r=>({dispatch:"field_manager"}[r]||r)).filter((v,i,a)=>a.indexOf(v)===i);
 
-const AREAS={fleet:"Fleet",machines:"Machines",service:"Service",plan:"Plan",admin:"Admin"};
+const AREAS={fleet:"Fleet",machines:"Machines",service:"Service",schedule:"Schedule",plan:"Plan",admin:"Admin"};
 const ROLE_NAV={
   operator:["service","machines"], customer_service:["service","machines"],
-  field_manager:["plan","service","fleet","machines"],
-  sales:["fleet","service"], admin:["plan","service","fleet","machines","admin"]};
+  field_manager:["plan","schedule","service","fleet","machines"],
+  /* Sales lands on Schedule: keying the week's top-ups is the job. She reaches
+     the same /api/wo/schedule routes dispatch does, but the server refuses her
+     an assigned_to — naming a driver stays dispatch's call. */
+  sales:["schedule","fleet","service"],
+  admin:["plan","schedule","service","fleet","machines","admin"]};
 /* dispatch is merged into field_manager (app.ROLE_ALIASES): one entry, one tab
    order, one landing tab — Plan, because the board is the morning job. */
-const ROLE_HOME={operator:"service",customer_service:"service",field_manager:"plan",sales:"fleet",admin:"plan"};
+const ROLE_HOME={operator:"service",customer_service:"service",field_manager:"plan",sales:"schedule",admin:"plan"};
 const ROLE_LABEL={operator:"Operator (driver)",customer_service:"Customer Service",field_manager:"Dispatch / Field Manager",sales:"Sales",admin:"Admin"};
 /* Client-side mirror of app.ROLE_ALIASES. The server already canonicalises, but
    a cached page or a stale cookie carrying "dispatch" would otherwise match no
@@ -283,6 +346,11 @@ async function reload(){
   const d=await api("/alpha/api/bootstrap"); if(!d)return;
   machines=(d.machines||[]).map(m=>({vendsSince:null,...m}));
   work=d.work||[]; state.salesVends=d.health?d.health.salesVends:null;
+  /* Anything that reloads the board has also changed what the schedule views
+     show — an assignment made here must not leave the rail claiming the stop is
+     still unassigned. Mark both stale; the next render refetches whichever the
+     user is actually looking at. */
+  SC.stale=true; RAIL.stale=true;
   setBanner(d.health); render();
 }
 const kb=[{id:"KB-12",sym:"No dispense after coin",root:"Jammed dispense motor",fix:"Clear jam, cycle motor, test 3 vends"},
@@ -315,9 +383,14 @@ function buildRolePicker(){
 function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
   ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});}
 function render(){buildTabs();const m=$("#main");
-  m.innerHTML=({service:renderService,machines:renderMachines,fleet:renderFleet,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
+  m.innerHTML=({service:renderService,machines:renderMachines,fleet:renderFleet,schedule:renderSchedule,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
   document.querySelectorAll("[data-sub]").forEach(b=>{b.onclick=()=>{state.sub[state.area]=b.dataset.sub;render();};});
   if(state.area==="fleet"&&subActive("fleet","status")==="sales") initSalesTab();
+  /* The calendar and the dispatch rail read /api/wo/schedule directly rather
+     than bootstrap's work[] — that list is capped and unbounded in date, so a
+     quarter of keyed schedule would push the far weeks out of it silently. */
+  if(state.area==="schedule") ensureSchedule();
+  if(state.area==="plan")     ensureRail();
 }
 const subActive=(a,d)=>state.sub[a]||d;
 
@@ -348,14 +421,27 @@ async function submitReport(){const code=$("#rep_m").value,desc=($("#rep_d").val
   if(!r)return;
   state.sub.service="mine";await reload();toast("Report submitted"+(r.display_id?" — "+r.display_id:""));}
 function svcMine(){return listWork(work.filter(w=>w.status!=="done"),"No open reports.");}
-function svcTriage(){const news=work.filter(w=>w.status==="new"),prog=work.filter(w=>w.status==="assigned");
+function svcTriage(){
+  /* Triage is a "what needs attention now" inbox. Since the sales calendar
+     materialises repeats, every future occurrence is an unassigned open row —
+     without this the inbox fills with next quarter's routine top-ups and buries
+     the actual faults. Future-dated stops live on the Schedule tab. */
+  const _now=sgtToday();
+  const _due=w=>!w.scheduledDate||w.scheduledDate<=_now;
+  const news=work.filter(w=>w.status==="new"&&_due(w)),prog=work.filter(w=>w.status==="assigned");
+  const _later=work.filter(w=>w.status==="new"&&!_due(w)).length;
   return `<div class="kpis"><div class="kpi"><b>${news.length}</b><small>new</small></div><div class="kpi"><b>${prog.length}</b><small>in progress</small></div><div class="kpi"><b>${work.filter(w=>w.status==="done").length}</b><small>done</small></div></div>
-    <h3 style="margin:4px 0 8px;font-size:.95rem">New — needs triage &amp; assignment</h3>
+    <h3 style="margin:4px 0 8px;font-size:.95rem">New — needs triage &amp; assignment${
+      _later?` <span style="font-weight:600;color:var(--mut);font-size:.78rem">· ${_later} scheduled for a later date</span>`:""}</h3>
     ${news.length?`<div class="rows">${news.map(triageRow).join("")}</div>`:'<p class="empty">Inbox clear 🎉</p>'}
     <h3 style="margin:18px 0 8px;font-size:.95rem">In progress</h3>${prog.length?listWork(prog):'<p class="empty">Nothing assigned.</p>'}`;}
 function triageRow(w){const m=mByCode(w.machine);
+  // Show the scheduled date. Assign rewrites it to the board's day, so a row
+  // that is really next month's occurrence of a sales repeat must say so
+  // before someone silently pulls it forward.
+  const _fd=w.scheduledDate&&w.scheduledDate!==boardDate?` · <b>for ${woEsc(w.scheduledDate)}</b>`:"";
   return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${woEsc(wName(w))} — ${woEsc(w.desc)}</b>
-    <div class="meta">${woEsc(w.id)} · ${woEsc(w.source)} · priority ${woEsc(w.priority)}</div></div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
+    <div class="meta">${woEsc(w.id)} · ${woEsc(w.source)} · priority ${woEsc(w.priority)}${_fd}</div></div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
     ${w.kind==="complaint"&&!(state.role==="field_manager"||state.role==="admin")
         ? `<span class="pill" title="A complaint becomes assignable once a job order is raised for it">needs a job order first</span>`
       :drivers.length?`<select id="as_${cssId(w.id)}" class="btn sm ghost" style="width:auto">${drivers.map(d=>`<option value="${d}">${driverName(d)}</option>`).join("")}</select>
@@ -712,8 +798,277 @@ function shiftBoardDate(d){
 }
 function toggleCarry(el){ showCarry = el.checked; render(); }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   SALES SCHEDULE  (2026-08-11)
+   Mon–Sat calendar, current week first. Sales searches a machine inside a day,
+   ticks what is needed and optionally makes it repeat; the repeat is expanded
+   server-side into real unassigned stops, which is exactly what dispatch drags
+   onto a driver card on the Plan board. One record, two screens.
+
+   This screen reads /api/wo/schedule (date-ranged) rather than bootstrap's
+   work[], which is capped and unbounded in date — a quarter of keyed schedule
+   would fall off the end of it without saying so.
+   ══════════════════════════════════════════════════════════════════════════ */
+const DOW6 = ["Mon","Tue","Wed","Thu","Fri","Sat"];
+const MON3 = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+/* All date arithmetic is done in UTC. Parsing "YYYY-MM-DD" as local time and
+   formatting back as UTC shifts by a day for every browser east of Greenwich —
+   the same bug that once made the board's Next button a no-op. */
+const dAdd = (iso, n) => { const t = new Date(iso + "T00:00:00Z");
+  t.setUTCDate(t.getUTCDate() + n); return t.toISOString().slice(0, 10); };
+const dDow = iso => new Date(iso + "T00:00:00Z").getUTCDay();          // 0=Sun
+const mondayOf = iso => dAdd(iso, -(((dDow(iso) + 6) % 7)));
+const dLabel = iso => { const t = new Date(iso + "T00:00:00Z");
+  return t.getUTCDate() + " " + MON3[t.getUTCMonth()]; };
+const REPEAT_LABEL = {weekly:"Weekly", fortnightly:"Fortnightly", fourweekly:"4-weekly"};
+/* Planning horizon is 12 WEEKS, so the default occurrence count differs per
+   frequency — all three fill the same quarter. Mirrors SCHEDULE_HORIZON_WEEKS
+   in workorders.py; the server clips anything past it regardless. */
+const REPEAT_FILL = {weekly:12, fortnightly:6, fourweekly:3};
+
+let SC = {anchor:null, weeks:4, stops:[], sundays:0, stale:true, dated:true};
+const scAnchor = () => SC.anchor || mondayOf(sgtToday());
+const scRange = () => { const f = scAnchor(); return {from:f, to:dAdd(f, SC.weeks * 7 - 1)}; };
+function scShift(n){ SC.anchor = dAdd(scAnchor(), n * 7); SC.stale = true; render(); }
+function scMore(){ SC.weeks += 4; SC.stale = true; render(); }
+function scReload(){ SC.stale = true; render(); }
+
+async function ensureSchedule(){
+  if (!SC.stale) return;
+  SC.stale = false;                       // set BEFORE the await, or the render()
+  const {from, to} = scRange();           // below re-enters and loops forever.
+  const d = await api(`/api/wo/schedule?from=${from}&to=${to}`);
+  const all = (d && d.stops) || [];
+  /* The grid is Mon–Sat by request. Counting Sundays that no cell renders would
+     make the header totals disagree with what is on screen, and a Sunday stop
+     would show no × button. Split them out and say so instead — sales cannot
+     create one, but dispatch can date a stop to Sunday on the Plan board. */
+  SC.stops   = all.filter(s => dDow(s.date) !== 0);
+  SC.sundays = all.length - SC.stops.length;
+  SC.dated = d ? d.dated !== false : true;
+  render();
+}
+
+const scOn = iso => SC.stops.filter(s => s.date === iso)
+  .sort((a, b) => String(a.machine_name || "").localeCompare(String(b.machine_name || "")));
+
+function renderSchedule(){
+  const today = sgtToday(), start = scAnchor(), thisMon = mondayOf(today);
+  const weeks = [];
+  for (let w = 0; w < SC.weeks; w++){
+    const mon = dAdd(start, w * 7);
+    const days = [];
+    for (let i = 0; i < 6; i++){                       // Mon–Sat only
+      const iso = dAdd(mon, i);
+      const past = iso < today;
+      const items = scOn(iso);
+      days.push(`<div class="sc-day${iso === today ? " today" : ""}${past ? " past" : ""}" data-date="${iso}">
+        <div class="sc-dh"><b>${DOW6[i]}</b><span>${dLabel(iso)}</span></div>
+        <div class="sc-comp-slot"></div>
+        ${items.length ? items.map(scItem).join("")
+                       : `<p class="sc-empty">${past ? "—" : "Nothing yet"}</p>`}
+        <div class="sc-add">
+          <input type="text" placeholder="Add machine…" autocomplete="off"
+                 oninput="scSearch(this)" onfocus="scSearch(this)">
+          <div class="sres"></div>
+        </div></div>`);
+    }
+    weeks.push(`<div class="sc-wk"><div class="sc-wkh">
+        <span>Week of ${dLabel(mon)}</span>
+        ${mon === thisMon ? '<span class="now">THIS WEEK</span>' : ""}
+        <span class="sub">${SC.stops.filter(s => s.date >= mon && s.date <= dAdd(mon, 5)).length} stop(s)</span>
+      </div><div class="sc-grid">${days.join("")}</div></div>`);
+  }
+  const warn = SC.dated ? "" : `<div class="legacy-note"><b>Scheduling columns are not migrated
+    on this database.</b> Run the 2026-08-11 migration; until then nothing keyed here can be dated.</div>`;
+  return `<div class="screen-h"><div><h2>Schedule</h2>
+      <div class="crumb">Search a machine inside a day, tick what is needed, set a repeat if it is a standing round.</div></div>
+      <button class="btn ghost" onclick="scReload()">Refresh</button></div>
+    ${warn}
+    <div class="daybar">
+      <button class="btn sm ghost" onclick="scShift(-1)">‹ Previous week</button>
+      <button class="btn sm ghost" onclick="SC.anchor=null;SC.stale=true;render()">This week</button>
+      <button class="btn sm ghost" onclick="scShift(1)">Next week ›</button>
+      <span style="flex:1"></span>
+      <span class="sub" style="font-size:.72rem;color:var(--mut);font-weight:600">
+        ${SC.stops.length} scheduled stop${SC.stops.length !== 1 ? "s" : ""} in view${
+        SC.sundays ? ` · ${SC.sundays} on a Sunday (not shown — dispatch handles those on the Plan board)` : ""}</span>
+    </div>
+    ${weeks.join("")}
+    <button class="btn sm ghost" onclick="scMore()">Show 4 more weeks</button>
+    <p class="note">Stops are created unassigned. Dispatch puts a driver's name on them on the Plan board.</p>`;
+}
+
+function scItem(s){
+  const cls = s.assigned_to ? "asg" : (s.needs_service ? "svc" : "");
+  const rep = s.series_id && REPEAT_LABEL[s.series_rule]
+    ? `<span class="sc-rep">${REPEAT_LABEL[s.series_rule]}</span>` : "";
+  const who = s.assigned_to ? `<small>→ ${woEsc(driverName(s.assigned_to))}</small>` : "";
+  return `<div class="sc-it ${cls}">
+    <div class="g"><b>${woEsc(s.machine_name || s.machine_code)}</b>
+      ${s.needs_service ? '<span class="tag svc">SERVICE</span> ' : ""}${rep}
+      ${s.note ? `<small>${woEsc(s.note)}</small>` : ""}${who}</div>
+    ${/* Once dispatch has named a driver the stop belongs to the round. The
+          server refuses a sales cancel on it, so do not offer the button and
+          then fail — show why instead. */
+      (s.assigned_to && state.role === "sales")
+        ? '<span class="x" title="Assigned to a driver — ask dispatch to pull it" style="cursor:default">🔒</span>'
+        : `<button class="x" title="Cancel this stop"
+             onclick="scCancel(${s.id},${s.series_id ? `'${woEsc(s.series_id)}'` : "null"},'${s.date}')">×</button>`}
+  </div>`;
+}
+
+const scDayEl = el => el.closest(".sc-day");
+
+/* Same client-side machine filter the Plan board uses — active machines only,
+   name or code, capped so the list stays usable on a fleet of 130+. */
+function scSearch(input){
+  const box = scDayEl(input).querySelector(".sc-add .sres");
+  const q = (input.value || "").trim().toLowerCase();
+  if (!q){ box.classList.remove("show"); box.innerHTML = ""; return; }
+  const hits = machines.filter(m => m.active &&
+      ((m.name || "").toLowerCase().includes(q) || String(m.code).includes(q))).slice(0, 8);
+  box.innerHTML = hits.length
+    ? hits.map(m => `<button type="button" data-code="${woEsc(m.code)}" onclick="scPick(this)">
+        ${woEsc(m.name || m.code)}<small>${woEsc(m.code)}</small></button>`).join("")
+    : '<div class="none">No active machine matches.</div>';
+  box.classList.add("show");
+}
+
+function scPick(btn){
+  const day = scDayEl(btn), code = btn.dataset.code, iso = day.dataset.date;
+  const m = mByCode(code);
+  day.querySelector(".sc-add .sres").classList.remove("show");
+  day.querySelector(".sc-add input").value = "";
+  document.querySelectorAll(".sc-comp-slot").forEach(s => { s.innerHTML = ""; });
+  day.querySelector(".sc-comp-slot").innerHTML = `
+    <div class="sc-comp" data-code="${woEsc(code)}" data-date="${iso}">
+      <div class="t">${woEsc(m ? m.name : code)}</div>
+      <div class="c">${woEsc(code)} · ${DOW6[(dDow(iso) + 6) % 7]} ${dLabel(iso)}</div>
+      <label><input type="checkbox" class="k-svc"> Service also needed</label>
+      <textarea class="note" placeholder="Note for the driver"></textarea>
+      <div class="sc-rw">
+        <select class="rep" onchange="scRepChange(this)">
+          <option value="none">Does not repeat</option>
+          <option value="weekly">Weekly</option>
+          <option value="fortnightly">Fortnightly</option>
+          <option value="fourweekly">Every 4 weeks</option>
+        </select>
+        <label class="sc-occ" style="display:none">
+          <input type="number" class="occ" value="12" min="2" max="12"><span class="sc-occl"> times in total</span></label>
+      </div>
+      <select class="pri"><option value="normal">Normal</option><option value="high">High</option><option value="low">Low</option></select>
+      <div class="r">
+        <button class="btn sm ghost" onclick="scCancelComposer(this)">Cancel</button>
+        <button class="btn sm" onclick="scAdd(this)">Add</button>
+      </div>
+    </div>`;
+  day.querySelector(".sc-comp textarea").focus();
+}
+function scRepChange(sel){
+  const c = sel.closest(".sc-comp"), box = c.querySelector(".sc-occ"), occ = c.querySelector(".occ");
+  box.style.display = sel.value === "none" ? "none" : "flex";
+  if (sel.value === "none") return;
+  // Default to a full 12-week quarter for whichever frequency she picked, and
+  // cap the input at it — the server clips past the horizon anyway, and an
+  // input that silently accepts 40 then delivers 12 reads as a bug.
+  const n = REPEAT_FILL[sel.value] || 12;
+  occ.max = n; occ.value = n;
+  box.querySelector(".sc-occl").textContent = ` times — ${sel.value === "weekly" ? "12" : n * (sel.value === "fortnightly" ? 2 : 4)} weeks`;
+}
+function scCancelComposer(btn){ btn.closest(".sc-comp-slot").innerHTML = ""; }
+
+async function scAdd(btn){
+  const c = btn.closest(".sc-comp");
+  const rep = c.querySelector(".rep").value;
+  btn.disabled = true;
+  const r = await api("/api/wo/schedule/stops", {method:"POST", body:{
+    machine_code:   c.dataset.code,
+    scheduled_date: c.dataset.date,
+    needs_service:  c.querySelector(".k-svc").checked,
+    note:           (c.querySelector(".note").value || "").trim(),
+    priority:       c.querySelector(".pri").value,
+    repeat:         rep,
+    occurrences:    rep === "none" ? 1 : parseInt(c.querySelector(".occ").value || "1", 10),
+  }});
+  btn.disabled = false;
+  if (!r) return;
+  const n = (r.created || []).length, sk = (r.skipped || []).length;
+  toast(`${r.machine_name}: ${n} stop${n !== 1 ? "s" : ""} added`
+        + (sk ? ` · ${sk} date${sk !== 1 ? "s" : ""} skipped (already booked)` : ""));
+  scReload();
+}
+
+async function scCancel(id, seriesId, date){
+  /* A repeat is real rows, so "cancel" has to ask which: this one, or this and
+     every later one. Deleting the whole series silently would wipe work a
+     driver may already be carrying — the server refuses those and reports them
+     back rather than pretending they went. */
+  /* Two SEPARATE confirms. Overloading one confirm as a three-way choice has no
+     abort path — Esc maps to Cancel, which would silently delete the stop the
+     user only meant to look at. The first prompt is always the escape hatch. */
+  if (!confirm("Cancel this scheduled stop?")) return;
+  let url = `/api/wo/schedule/stops/${id}`;
+  if (seriesId && confirm("This stop repeats.\n\nAlso cancel every LATER repeat in the series?"))
+    url = `/api/wo/schedule/series/${encodeURIComponent(seriesId)}?from=${date}`;
+  const r = await api(url, {method:"DELETE"});
+  if (!r) return;
+  const kept = (r.kept_assigned || []).length;
+  toast(`${(r.deleted || []).length} stop(s) cancelled`
+        + (kept ? ` · ${kept} already assigned, left for dispatch` : ""));
+  scReload();
+}
+
+/* ── Dispatch rail: the next two days of sales requests ───────────────────── */
+let RAIL = {stops:[], stale:true};
+function railReload(){ RAIL.stale = true; render(); }
+async function ensureRail(){
+  if (!RAIL.stale) return;
+  RAIL.stale = false;
+  const t = sgtToday();
+  const d = await api(`/api/wo/schedule?from=${dAdd(t, 1)}&to=${dAdd(t, 2)}`);
+  RAIL.stops = (d && d.stops) || [];
+  render();
+}
+function railCard(iso, title){
+  const items = RAIL.stops.filter(s => s.date === iso)
+    .sort((a, b) => (a.assigned_to ? 1 : 0) - (b.assigned_to ? 1 : 0));
+  const un = items.filter(s => !s.assigned_to).length;
+  return `<div class="rail-c${title === "Tomorrow" ? " tmr" : ""}">
+    <h4>${title} · ${DOW6[(dDow(iso) + 6) % 7]} ${dLabel(iso)}</h4>
+    <span class="sub">${items.length} request${items.length !== 1 ? "s" : ""}${
+      un ? ` · <b>${un}</b> still unassigned` : " · all assigned"}</span>
+    ${items.length ? items.map(scItemRail).join("") : '<p class="sc-empty">Sales has not keyed anything.</p>'}
+    <button class="btn sm ghost" style="width:100%;margin-top:4px"
+      onclick="setBoardDate('${iso}')">Open this day on the board</button></div>`;
+}
+function scItemRail(s){
+  return `<div class="sc-it ${s.assigned_to ? "asg" : (s.needs_service ? "svc" : "")}">
+    <div class="g"><b>${woEsc(s.machine_name || s.machine_code)}</b>
+      ${s.needs_service ? '<span class="tag svc">SERVICE</span> ' : ""}
+      ${s.series_id && REPEAT_LABEL[s.series_rule] ? `<span class="sc-rep">${REPEAT_LABEL[s.series_rule]}</span>` : ""}
+      ${s.note ? `<small>${woEsc(s.note)}</small>` : ""}
+      <small>${s.assigned_to ? "→ " + woEsc(driverName(s.assigned_to)) : "unassigned"}</small></div></div>`;
+}
+function renderRail(){
+  const t = sgtToday();
+  return `<div class="plan-rail">
+    <h3 style="font-size:.8rem;margin:0 0 8px">Sales team requests</h3>
+    ${railCard(dAdd(t, 1), "Tomorrow")}${railCard(dAdd(t, 2), "Day after")}</div>`;
+}
+
 function renderPlan(){
-  const open = openWork(), un = open.filter(w => !w.assignedTo);
+  // The unassigned list is scoped to the board's day (plus undated carry-overs).
+  // Unscoped, every future occurrence of every sales repeat would queue here
+  // with no date on the row, and Assign — which rewrites ScheduledDate to the
+  // board's day — would quietly pull them forward.
+  // Complaints carry no scheduledDate at all and are not stops — they must stay
+  // visible whatever day the board is on. Everything else is scoped to the
+  // board's day (undated carry-overs always included, as before).
+  const onDay = w => w.kind === "complaint" || !w.scheduledDate || w.scheduledDate === boardDate;
+  const open = openWork().filter(onDay), un = open.filter(w => !w.assignedTo);
+  const laterUn = openWork().filter(w =>
+    !w.assignedTo && w.scheduledDate && w.scheduledDate > boardDate).length;
   buildSites();
   const cnt = t => open.filter(w => w.type === t && w.kind !== "complaint").length;
   const unc = t => un.filter(w => w.type === t && w.kind !== "complaint").length;
@@ -738,9 +1093,13 @@ function renderPlan(){
   return `<div class="screen-h"><div><h2>Plan</h2>
       <div class="crumb">Search a machine on a driver's card, tick what is needed, add the stop.</div></div>
       <button class="btn" onclick="autoPlan()">Auto-plan routes</button></div>
+    <div class="plan-wrap"><div class="plan-main">
     <div class="kpis">${kpi("delivery","deliveries")}${kpi("service","service")}${kpi("movement","movements")}
       <div class="kpi"><b>${un.length - comp}</b><small>assignable now${comp ? ` · <b>${comp}</b> complaint${comp!==1?"s":""} awaiting a job order` : ""}</small></div></div>
     ${noRoster}
+    ${state.workTruncated ? `<div class="legacy-note"><b>Too many open orders to load at once.</b>
+      The board is showing the most recent batch, so far-out scheduled stops may be missing —
+      the Schedule tab always shows the full picture.</div>` : ""}
     <div class="daybar">
       <button class="btn sm ghost" onclick="shiftBoardDate(-1)">‹ Prev</button>
       <input type="date" value="${boardDate}" onchange="setBoardDate(this.value)">
@@ -757,10 +1116,12 @@ function renderPlan(){
     ${(() => { const cl = open.filter(w => (!w.machine || w.machine === "?") && w.assignedTo);
         return cl.length ? `<div class="legacy-note" style="margin-top:12px"><b>${cl.length} assigned item(s) have no machine code</b>
           and cannot appear on the board: ${cl.map(w => woEsc(w.id)).join(", ")}. Fix the machine code in the main dashboard.</div>` : ""; })()}
-    <h3 style="font-size:.95rem;margin:18px 0 8px">Unassigned work — ${un.length - comp} assignable${comp ? `, ${comp} awaiting a job order` : ""}</h3>
+    <h3 style="font-size:.95rem;margin:18px 0 8px">Unassigned work — ${un.length - comp} assignable${comp ? `, ${comp} awaiting a job order` : ""}${
+      laterUn ? ` <span class="sub" style="font-weight:600;color:var(--mut);font-size:.75rem">· ${laterUn} more scheduled after this day (see Schedule)</span>` : ""}</h3>
     ${un.length ? `<div class="rows">${un.map(triageRow).join("")}</div>`
                 : '<p class="empty">Nothing unassigned.</p>'}
-    <p class="note">Live — every action writes through the same work-order API the main dashboard uses.</p>`;
+    <p class="note">Live — every action writes through the same work-order API the main dashboard uses.</p>
+    </div>${renderRail()}</div>`;
 }
 
 function driverCard(email){
@@ -974,7 +1335,11 @@ async function removeStop(btn){
 /* One site -> one driver, for the Unassigned list's Assign control. */
 async function assignSite(code, email, verb, onlyFrom){
   const lc = onlyFrom ? onlyFrom.toLowerCase() : null;
-  const items = openWork().filter(w => w.machine === code &&
+  // MUST be scoped to the board's day, exactly like stopsOnBoard(). The assign
+  // routes rewrite ScheduledDate, so an unscoped list would drag every future
+  // occurrence of a sales repeat for this machine onto today — a 26-week round
+  // collapsing into one morning, with no undo.
+  const items = stopsOnBoard().filter(w => w.machine === code &&
     (!lc || (w.assignedTo || "").toLowerCase() === lc));
   let ok = 0, failed = 0, skipped = 0;
   for (const w of items){
@@ -1202,6 +1567,10 @@ function demoSeed(){
     {id:"KNM-REP-0002",type:"delivery",machine:"DM-02",machineName:null,desc:"Refill / delivery",priority:"normal",status:"assigned",assignedTo:"driver.a@demo",source:"Delivery"}];
 }
 function setBanner(h){const b=$("#banner");live=!!(h&&h.live);
+  /* The board's work list is capped. Since the sales calendar materialises
+     repeats, that cap is now reachable — say so rather than render a board that
+     looks complete and is not. */
+  state.workTruncated=!!(h&&h.workTruncated);
   if(live){b.className="banner live";b.innerHTML=`🟢 <b>LIVE</b> · ${h.counts?h.counts.machines+" machines, "+h.counts.work+" work items":""} from Azure SQL. Buttons write through the production work-order API.`;}
   else{b.className="banner demo";b.innerHTML=`🟡 <b>DEMO DATA</b> — ${h?h.reason:"backend unreachable"}. Showing synthetic seed; buttons disabled.`;}
 }

@@ -211,7 +211,13 @@ def _sd_cols(cur, table):
             else "NULL AS ScheduledDate, NULL AS RouteSeq")
 
 
-def _fetch_work(cur):
+# Open delivery rows the board will load in one go. Sized for a full quarter of
+# sales schedule across the fleet; the response reports truncation rather than
+# quietly dropping stops when it is exceeded.
+_DELIVERY_CAP = 900
+
+
+def _fetch_work(cur, meta=None):
     work = []
     try:
         cur.execute("""SELECT TOP 100 ComplaintID, DisplayID, Description, Source,
@@ -256,11 +262,28 @@ def _fetch_work(cur):
         _svc = ("ISNULL(NeedsService,0) AS NeedsService, ServiceNote"
                 if (_has_do_col(cur, "NeedsService") and _has_do_col(cur, "ServiceNote"))
                 else "CAST(0 AS BIT) AS NeedsService, NULL AS ServiceNote")
-        cur.execute(f"""SELECT TOP 200 DeliveryOrderID, MachineName, MachineCode,
+        # 2026-08-11 — the sales calendar materialises repeats, so the number of
+        # OPEN delivery rows is now measured in weeks of schedule rather than in
+        # today's round. TOP 200 ordered by CreatedAt would have silently pushed
+        # this morning's stops off the board the moment sales keyed a quarter
+        # ahead. Two guards: drop completed rows older than 30 days (only the
+        # Triage "done" counter reads them), and raise the cap — with
+        # _work_truncated reported so the UI can say so instead of quietly
+        # showing an incomplete board.
+        _sched = _wo_has_scheduled(cur, "WO_DeliveryOrders")
+        _where = ("WHERE Status <> 'completed' "
+                  "OR CreatedAt >= DATEADD(day, -30, GETUTCDATE())")
+        _order = ("ORDER BY CASE WHEN Status <> 'completed' THEN 0 ELSE 1 END, "
+                  + ("ScheduledDate ASC, " if _sched else "")
+                  + "CreatedAt DESC, DeliveryOrderID DESC")
+        cur.execute(f"""SELECT TOP {_DELIVERY_CAP} DeliveryOrderID, MachineName, MachineCode,
                        AssignedTo, Priority, Status, Notes, {_svc},
                        {_sd_cols(cur, "WO_DeliveryOrders")}
-                       FROM WO_DeliveryOrders ORDER BY CreatedAt DESC, DeliveryOrderID DESC""")
-        for did, mname, mcode, asg, pri, st, notes, needsvc, svcnote, sdate, rseq in cur.fetchall():
+                       FROM WO_DeliveryOrders {_where} {_order}""")
+        _rows = cur.fetchall()
+        if meta is not None and len(_rows) >= _DELIVERY_CAP:
+            meta["truncated"] = True
+        for did, mname, mcode, asg, pri, st, notes, needsvc, svcnote, sdate, rseq in _rows:
             done = (st or "").lower() == "completed"
             _ns = bool(needsvc)
             _n  = (svcnote if _ns else notes)
@@ -325,9 +348,11 @@ def alpha_bootstrap():
             sales = _fetch_sales(cur)
         except Exception:
             sales = None
-        work = _fetch_work(cur)
+        wmeta = {}
+        work = _fetch_work(cur, wmeta)
         return jsonify({
             "health": {"live": True, "reason": "Connected (read-only)", "salesVends": sales,
+                       "workTruncated": bool(wmeta.get("truncated")),
                        "counts": {"machines": len(machines), "work": len(work)}},
             "machines": list(machines.values()), "work": work,
         })

@@ -23,6 +23,7 @@ from functools import wraps
 from datetime import datetime, timedelta
 import base64
 import io
+import uuid
 
 from flask import Blueprint, request, jsonify, Response
 
@@ -46,6 +47,7 @@ ROLE_OPERATOR      = "operator"
 ROLE_FIELD_MANAGER = "field_manager"
 
 ROLE_DISPATCH      = "dispatch"
+ROLE_SALES         = "sales"
 
 # 2026-08-11 — dispatch and field_manager are the same person at KNM today, so
 # the two roles are MERGED: `dispatch` is an alias of `field_manager` and gets
@@ -58,6 +60,11 @@ ROLE_DISPATCH      = "dispatch"
 OPERATOR_ROLES = {ROLE_OPERATOR, ROLE_FIELD_MANAGER, ROLE_ADMIN, ROLE_DISPATCH}
 MANAGER_ROLES  = {ROLE_FIELD_MANAGER, ROLE_ADMIN, ROLE_DISPATCH}
 DISPATCH_ROLES = MANAGER_ROLES
+# 2026-08-11 — sales keys the week's top-up/delivery schedule. Sales may create
+# and cancel UNASSIGNED, still-open stops through the /schedule routes only; it
+# is deliberately NOT folded into DISPATCH_ROLES, so sales can never name a
+# driver, reorder a round, touch started work, or reach any other /api/wo/*.
+SALES_ROLES    = MANAGER_ROLES | {ROLE_SALES}
 
 
 # ── Status / Priority code maps ───────────────────────────────────────────────
@@ -356,6 +363,14 @@ def init_workorders_db():
         # top-up note that is already there.
         ("WO_DeliveryOrders", "NeedsService",  "BIT"),
         ("WO_DeliveryOrders", "ServiceNote",   "NVARCHAR(MAX)"),
+        # 2026-08-11 — sales schedule. A repeat is MATERIALISED: one real row
+        # per occurrence, all sharing SeriesID, so every existing read path
+        # (driver list, board, PDF, top-up sync) sees ordinary stops and needs
+        # no knowledge of recurrence. SeriesRule is kept only so the UI can say
+        # "weekly" and offer "cancel the rest of the series".
+        ("WO_DeliveryOrders", "SeriesID",      "NVARCHAR(40)"),
+        ("WO_DeliveryOrders", "SeriesRule",    "NVARCHAR(24)"),
+        ("WO_DeliveryOrders", "RequestedBy",   "NVARCHAR(256)"),
         ("WO_JobOrders",      "ScheduledDate", "DATE"),
         ("WO_JobOrders",      "RouteSeq",      "INT"),
         ("WO_MovementOrders", "ScheduledDate", "DATE"),
@@ -3495,6 +3510,421 @@ def api_stop_delete(kind, sid):
         if sp_ids:
             _delete_sp_items(sp_ids)
         return jsonify({"ok": True})
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SALES SCHEDULE  (2026-08-11)
+# ══════════════════════════════════════════════════════════════════════════════
+# Sales keys next week's top-ups and deliveries on a Mon–Sat calendar. What she
+# creates is an ORDINARY unassigned WO_DeliveryOrders row with ScheduledDate
+# set — the exact thing dispatch already drags onto a driver card. There is no
+# separate "request" queue to convert, so nothing can fall between the two
+# screens.
+#
+# A repeat is MATERIALISED, not stored as a rule: one real row per occurrence,
+# all carrying the same SeriesID. Every existing read path (driver list, Plan
+# board, Work Order sheet, PDF, top-up sync) therefore needs zero knowledge of
+# recurrence. The cost is a horizon — occurrences beyond MAX_OCCURRENCES do not
+# exist until someone extends them — which is the right trade for a sales team
+# that re-keys the round every quarter anyway.
+
+# Sales plans a quarter at a time. The horizon is expressed in WEEKS, not in a
+# raw occurrence count, so "12 weeks ahead" means the same thing whichever
+# frequency she picks — and a fat-fingered occurrence count cannot materialise
+# two years of rows onto the board.
+SCHEDULE_HORIZON_WEEKS = 12
+MAX_OCCURRENCES = SCHEDULE_HORIZON_WEEKS      # weekly is the densest rule
+SCHEDULE_STEP_DAYS = {"weekly": 7, "fortnightly": 14, "fourweekly": 28}
+SCHEDULE_RULES = ("none",) + tuple(SCHEDULE_STEP_DAYS)
+
+
+def _iso_date(d):
+    # NOT _iso — that name is already a module-level datetime→"...Z" formatter
+    # (line 412) used by ~48 endpoints. Redefining it here would rebind it for
+    # all of them and 500 every response carrying a NULL timestamp.
+    return d.isoformat()
+
+
+def _d(s):
+    return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+
+
+def _series_dates(start, rule, count):
+    """Expand a repeat into concrete dates. `start` is always dates[0].
+
+    Every rule is a fixed stride in whole weeks, so a round can never drift off
+    the weekday sales chose — a machine stays in the same column of her calendar
+    and on the same day of the driver's week, forever.
+
+    Anything past SCHEDULE_HORIZON_WEEKS from the start date is dropped and
+    reported, so the caller can tell her the series was shortened rather than
+    letting it silently stop.
+    """
+    if rule == "none" or count <= 1:
+        return [start], []
+    step = SCHEDULE_STEP_DAYS.get(rule)
+    if not step:
+        return [start], []
+    horizon = start + timedelta(days=SCHEDULE_HORIZON_WEEKS * 7)
+    out, skipped = [start], []
+    for i in range(1, count):
+        d = start + timedelta(days=step * i)
+        if d > horizon:
+            skipped.append({"date": _iso_date(d),
+                            "reason": f"beyond the {SCHEDULE_HORIZON_WEEKS}-week planning horizon"})
+            continue
+        out.append(d)
+    return out, skipped
+
+
+def _sched_cols(cursor):
+    """Which optional columns this database actually has.
+
+    Each ALTER in init_workorders_db is swallowed independently, so the schema
+    can be half-migrated. Probing keeps a partial migration degraded rather than
+    a 500 that loses the whole week's keying.
+    """
+    return {c: _has_col(cursor, "WO_DeliveryOrders", c) for c in
+            ("ScheduledDate", "RouteSeq", "NeedsService", "ServiceNote",
+             "SeriesID", "SeriesRule", "RequestedBy")}
+
+
+def _caller_is_sales_only():
+    """True when the active role is sales and nothing more.
+
+    Sales is allowed to cancel only what is still unassigned and untouched. A
+    field manager hitting the same route keeps full dispatch authority.
+    """
+    return get_role(get_current_user()) == ROLE_SALES
+
+
+@workorders_bp.route("/schedule", methods=["GET"])
+@require_roles(*SALES_ROLES)
+def api_schedule_list():
+    """Every dated, still-open stop between ?from= and ?to= (inclusive).
+
+    Feeds both the sales calendar and the dispatch rail, so the two screens can
+    never disagree about what was asked for.
+    """
+    frm = _parse_date(request.args.get("from"))
+    to = _parse_date(request.args.get("to"))
+    if not frm or not to:
+        return jsonify({"error": "from and to are required (YYYY-MM-DD)."}), 400
+    if _d(to) < _d(frm):
+        frm, to = to, frm
+    if (_d(to) - _d(frm)).days > 400:
+        return jsonify({"error": "Range too wide — ask for a year or less."}), 400
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        have = _sched_cols(cursor)
+        if not have["ScheduledDate"]:
+            return jsonify({"stops": [], "dated": False,
+                            "warning": "Scheduling columns are not migrated yet."})
+        sel = ["DeliveryOrderID", "MachineCode", "MachineName", "AssignedTo",
+               "Priority", "Status", "Notes", "CreatedBy", "CreatedAt",
+               "CONVERT(VARCHAR(10), ScheduledDate, 23)"]
+        opt = [c for c in ("NeedsService", "ServiceNote", "SeriesID",
+                           "SeriesRule", "RequestedBy") if have[c]]
+        cursor.execute(
+            f"SELECT {', '.join(sel + opt)} FROM WO_DeliveryOrders "
+            "WHERE Status <> 'completed' AND ScheduledDate >= %s AND ScheduledDate <= %s "
+            "ORDER BY ScheduledDate, MachineName", (frm, to))
+        rows = cursor.fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            ext = dict(zip(opt, r[len(sel):]))
+            note = ext.get("ServiceNote") or r[6]
+            out.append({
+                "id": int(r[0]), "machine_code": r[1], "machine_name": r[2] or r[1],
+                "assigned_to": r[3], "priority": (r[4] or "normal"),
+                "status": (r[5] or "open"), "note": note,
+                "created_by": ext.get("RequestedBy") or r[7],
+                "date": r[9],
+                "needs_service": bool(ext.get("NeedsService")),
+                "series_id": ext.get("SeriesID"),
+                "series_rule": ext.get("SeriesRule"),
+            })
+        return jsonify({"stops": out, "dated": True})
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/schedule/stops", methods=["POST"])
+@require_roles(*SALES_ROLES)
+def api_schedule_create():
+    """Key one stop, optionally repeating.
+
+    Body:
+        machine_code:   str (required)
+        scheduled_date: 'YYYY-MM-DD' (required — the calendar always supplies it)
+        note:           str
+        needs_service:  bool
+        priority:       'low' | 'normal' | 'high'
+        repeat:         'none' | 'weekly' | 'fortnightly' | 'fourweekly'
+        occurrences:    int, 1..MAX_OCCURRENCES (total, including the first);
+                        also clipped to SCHEDULE_HORIZON_WEEKS from the start
+
+    Stops are created UNASSIGNED — naming a driver is dispatch's call, and the
+    /schedule routes never accept an assigned_to even from a field manager, so
+    there is one place where assignment happens.
+
+    A date that already holds an open stop for that machine is SKIPPED, not
+    fatal: a 12-week series must not be abandoned because week 3 was already
+    keyed. The response reports every skip so the calendar can say so.
+    """
+    data = request.get_json(silent=True) or {}
+    code = (data.get("machine_code") or "").strip()
+    note = (data.get("note") or "").strip() or None
+    needs_service = bool(data.get("needs_service"))
+    priority = (data.get("priority") or "normal").strip().lower()
+    if priority not in ("low", "normal", "high"):
+        priority = "normal"
+    rule = (data.get("repeat") or "none").strip().lower()
+    if rule not in SCHEDULE_RULES:
+        return jsonify({"error": f"Unknown repeat '{rule}'."}), 400
+    try:
+        occ = int(data.get("occurrences") or 1)
+    except (TypeError, ValueError):
+        occ = 1
+    if rule == "none":
+        occ = 1
+    occ = max(1, min(occ, MAX_OCCURRENCES))
+    day = _parse_date(data.get("scheduled_date"))
+    user = get_current_user()
+
+    if not code:
+        return jsonify({"error": "Pick a machine."}), 400
+    if not day:
+        return jsonify({"error": "Pick a date."}), 400
+    # A stop keyed into last week can never be driven; it would sit undone on
+    # the board forever. Today is allowed — sales does phone in same-day asks.
+    if day < _sgt_today():
+        return jsonify({"error": "That date has already passed."}), 400
+
+    dates, skipped = _series_dates(_d(day), rule, occ)
+    series_id = uuid.uuid4().hex[:32] if (rule != "none" and len(dates) > 1) else None
+
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT TOP 1 MachineName, ISNULL(IsActive,1) FROM MachineLookup WHERE MachineCode = %s",
+            (code,))
+        m = cursor.fetchone()
+        if not m:
+            conn.close()
+            return jsonify({"error": f"Machine {code} is not in the machine registry."}), 404
+        name = m[0] or code
+        if not int(m[1] or 0):
+            conn.close()
+            return jsonify({"error": f"{name} is decommissioned; it cannot be scheduled."}), 400
+
+        have = _sched_cols(cursor)
+        if not have["ScheduledDate"]:
+            conn.close()
+            return jsonify({"error": "Scheduling columns are not migrated on this database yet."}), 503
+
+        created = []
+        for dt in dates:
+            ds = _iso_date(dt)
+            # ISNULL matches api_stop_create (workorders.py:3274) and is
+            # deliberate: an open stop with NO date shows on the driver's sheet
+            # on EVERY day, and WO_VisitSessions carries a single
+            # LinkedDeliveryOrderID — so an undated carry-over really does
+            # collide with any date sales picks, and one of the two rows could
+            # never be closed. It is reported, not swallowed: `skipped` comes
+            # back in the payload and the calendar toasts "N date(s) skipped
+            # (already booked)". A whole series can therefore come back empty —
+            # that is the loud symptom of an undated ghost row on that machine,
+            # and the fix is to date or close the ghost, not to book over it.
+            cursor.execute(
+                "SELECT TOP 1 DeliveryOrderID, AssignedTo FROM WO_DeliveryOrders "
+                "WHERE MachineCode = %s AND Status <> 'completed' "
+                "AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s",
+                (code, ds, ds))
+            dup = cursor.fetchone()
+            if dup:
+                skipped.append({"date": ds,
+                                "reason": "already has an open stop"
+                                          + (f" for {dup[1]}" if dup[1] else " (unassigned)"),
+                                "existing_id": int(dup[0])})
+                continue
+            cols = ["MachineName", "MachineCode", "AssignedTo", "Priority",
+                    "CreatedBy", "ScheduledDate"]
+            vals = [name, code, None, priority, user, ds]
+            # One note box, routed by the service tick — exactly as the Plan
+            # board does it, so a stop sales keyed and a stop dispatch keyed are
+            # indistinguishable downstream.
+            if needs_service and have["ServiceNote"]:
+                cols += ["ServiceNote"]; vals += [note]
+            else:
+                cols += ["Notes"];       vals += [note]
+            if have["NeedsService"]:
+                cols += ["NeedsService"]; vals += [1 if needs_service else 0]
+            if series_id and have["SeriesID"]:
+                cols += ["SeriesID"]; vals += [series_id]
+            if have["SeriesRule"]:
+                cols += ["SeriesRule"]; vals += [rule]
+            if have["RequestedBy"]:
+                cols += ["RequestedBy"]; vals += [user]
+            cursor.execute(
+                f"INSERT INTO WO_DeliveryOrders ({', '.join(cols)}) "
+                f"OUTPUT INSERTED.DeliveryOrderID VALUES ({', '.join(['%s'] * len(cols))})",
+                tuple(vals))
+            did = int(cursor.fetchone()[0])
+            _log_activity(cursor, "deliveryorder", did, "created",
+                          f"Sales schedule: {'service + top-up' if needs_service else 'top-up'} "
+                          f"at {name} on {ds}"
+                          + (f" (series {rule})" if series_id else ""), user)
+            created.append({"id": did, "date": ds})
+
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "machine_name": name, "created": created,
+                        "skipped": skipped, "series_id": series_id, "repeat": rule})
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+def _cancel_stop_rows(cursor, ids, user, reason):
+    """Delete open delivery orders by id, with the same care as /stops DELETE.
+
+    Detaches any unsubmitted Work Order sheet first — a driver holding the sheet
+    open must not have finalize later update a row that no longer exists — and
+    snapshots each row to WO_DeletedLog so nothing vanishes without a trail.
+    """
+    done = []
+    for did in ids:
+        cursor.execute("SELECT Status, MachineName FROM WO_DeliveryOrders "
+                       "WHERE DeliveryOrderID=%s", (did,))
+        r = cursor.fetchone()
+        if not r or (r[0] or "").lower() != "open":
+            continue
+        cursor.execute("""
+            UPDATE WO_VisitSessions SET LinkedDeliveryOrderID = NULL
+            WHERE LinkedDeliveryOrderID = %s
+              AND Status NOT IN ('signed', 'pending_email_signature')
+        """, (did,))
+        snap = _row_snapshot(cursor,
+                             "SELECT * FROM WO_DeliveryOrders WHERE DeliveryOrderID=%s", (did,))
+        cursor.execute("DELETE FROM WO_DeliveryOrderLines WHERE DeliveryOrderID=%s", (did,))
+        cursor.execute("DELETE FROM WO_Activity WHERE ParentType='deliveryorder' AND ParentID=%s", (did,))
+        cursor.execute("DELETE FROM WO_DeliveryOrders WHERE DeliveryOrderID=%s", (did,))
+        log_deletion(cursor, "deliveryorder", did,
+                     f"{reason}: {(snap or {}).get('MachineName') or did}", snap, False, user)
+        done.append(did)
+    return done
+
+
+@workorders_bp.route("/schedule/stops/<int:did>", methods=["DELETE"])
+@require_roles(*SALES_ROLES)
+def api_schedule_delete(did):
+    """Cancel one scheduled stop.
+
+    Sales may only cancel what is still unassigned — once dispatch has put a
+    driver's name on it, it belongs to the round and only dispatch can pull it.
+    """
+    user = get_current_user()
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT Status, AssignedTo FROM WO_DeliveryOrders "
+                       "WHERE DeliveryOrderID=%s", (did,))
+        r = cursor.fetchone()
+        if not r:
+            conn.close(); return jsonify({"error": "Stop not found."}), 404
+        if (r[0] or "").lower() != "open":
+            conn.close()
+            return jsonify({"error": "This stop has already been worked; it cannot be cancelled."}), 400
+        if r[1] and _caller_is_sales_only():
+            conn.close()
+            return jsonify({"error": f"Already assigned to {r[1]} — ask dispatch to pull it."}), 403
+        gone = _cancel_stop_rows(cursor, [did], user, "Schedule cancel")
+        conn.commit(); conn.close()
+        return jsonify({"ok": True, "deleted": gone})
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+@workorders_bp.route("/schedule/series/<series_id>", methods=["DELETE"])
+@require_roles(*SALES_ROLES)
+def api_schedule_delete_series(series_id):
+    """Cancel the remaining occurrences of a repeat.
+
+    ?from=YYYY-MM-DD limits it to that date onward (the calendar always sends
+    the occurrence that was clicked), so history and any stop a driver is
+    already carrying stay untouched. Assigned occurrences are LEFT ALONE and
+    reported back rather than silently skipped.
+
+    ?from= is caller-supplied, so for a sales-only caller it is floored at
+    today: she cannot reach backwards and wipe occurrences ops still has to
+    run. Dispatch keeps the full range — clearing a stale past series is
+    legitimate board cleanup.
+
+    NOT a complete backstop on its own: DELETE /schedule/stops/<did> carries no
+    date check, so the same range can be cleared one row at a time. See the
+    open item in the handoff note.
+    """
+    user = get_current_user()
+    frm = _parse_date(request.args.get("from")) or _sgt_today()
+    # 2026-08-11 rev2 — ?from= is caller-supplied. Sales must not be able to
+    # reach backwards past today and wipe occurrences ops still has to run, so
+    # her floor is today no matter what she sends. Dispatch keeps the full
+    # range: clearing a stale past series is a legitimate board cleanup.
+    if _caller_is_sales_only():
+        frm = max(frm, _sgt_today())
+    sid = (series_id or "").strip()
+    if not sid:
+        return jsonify({"error": "No series."}), 400
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        if not _has_col(cursor, "WO_DeliveryOrders", "SeriesID"):
+            conn.close()
+            return jsonify({"error": "Series columns are not migrated on this database yet."}), 503
+        cursor.execute(
+            "SELECT DeliveryOrderID, AssignedTo, CONVERT(VARCHAR(10), ScheduledDate, 23) "
+            "FROM WO_DeliveryOrders WHERE SeriesID = %s AND Status = 'open' "
+            "AND ScheduledDate >= %s", (sid, frm))
+        rows = cursor.fetchall()
+        sales_only = _caller_is_sales_only()
+        ids, kept = [], []
+        for r in rows:
+            if r[1] and sales_only:
+                kept.append({"id": int(r[0]), "date": r[2], "assigned_to": r[1]})
+            else:
+                ids.append(int(r[0]))
+        gone = _cancel_stop_rows(cursor, ids, user, f"Series cancel ({sid[:8]})")
+        conn.commit(); conn.close()
+        return jsonify({"ok": True, "deleted": gone, "kept_assigned": kept})
     except Exception as e:
         if conn is not None:
             try:
