@@ -314,7 +314,7 @@ const ROLE_NAV={
   /* Sales lands on Schedule: keying the week's top-ups is the job. She reaches
      the same /api/wo/schedule routes dispatch does, but the server refuses her
      an assigned_to — naming a driver stays dispatch's call. */
-  sales:["schedule","fleet","service"],
+  sales:["schedule","fleet","service","machines"],
   admin:["plan","schedule","service","fleet","machines","admin"]};
 /* dispatch is merged into field_manager (app.ROLE_ALIASES): one entry, one tab
    order, one landing tab — Plan, because the board is the morning job. */
@@ -350,6 +350,7 @@ async function api(path,opts={}){
 }
 async function reload(){
   const d=await api("/alpha/api/bootstrap"); if(!d)return;
+  props=null;   // someone else has been working the backlog down
   machines=(d.machines||[]).map(m=>({vendsSince:null,...m}));
   work=d.work||[]; state.salesVends=d.health?d.health.salesVends:null;
   /* Anything that reloads the board has also changed what the schedule views
@@ -577,24 +578,10 @@ function renderWorkOrder(){
     <div class="field"><label>Machine Code</label><input type="text" readonly value="${woEsc(mc.code)}"></div>
     <div class="field"><label>Dispense Counter</label><input type="number" id="woCounter" placeholder="Read from machine display" value="${v.dispense_counter!=null?v.dispense_counter:""}"></div></div>`;
 
-  // ── Machine attributes. Options come from the server (workorders.py
-  // MACHINE_ATTRS) and are rendered verbatim — never hardcoded here, so the
-  // two can't drift. Blank = never recorded, and is NOT the same as "Absent".
-  const spec=mc.attrs_spec||[], cur=mc.attrs||{};
-  if(spec.length){
-    const anyMissing=(mc.attrs_missing||[]).length>0;
-    h+=`<div class="wo-sec">Machine details ${anyMissing
-        ? '<span style="color:#b45309;font-weight:700">— confirm before submitting</span>'
-        : '<span>— on record; correct if wrong</span>'}</div>
-      <div class="wo-attrs">`;
-    spec.forEach(a=>{
-      const val=cur[a.key]||"";
-      h+=`<div class="field"><label>${woEsc(a.label)}${val?"":' <span style="color:#b45309">*</span>'}</label>
-        <select id="woA_${woEsc(a.key)}" data-attr="${woEsc(a.key)}">
-          <option value=""${val?"":" selected"}>— not recorded —</option>
-          ${a.options.map(o=>`<option value="${woEsc(o)}"${o===val?" selected":""}>${woEsc(o)}</option>`).join("")}
-        </select></div>`;});
-    h+=`</div>`;}
+  // Machine properties used to be five dropdowns here, gated on submit. They
+  // are Sales' job now (Machines > Properties) — a driver at the machine is
+  // never asked for data entry, and nothing on this sheet can block a signed
+  // Work Order from closing.
 
   h+=`<div class="wo-sec">Services</div><table class="wo-t">
     <thead><tr><th style="width:52%">Description</th><th style="width:90px" class="c">Completed</th><th>Remarks</th></tr></thead><tbody>`;
@@ -646,11 +633,7 @@ function woBody(){
     if(i.value==="" && i.dataset.had!=="1")return;
     lines.push({item_id:parseInt(i.dataset.itemId,10),qty_delivered:parseInt(i.value,10)||0});});
   const ctr=$("#woCounter").value;
-  const attrs={};
-  document.querySelectorAll("#woSheet select[data-attr]").forEach(s=>{
-    if(s.value)attrs[s.dataset.attr]=s.value;});
   return {dispense_counter:ctr!==""?parseInt(ctr,10):null,services:svc,delivery_lines:lines,
-    machine_attrs:attrs,
     service_name:($("#woSvcName").value||"").trim()||null,
     service_date:$("#woSvcDate").value||null,
     customer_unavailable:$("#woCustChk").checked,
@@ -667,13 +650,6 @@ async function woSave(notify){
 
 async function woSubmit(){
   if(!($("#woSvcName").value||"").trim()){toast("Enter your name (Service Personnel) first.");return;}
-  // Machine details are checked HERE, before the signature modal opens — never
-  // after, or the customer would sign and then the submit would bounce.
-  const blank=[...document.querySelectorAll("#woSheet select[data-attr]")].filter(s=>!s.value);
-  if(blank.length){
-    blank.forEach(s=>{s.style.borderColor="#b45309";s.style.background="#fffbeb";});
-    blank[0].scrollIntoView({block:"center",behavior:"smooth"}); blank[0].focus();
-    toast("Confirm the machine details first ("+blank.length+" left).");return;}
   if(!(await woSave(false)))return;
   $("#woSigName").value=""; $("#woSigDate").value=woToday();
   $("#woSig").classList.add("show");}
@@ -728,7 +704,7 @@ function listWork(arr,empty){if(!arr.length)return `<p class="empty">${empty||"N
     <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>${statusTag(w)}</div>`;}).join("")}</div>`;}
 
 /* MACHINES */
-function machinesFor(){const cur=subActive("machines","active");const q=(state.mq||"").trim().toLowerCase();
+function machinesFor(){const cur=subActive("machines","active")==="decom"?"decom":"active";const q=(state.mq||"").trim().toLowerCase();
   return machines.filter(m=>(cur==="active"?m.active:!m.active) &&
     (!q || (m.name||"").toLowerCase().includes(q) || (m.code||"").toLowerCase().includes(q)));}
 function machineRowsHtml(){const canEdit=["admin","dispatch","field_manager"].includes(state.role);const list=machinesFor();
@@ -738,14 +714,140 @@ function machineRowsHtml(){const canEdit=["admin","dispatch","field_manager"].in
     <button class="btn sm ghost" onclick="openMachine('${m.code}')">Info · History${canEdit?' · Edit':''}</button></div>`).join("");}
 function renderMachineList(){const el=document.getElementById("mList");if(el)el.innerHTML=machineRowsHtml();
   const c=document.getElementById("mCount");if(c)c.textContent=machinesFor().length;}
-function renderMachines(){const cur=subActive("machines","active");const canEdit=["admin","dispatch","field_manager"].includes(state.role);
+/* PROPERTIES — the five attributes, owned by Sales. Loaded on demand: the
+   board's bootstrap does not carry them and most sessions never open this. */
+let props=null, propsErr="", propsQ="", propsOnlyMissing=false, propsLoading=false;
+const CAN_PROPS=()=>["sales","field_manager","admin"].includes(state.role);
+
+async function loadProps(force){
+  if((props&&!force)||propsLoading)return;   // flipping tabs must not double-fetch
+  propsLoading=true;
+  try{
+    const res=await fetch("/api/wo/machines/attributes");
+    let d=null; try{d=await res.json();}catch(_){d=null;}
+    if(!res.ok||!d){propsErr=(d&&d.error)||("HTTP "+res.status);props={spec:[],machines:[],incomplete:0};}
+    else {propsErr=d.error||"";props=d;}
+  }catch(e){propsErr="could not reach the server ("+e+")";props={spec:[],machines:[],incomplete:0};}
+  propsLoading=false;
+  render();
+}
+
+function propsRows(){
+  const q=propsQ.trim().toLowerCase();
+  return (props?props.machines:[]).filter(m=>m.active)
+    .filter(m=>!propsOnlyMissing||m.missing.length)
+    .filter(m=>!q||(m.name||"").toLowerCase().includes(q)||(m.code||"").toLowerCase().includes(q));
+}
+
+function renderProps(){
+  if(!props){loadProps();return '<p class="empty">Loading machine properties…</p>';}
+  // The error goes INSIDE the layout: returning only a banner would take the
+  // retry controls (search, template, Upload) away with it.
+  const err=propsErr?`<div class="legacy-note"><b>Could not load machine properties</b> — ${woEsc(propsErr)}
+      <button class="btn sm ghost" style="margin-left:8px" onclick="loadProps(true)">Retry</button></div>`:"";
+  const list=propsRows();
+  const rows=list.length?list.map(m=>`<div class="row"><div class="grow"><b>${woEsc(m.name)}</b>
+      <div class="meta">${woEsc(m.code)} · ${m.missing.length
+        ? `<span style="color:#b45309;font-weight:700">${m.missing.length} missing: ${woEsc(m.missing.join(", "))}</span>`
+        : (props.spec.map(s=>woEsc(m.attrs[s.key]||"")).join(" · "))}</div></div>
+      <button class="btn sm ghost" data-code="${woEsc(m.code)}" onclick="openProps(this.dataset.code)">Edit</button></div>`).join("")
+    : '<p class="empty">Nothing matches.</p>';
+  return `${err}<div class="kpis"><div class="kpi"><b>${props.incomplete}</b><small>active machines with something missing</small></div>
+      <div class="kpi"><b>${props.machines.filter(m=>m.active).length}</b><small>active machines</small></div></div>
+    <div class="daybar">
+      <input id="pq" type="search" placeholder="Search name or code…" value="${woEsc(propsQ)}"
+        oninput="propsQ=this.value;document.getElementById('pList').innerHTML=propsListHtml()" style="width:240px">
+      <label><input type="checkbox" ${propsOnlyMissing?"checked":""}
+        onchange="propsOnlyMissing=this.checked;render()"> Only incomplete</label>
+      <span style="flex:1"></span>
+      <a class="btn sm ghost" href="/api/wo/machines/attributes/template.csv">Download template</a>
+      <button class="btn sm" onclick="openPropsUpload()">Upload sheet</button>
+    </div>
+    <div class="rows" id="pList">${rows}</div>`;
+}
+function propsListHtml(){
+  const list=propsRows();
+  if(!list.length) return '<p class="empty">Nothing matches.</p>';
+  return list.map(m=>`<div class="row"><div class="grow"><b>${woEsc(m.name)}</b>
+    <div class="meta">${woEsc(m.code)} · ${m.missing.length
+      ? `<span style="color:#b45309;font-weight:700">${m.missing.length} missing: ${woEsc(m.missing.join(", "))}</span>`
+      : (props.spec.map(s=>woEsc(m.attrs[s.key]||"")).join(" · "))}</div></div>
+    <button class="btn sm ghost" data-code="${woEsc(m.code)}" onclick="openProps(this.dataset.code)">Edit</button></div>`).join("");
+}
+
+function openProps(code){
+  const m=(props.machines||[]).find(x=>x.code===code); if(!m)return;
+  drawer(`<h3>${woEsc(m.name)}</h3><span class="pill">${woEsc(m.code)}</span>
+    <p class="note">Recorded once by Sales. Blank is not the same as "Absent" — leave it blank only if you do not know.</p>
+    ${props.spec.map(s=>`<div class="field"><label>${woEsc(s.label)}</label>
+      <select data-pattr="${woEsc(s.key)}">
+        <option value="">— not recorded —</option>
+        ${s.options.map(o=>`<option value="${woEsc(o)}"${o===(m.attrs[s.key]||"")?" selected":""}>${woEsc(o)}</option>`).join("")}
+      </select></div>`).join("")}
+    <button class="btn" data-code="${woEsc(code)}" onclick="savePropsDrawer(this.dataset.code,this)">Save</button>`);
+}
+
+async function savePropsDrawer(code,btn){
+  const body={};
+  document.querySelectorAll("#drawerc select[data-pattr]").forEach(s=>{body[s.dataset.pattr]=s.value;});
+  btn.disabled=true;
+  const r=await api(`/api/wo/machines/${encodeURIComponent(code)}/attributes`,
+                    {method:"PATCH",body:{machine_attrs:body}});
+  btn.disabled=false;
+  if(!r)return;
+  closeDrawer(); await loadProps(true); toast(code+" saved");
+}
+
+function openPropsUpload(){
+  drawer(`<h3>Upload machine properties</h3>
+    <p class="note">.xlsx or .csv. Rows are matched on <b>MachineCode</b> exactly — a code that is not
+    in the registry is reported and skipped, never guessed at by name. Nothing is written until you
+    press Apply.</p>
+    <div class="field"><label>File</label><input type="file" id="pfile" accept=".xlsx,.xlsm,.csv,.txt"></div>
+    <button class="btn ghost" onclick="propsUpload(false,this)">Check the file</button>
+    <div id="pres" style="margin-top:12px"></div>`);
+}
+
+let propsFile=null;   // the file the dry run was done on
+async function propsUpload(apply,btn){
+  // Apply must write the file that was CHECKED. Re-reading the input at click
+  // time let someone swap the file after the dry run and write it unchecked,
+  // under a button still labelled with the old file's row count.
+  const f=apply?propsFile:document.getElementById("pfile").files[0];
+  if(!f){toast(apply?"Check a file first.":"Choose a file first.");return;}
+  if(!apply)propsFile=f;
+  const fd=new FormData(); fd.append("file",f);
+  btn.disabled=true;
+  let d=null,res=null;
+  try{
+    res=await fetch("/api/wo/machines/attributes/import"+(apply?"?apply=1":""),{method:"POST",body:fd});
+    try{d=await res.json();}catch(_){d=null;}
+  }catch(e){d={error:"could not reach the server ("+e+")"};}
+  btn.disabled=false;
+  const box=document.getElementById("pres");
+  if(!d||!res||!res.ok||d.error){box.innerHTML=`<div class="legacy-note">${woEsc((d&&d.error)||("HTTP "+(res?res.status:"?")))}</div>`;return;}
+  const bad=d.results.filter(x=>x.status!=="set"&&x.status!=="would set");
+  box.innerHTML=`<div class="rows">
+    <div class="row"><div class="grow"><b>${d.ok} row(s) ${apply?"written":"ready"}</b>
+      <div class="meta">${d.skipped} skipped of ${d.rows} data row(s)</div></div></div>
+    ${bad.slice(0,40).map(x=>`<div class="row"><div class="grow"><b>Row ${x.row} ${woEsc(x.code||"")}</b>
+      <div class="meta" style="color:#b45309">${woEsc(x.status)} — ${woEsc(x.detail)}</div></div></div>`).join("")}
+    ${bad.length>40?`<p class="note">…and ${bad.length-40} more.</p>`:""}</div>
+    ${apply?'<p class="note">Done.</p>'
+          :`<button class="btn" style="margin-top:10px" onclick="propsUpload(true,this)">Apply ${d.ok} row(s) from ${woEsc(f.name)}</button>`}`;
+  if(apply){propsFile=null;await loadProps(true);toast(d.ok+" machine(s) updated");}
+}
+
+function renderMachines(){const cur=CAN_PROPS()?subActive("machines",state.role==="sales"?"props":"active"):"active";const canEdit=["admin","dispatch","field_manager"].includes(state.role);
   return `<div class="screen-h"><div><h2>Machines</h2><div class="crumb">One registry — Locations + Historic Locations + Machine History</div></div>${state.role==="admin"&&cur==="active"?'<button class="btn ghost" onclick="openAddMachine()">+ Add machine</button>':''}</div>
     <div class="subnav"><button data-sub="active" class="${cur==='active'?'on':''}">Active (${machines.filter(m=>m.active).length})</button>
-      <button data-sub="decom" class="${cur==='decom'?'on':''}">Decommissioned (${machines.filter(m=>!m.active).length})</button></div>
-    <input id="mSearch" type="search" placeholder="Search machine name or code…" value="${(state.mq||'').replace(/"/g,'&quot;')}"
+      <button data-sub="decom" class="${cur==='decom'?'on':''}">Decommissioned (${machines.filter(m=>!m.active).length})</button>
+      ${CAN_PROPS()?`<button data-sub="props" class="${cur==='props'?'on':''}">Properties${props&&props.incomplete?` (${props.incomplete})`:""}</button>`:""}</div>
+    ${cur==="props"?renderProps():""}
+    ${cur==="props"?"":`<input id="mSearch" type="search" placeholder="Search machine name or code…" value="${(state.mq||'').replace(/"/g,'&quot;')}"
       oninput="state.mq=this.value;renderMachineList()" style="width:280px;margin-bottom:8px">
     <div class="meta" style="margin-bottom:8px"><b id="mCount">${machinesFor().length}</b> shown</div>
-    <div class="rows" id="mList">${machineRowsHtml()}</div>`;}
+    <div class="rows" id="mList">${machineRowsHtml()}</div>`}`;}
 function openMachine(code){const m=mByCode(code);const wos=work.filter(w=>w.machine===code);
   drawer(`<h3>${woEsc(m.name)}</h3><span class="pill">${woEsc(m.code)}</span> <span class="pill">${m.active?'active':'decommissioned'}</span>
     <div class="grid2" style="margin-top:12px"><div class="field"><label>Name</label><input value="${woEsc(m.name)}"></div>

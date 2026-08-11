@@ -4762,12 +4762,14 @@ def api_equipment_log():
 # NULL means "never recorded". That is deliberately NOT the same as the "Absent"
 # option, which is a real answer meaning the feature is not fitted.
 #
-# Capture point is the operator's Work Order sheet, because these are physical
-# observations only the person at the machine can make reliably. The gate is on
-# FINALIZE, not on assignment: six separate code paths write AssignedTo (two of
-# them at INSERT), so a gate there is bypassable, and it would freeze dispatch on
-# day one when every machine is NULL. Gating finalize costs the technician five
-# taps and lets the fleet self-heal one visit at a time.
+# 2026-08-11 — capture moved to SALES. It used to be the operator's Work Order
+# sheet, gated on finalize. That reasoning ("only the person at the machine can
+# see this") was correct about the physics and wrong about the people: a field
+# tech who is handed data entry stops using the app, and then nothing gets
+# recorded at all. Sales already knows the specification when the machine is
+# sold, so they enter it once — by hand or by spreadsheet — and the driver is
+# never asked. There is NO gate anywhere: an incomplete machine is a sales
+# backlog item, never a reason a signed Work Order cannot close.
 MACHINE_ATTRS = [
     # (payload key,      DB column,         label,               options)
     ("machine_type",     "MachineType",     "Type of machine",   ["Standing", "Standing-Fr", "Tabletop", "Lite"]),
@@ -4826,7 +4828,7 @@ def _read_machine_attrs(cursor, code):
     return {MACHINE_ATTRS[i][0]: r[i] for i in range(len(MACHINE_ATTRS))}, True
 
 
-def _write_machine_attrs(cursor, code, clean, user=None):
+def _write_machine_attrs(cursor, code, clean, user=None, clear=None):
     """Persist already-validated values. -> rows affected.
 
     Only keys present in `clean` are written, so a partial save never blanks a
@@ -4836,13 +4838,18 @@ def _write_machine_attrs(cursor, code, clean, user=None):
     NOCOUNT ON). Either has to surface rather than silently leaving the machine
     incomplete forever.
     """
-    if not clean:
+    clear = set(clear or ())
+    if not clean and not clear:
         return None                    # nothing asked of us; not a failed write
     sets, params = [], []
     for key, col, _label, _options in MACHINE_ATTRS:
         if key in clean:
             sets.append(f"{col} = %s")
             params.append(clean[key])
+        elif key in clear:
+            # Explicit un-set. Only api_machine_attrs_update passes this; the
+            # importer never does, so a blank cell still means "no opinion".
+            sets.append(f"{col} = NULL")
     if not sets:
         return None
     params.append(str(code))
@@ -4855,12 +4862,313 @@ def _write_machine_attrs(cursor, code, clean, user=None):
         try:
             _log_activity(
                 cursor, "machine", 0, "machine_attrs_updated",
-                f"{code}: " + ", ".join(f"{k}={v}" for k, v in sorted(clean.items())),
+                f"{code}: " + ", ".join(
+            list(f"{k}={v}" for k, v in sorted(clean.items()))
+            + list(f"{k}=(cleared)" for k in sorted(clear))),
                 user,
             )
         except Exception as e:                       # never fail a visit over the audit row
             print(f"[machine_attrs] activity log skipped for {code}: {e}")
     return n
+
+
+# ── Machine properties: the Sales entry points ───────────────────────────────
+# SALES_ROLES = MANAGER_ROLES | {sales}. Operators are deliberately absent: this
+# is the surface that replaced their data entry, not a second place to do it.
+
+@workorders_bp.route("/machines/attributes")
+@require_roles(*SALES_ROLES)
+def api_machine_attrs_list():
+    """Every machine with its five properties and what is still missing."""
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cols = ", ".join(MACHINE_ATTR_COLS)
+        cursor.execute(f"""
+            SELECT MachineCode, MachineName, ISNULL(IsActive, 1), {cols}
+            FROM MachineLookup
+            ORDER BY MachineName, MachineCode
+        """)
+        rows = cursor.fetchall()
+    except Exception as e:
+        # Columns are added by init_db, which swallows individual ALTER failures,
+        # so name the real cause rather than a generic database error.
+        return jsonify({"error": f"Could not read machine properties: {e}",
+                        "spec": _machine_attrs_spec(), "machines": []}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    out = []
+    for r in rows:
+        vals = {MACHINE_ATTRS[i][0]: r[3 + i] for i in range(len(MACHINE_ATTRS))}
+        out.append({"code": r[0], "name": r[1], "active": bool(r[2]),
+                    "attrs": vals, "missing": _missing_from(vals)})
+    return jsonify({"spec": _machine_attrs_spec(), "machines": out,
+                    "incomplete": sum(1 for m in out if m["missing"] and m["active"])})
+
+
+@workorders_bp.route("/machines/<path:code>/attributes", methods=["PATCH"])
+@require_roles(*SALES_ROLES)
+def api_machine_attrs_update(code):
+    """Set one machine's properties. Partial: only the keys sent are written."""
+    data = request.get_json(silent=True) or {}
+    src = data.get("machine_attrs", data)
+    if not isinstance(src, dict):
+        return jsonify({"error": "machine_attrs must be an object."}), 400
+    clean, err = _validate_machine_attrs(src)
+    if err:
+        return jsonify({"error": err}), 400
+    # "— not recorded —" has to actually un-set the value. _validate_machine_attrs
+    # DROPS blanks, which is right for the import (an empty cell means "no
+    # opinion") and wrong here: a sales user correcting a mis-entered value would
+    # otherwise get "saved" and the old value still on the machine, with no way
+    # anywhere in the product to clear it.
+    nulls = [k for k, _c, _lb, _o in MACHINE_ATTRS
+             if k in src and not str(src[k] or "").strip()]
+    if not clean and not nulls:
+        return jsonify({"error": "Nothing to save."}), 400
+    user = get_current_user()
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        n = _write_machine_attrs(cursor, code, clean, user, clear=nulls)
+        if n is not None and n <= 0:
+            return jsonify({"error": f"{code} is not in the machine registry."}), 404
+        # Read BEFORE commit: a transient failure on the read-back would
+        # otherwise report "save failed" for a save that had already landed, and
+        # the user would do it twice.
+        vals, exists = _read_machine_attrs(cursor, code)
+        if not exists:
+            return jsonify({"error": f"{code} is not in the machine registry."}), 404
+        conn.commit()
+        return jsonify({"ok": True, "code": code, "attrs": vals,
+                        "missing": _missing_from(vals)})
+    except Exception as e:
+        return jsonify({"error": f"Database error: {e}"}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# Header -> payload key. Both the DB column name and the human label are
+# accepted, because sales will export the template AND hand-build sheets.
+_ATTR_HEADERS = {}
+for _k, _c, _lb, _o in MACHINE_ATTRS:
+    for _alias in (_k, _c, _lb):
+        _ATTR_HEADERS[_alias.strip().lower().replace(" ", "").replace("_", "")] = _k
+# ORDERED, not a set: set iteration order depends on PYTHONHASHSEED, which
+# gunicorn randomises per worker, so a sheet with both "Machine" (a name) and
+# "MachineCode" would match a different column on every upload.
+_CODE_HEADERS = ("machinecode", "machineid", "code", "machine")
+
+
+def _canon_option(key, val):
+    """Case- and space-insensitive match onto the exact option.
+
+    Strict matching is right for the API and wrong for a spreadsheet: "piped"
+    and "Local Wifi" are not mistakes a person needs told about, and rejecting
+    the row throws away its four good values too. Returns the input unchanged
+    when nothing matches, so a genuine typo still fails validation.
+    """
+    for k, _c, _lb, options in MACHINE_ATTRS:
+        if k == key:
+            t = " ".join(val.split()).lower()
+            for o in options:
+                if o.lower() == t:
+                    return o
+    return val
+
+
+def _norm_header(h):
+    """Fold a header cell to its key. Everything from "(" on is dropped so the
+    template's own "Machine water (Piped/Carried)" matches "Machine water"."""
+    t = str(h or "").split("(")[0]
+    return t.strip().lower().replace(" ", "").replace("_", "")
+
+
+def _parse_upload(filename, blob):
+    """-> (rows, error). rows are dicts keyed by the normalised header.
+
+    .xlsx via openpyxl; .csv/.txt natively. Legacy .xls is a different binary
+    format openpyxl cannot read, so it is refused by name with instructions
+    rather than failing with a confusing parser error.
+    """
+    name = (filename or "").lower()
+    if name.endswith(".xls"):
+        return None, ("Legacy .xls is not supported. Open it in Excel and use "
+                      "File > Save As > Excel Workbook (.xlsx), or export as CSV.")
+    if name.endswith(".csv") or name.endswith(".txt"):
+        import csv as _csv
+        try:
+            text = blob.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = blob.decode("latin-1")
+        rdr = _csv.reader(io.StringIO(text))
+        table = [r for r in rdr]
+    elif name.endswith(".xlsx") or name.endswith(".xlsm"):
+        try:
+            import openpyxl
+        except ImportError:
+            return None, ("Spreadsheet support is not installed on the server "
+                          "(openpyxl). Save the file as CSV and upload that.")
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(blob), read_only=True, data_only=True)
+        except Exception as e:
+            return None, f"Could not read that workbook: {e}"
+        if not wb.sheetnames:
+            wb.close()
+            return None, "That workbook has no sheets."
+        # First sheet that actually has a machine-code column. Hand-built
+        # workbooks routinely open on a cover or notes tab, and blaming the
+        # headers for that sends the user to fix the wrong thing.
+        table, used = [], None
+        for sn in wb.sheetnames:
+            rows_ = [[c for c in row] for row in wb[sn].iter_rows(values_only=True)]
+            rows_ = [r for r in rows_ if any(str(c or "").strip() for c in r)]
+            if rows_ and any(_norm_header(c) in _CODE_HEADERS for c in rows_[0]):
+                table, used = rows_, sn
+                break
+            if not table:
+                table, used = rows_, sn
+        wb.close()
+    else:
+        return None, "Upload a .xlsx or .csv file."
+    table = [r for r in table if any(str(c or "").strip() for c in r)]
+    if not table:
+        return None, "That file has no rows."
+    headers = [_norm_header(c) for c in table[0]]
+    if not any(h in _CODE_HEADERS for h in headers):
+        return None, ("No machine-code column. The first row must contain a "
+                      "MachineCode header — download the template. "
+                      "(Read the headers as: " + ", ".join(str(c) for c in table[0][:6]) + ")")
+    rows = []
+    for raw in table[1:]:
+        rows.append({headers[i]: raw[i] for i in range(min(len(headers), len(raw)))})
+    return rows, None
+
+
+@workorders_bp.route("/machines/attributes/template.csv")
+@require_roles(*SALES_ROLES)
+def api_machine_attrs_template():
+    """The exact headers the importer accepts, with each option list in the
+    header cell so the file is self-documenting without a second data row."""
+    # Headers only. An instruction row would be read back as data row 2 on every
+    # import and reported as "not in the machine registry" forever. The option
+    # lists live in the header text, which _norm_header strips back to the key.
+    heads = ["MachineCode"] + [f"{lb} ({'/'.join(o)})" for _k, _c, lb, o in MACHINE_ATTRS]
+    body = ",".join(f'"{x}"' for x in heads) + "\n"
+    return Response(body, mimetype="text/csv", headers={
+        "Content-Disposition": "attachment; filename=machine-properties-template.csv"})
+
+
+@workorders_bp.route("/machines/attributes/import", methods=["POST"])
+@require_roles(*SALES_ROLES)
+def api_machine_attrs_import():
+    """Upload a sheet of properties. Matched strictly on MachineCode.
+
+    Defaults to a DRY RUN: send apply=1 to write. Every row gets an outcome, so
+    a partial import is legible instead of mysterious. A row that names an
+    unknown machine is reported and skipped — never guessed at by name.
+    """
+    # Checked BEFORE reading: f.read() on a 600 MB body materialises it in the
+    # worker and takes the whole app down with it.
+    if (request.content_length or 0) > 6 * 1024 * 1024:
+        return jsonify({"error": "That file is too large. Export the sheet as CSV, "
+                                 "or split it."}), 413
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "No file uploaded."}), 400
+    blob = f.read()
+    if len(blob) > 4 * 1024 * 1024:
+        return jsonify({"error": "File is over 4 MB. Split it or export as CSV."}), 413
+    rows, err = _parse_upload(f.filename, blob)
+    if err:
+        return jsonify({"error": err}), 400
+    apply = request.args.get("apply") in ("1", "true", "yes")
+    user = get_current_user()
+
+    results, ok, skipped = [], 0, 0
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT MachineCode FROM MachineLookup")
+        known = {str(r[0]).strip().lower(): str(r[0]) for r in cursor.fetchall()}
+
+        for i, row in enumerate(rows, start=2):        # row 1 is the header
+            code_raw = ""
+            for h in _CODE_HEADERS:   # ordered: most specific first
+                if row.get(h) not in (None, ""):
+                    code_raw = str(row[h]).strip()
+                    break
+            # Excel turns a numeric code into 54020502.0 — strip that, it is not
+            # a different machine.
+
+            if not code_raw:
+                results.append({"row": i, "code": "", "status": "skipped",
+                                "detail": "no machine code"}); skipped += 1; continue
+            # Match the raw value FIRST: a code that genuinely ends in ".0"
+            # must not be rewritten into a different machine's code. Only if
+            # that misses do we treat it as Excel's numeric formatting.
+            real = known.get(code_raw.lower())
+            if not real and code_raw.endswith(".0") and code_raw[:-2].isdigit():
+                real = known.get(code_raw[:-2].lower())
+            if not real:
+                results.append({"row": i, "code": code_raw, "status": "skipped",
+                                "detail": "not in the machine registry (if the code has "
+                                          "leading zeros, format that column as Text in Excel)"})
+                skipped += 1; continue
+            payload = {}
+            for h, v in row.items():
+                key = _ATTR_HEADERS.get(h)
+                if key and str(v or "").strip():
+                    payload[key] = _canon_option(key, str(v).strip())
+            if not payload:
+                results.append({"row": i, "code": real, "status": "skipped",
+                                "detail": "no property values"}); skipped += 1; continue
+            clean, verr = _validate_machine_attrs(payload)
+            if verr:
+                results.append({"row": i, "code": real, "status": "error",
+                                "detail": verr}); skipped += 1; continue
+            if apply:
+                n = _write_machine_attrs(cursor, real, clean, user)
+                # Commit in batches. One transaction over a few thousand rows
+                # escalates to a table lock on MachineLookup, which every
+                # driver's sheet and every board refresh reads through.
+                if ok and ok % 200 == 0:
+                    conn.commit()
+                if not n or n <= 0:
+                    results.append({"row": i, "code": real, "status": "error",
+                                    "detail": "write did not land"}); skipped += 1; continue
+            results.append({"row": i, "code": real,
+                            "status": "would set" if not apply else "set",
+                            "detail": ", ".join(f"{k}={v}" for k, v in sorted(clean.items()))})
+            ok += 1
+        if apply:
+            conn.commit()
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return jsonify({"error": f"Database error: {e}"}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return jsonify({"applied": apply, "ok": ok, "skipped": skipped,
+                    "rows": len(rows), "results": results})
 
 
 SERVICE_CATEGORIES = [
@@ -5166,14 +5474,7 @@ def api_operator_location_detail(code):
         # Machine attributes: current values + the authoritative option lists.
         # Wrapped because init_db swallows ALTER TABLE failures; if the columns
         # are not there yet the sheet must still open, just without this block.
-        try:
-            _avals, _ = _read_machine_attrs(cursor, code)
-            machine["attrs"] = _avals
-            machine["attrs_spec"] = _machine_attrs_spec()
-            machine["attrs_missing"] = _missing_from(_avals)
-        except Exception as e:
-            print(f"[machine_attrs] read skipped for {code}: {e}")
-            machine["attrs"], machine["attrs_spec"], machine["attrs_missing"] = {}, [], []
+        # Machine properties are Sales-owned and are not shown on this sheet.
 
         # Service JobOrders for me, open
         cursor.execute("""
@@ -5543,7 +5844,7 @@ def api_visit_update(vid):
             if not row[3]:
                 attrs_warning = "This visit has no machine code, so the machine details were not saved."
             else:
-                _n = _write_machine_attrs(cursor, row[3], attrs_clean, user)
+                _n = None   # machine attributes are Sales-owned; see MACHINE_ATTRS
                 if _n is not None and _n <= 0:
                     attrs_warning = (f"Machine {row[3]} may not be in the machine registry — "
                                      "could not be confirmed. Tell a manager.")
@@ -5855,64 +6156,19 @@ def api_visit_finalize(vid):
             conn.close()
             return jsonify({"error": "Service Personnel name (you) is required."}), 400
 
-        # ── Machine details must be on record before this Work Order can close.
-        # Completeness is judged on (stored | submitted) WITHOUT writing first,
-        # so the refusal path writes nothing and discards nothing. Placed with
-        # the other pre-write validations — nothing has been written or
-        # committed at this point.
+        # Machine attributes are Sales' job now (see MACHINE_ATTRS). The old
+        # gate refused to close a signed Work Order until the technician filled
+        # five dropdowns. Nothing here may ever block a finalize again.
+        #
+        # The write is kept only so an older cached copy of the sheet that still
+        # posts machine_attrs is not silently discarded. A failure is logged and
+        # ignored — this is a courtesy, not a requirement of the visit.
         _vmcode = row[2]
-        if not _vmcode:
-            conn.close()
-            return jsonify({"error": "This visit has no machine code; it cannot be submitted. "
-                                     "Tell a manager."}), 400
-        try:
-            _stored, _exists = _read_machine_attrs(cursor, _vmcode)
-            _attrs_readable = True
-        except Exception as e:
-            # Columns not present (init_db swallows ALTER failures). The sheet
-            # already degraded to no dropdowns, so the technician had nothing to
-            # fill — refusing here would strand a work order the customer has
-            # just signed. Fall through to pre-patch behaviour.
-            print(f"[machine_attrs] finalize gate skipped for {_vmcode}: {e}")
-            _stored, _exists, _attrs_readable = {}, True, False
+        if attrs_clean and _vmcode:
             try:
-                _log_activity(cursor, "visit", vid, "machine_attrs_gate_unavailable",
-                              f"{_vmcode}: columns unreadable ({e})", user)
-            except Exception:
-                pass
-        if _attrs_readable and not _exists:
-            conn.close()
-            return jsonify({"error": f"Machine {_vmcode} is not in the machine registry, so its "
-                                     "details cannot be recorded. Tell a manager."}), 409
-        _missing = []
-        if _attrs_readable:
-            _merged = dict(_stored); _merged.update(attrs_clean)
-            _missing = _missing_from(_merged)
-        # A manager closing out someone else's abandoned visit from the office
-        # cannot see the machine, so the gate would deadlock them. They are
-        # exempt; the technician who is actually on site is not.
-        _is_own_visit = (row[4] or "").lower() == user.lower()
-        if _missing and (_is_own_visit or get_role(user) not in MANAGER_ROLES):
-            conn.close()
-            return jsonify({
-                "error": "Confirm the machine's " + ", ".join(_missing)
-                         + " before submitting this Work Order.",
-                "missing_machine_attrs": _missing,
-            }), 400
-        if _missing:
-            # Manager closing out someone else's visit from the office: exempt,
-            # but never silently — the machine is still incomplete and somebody
-            # has to know it was waved through.
-            try:
-                _log_activity(cursor, "visit", vid, "machine_attrs_gate_skipped",
-                              f"{_vmcode}: still unrecorded — " + ", ".join(_missing), user)
+                _write_machine_attrs(cursor, _vmcode, attrs_clean, user)
             except Exception as e:
-                print(f"[machine_attrs] gate-skip log failed: {e}")
-        if _attrs_readable and attrs_clean:
-            _n = _write_machine_attrs(cursor, _vmcode, attrs_clean, user)
-            if _n is not None and _n <= 0:
-                conn.close()
-                return jsonify({"error": f"Machine {_vmcode} is not in the machine registry."}), 409
+                print(f"[machine_attrs] legacy write skipped for {_vmcode}: {e}")
 
         if cust_unavail and not cust_reason:
             conn.close()
