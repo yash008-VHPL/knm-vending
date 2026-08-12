@@ -3233,7 +3233,13 @@ def api_stop_create():
     # "service" is no longer a separate order. It is a flag on this one.
     kinds = [k for k in (data.get("kinds") or []) if k in STOP_KINDS]
     needs_service = bool(data.get("needs_service")) or ("service" in kinds)
-    day = _parse_date(data.get("scheduled_date")) or _sgt_today()
+    _raw_day = data.get("scheduled_date")
+    day = _parse_date(_raw_day) or (None if _raw_day else _sgt_today())
+    if day is None:
+        # Was: `or _sgt_today()`, which silently relabelled the stop with today's
+        # date and still returned success -- the stop then sat on a day nobody
+        # was looking at. The PATCH route below has always rejected this.
+        return jsonify({"error": "scheduled_date must be YYYY-MM-DD."}), 400
     user = get_current_user()
 
     if not code:
@@ -5787,6 +5793,12 @@ def api_visit_update(vid):
     attrs_clean, attrs_err = _validate_machine_attrs(data.get("machine_attrs"))
     if attrs_err:
         return jsonify({"error": attrs_err}), 400
+    # Same reasoning, same place: ServiceDate went into the UPDATE verbatim and
+    # the date box on the sheet is a plain text input now. Checked BEFORE
+    # get_connection() -- an early return after it would leak the connection,
+    # which every other exit in this function avoids with an explicit close.
+    if data.get("service_date") and _parse_date(data["service_date"]) is None:
+        return jsonify({"error": "Service date must be YYYY-MM-DD."}), 400
     try:
         conn = get_connection()
         cursor = conn.cursor()
@@ -6151,6 +6163,14 @@ def api_visit_finalize(vid):
         receiving_date = data.get("receiving_date") or None
         service_name   = (data.get("service_name") or "").strip() or None
         service_date   = data.get("service_date") or None
+
+        # Both are written verbatim into the visit row further down. Every other
+        # date this blueprint accepts is format-checked; these two were the gap,
+        # and the front end can now hand over whatever was typed into a text box.
+        for _lbl, _v in (("Receiving date", receiving_date), ("Service date", service_date)):
+            if _v and _parse_date(_v) is None:
+                conn.close()
+                return jsonify({"error": f"{_lbl} must be YYYY-MM-DD."}), 400
 
         if not service_name:
             conn.close()

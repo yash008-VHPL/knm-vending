@@ -174,7 +174,13 @@
     function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
         return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
     }); }
-    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
+    function fmtDT(s){ if(!s) return '—';
+      /* ISO, local clock, 24h — not toLocaleString(), which renders per the
+         viewer's OS locale (8/11/2026, 2:30:45 PM on a US Mac). */
+      var d = new Date(s); if (isNaN(d.getTime())) return String(s);
+      var p = function(n){ return String(n).padStart(2,'0'); };
+      return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '
+           + p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
     function showMsg(html, cls){
         document.getElementById('frMsg').innerHTML = html ? '<div class="fr-msg '+ (cls||'') +'">'+ html +'</div>' : '';
     }
@@ -267,7 +273,7 @@
           + '<div class="fr-form">'
           +   '<div class="fld"><label>Machine *</label><select id="frfMachine">' + machineOpts + '</select></div>'
           +   '<div class="row2">'
-          +     '<div class="fld"><label>First reported at *</label><input type="datetime-local" id="frfFirstReported" value="' + nowIso + '"></div>'
+          +     '<div class="fld"><label>First reported at *</label><input type="text" class="isodt" id="frfFirstReported" value="' + nowIso + '" placeholder="YYYY-MM-DDTHH:MM" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]" maxlength="16" autocomplete="off" size="16"></div>'
           +     '<div class="fld"><label>Reported by</label><input type="text" id="frfReportedBy" placeholder="Customer name / contact"></div>'
           +   '</div>'
           +   '<div class="fld"><label>Verbatim report *</label><textarea id="frfDesc" placeholder="What did the customer say? Exact symptoms…"></textarea></div>'

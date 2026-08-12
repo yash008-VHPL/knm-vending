@@ -85,7 +85,11 @@
     function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
         return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
     }); }
-    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleDateString(); } catch(e){ return s; } }
+    function fmtDT(s){ if(!s) return '—';
+      /* ISO date, local clock — toLocaleDateString() renders 8/11/2026 on a US Mac. */
+      var d = new Date(s); if (isNaN(d.getTime())) return String(s);
+      var p = function(n){ return String(n).padStart(2,'0'); };
+      return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
     function showMsg(html, cls){
         document.getElementById('hlMsg').innerHTML = html ? '<div class="hl-msg '+ (cls||'') +'">'+ html +'</div>' : '';
     }

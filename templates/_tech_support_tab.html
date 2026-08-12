@@ -391,7 +391,13 @@
     function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, function(c){
         return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
     }); }
-    function fmtDT(s){ if(!s) return '—'; try { return new Date(s).toLocaleString(); } catch(e){ return s; } }
+    function fmtDT(s){ if(!s) return '—';
+      /* ISO, local clock, 24h — not toLocaleString(), which renders per the
+         viewer's OS locale (8/11/2026, 2:30:45 PM on a US Mac). */
+      var d = new Date(s); if (isNaN(d.getTime())) return String(s);
+      var p = function(n){ return String(n).padStart(2,'0'); };
+      return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '
+           + p(d.getHours())+':'+p(d.getMinutes())+':'+p(d.getSeconds()); }
     function showMsg(html, cls){
         document.getElementById('tsMsg').innerHTML = html ? '<div class="ts-msg '+ (cls||'') +'">'+ html +'</div>' : '';
     }

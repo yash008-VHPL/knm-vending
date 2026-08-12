@@ -77,6 +77,10 @@
 .lgc select { min-width: 180px; }
 .lgc input[type="text"] { width: 110px; }
 .lgc input[type="date"] { width: 150px; }
+.lgc input.isodate { width: 150px; }
+.lgc input.isotime { width: 110px; }
+.lgc input.isodt   { width: 190px; }
+.lgc input.isodate:focus, .lgc input.isotime:focus,
 .lgc select:focus, .lgc input[type="text"]:focus, .lgc input[type="search"]:focus, .lgc input[type="number"]:focus, .lgc input[type="date"]:focus, .lgc input[type="time"]:focus, .lgc input[type="datetime-local"]:focus {
             outline: none;
             border-color: #1a56db;
@@ -262,15 +266,15 @@
                 <div class="field-group">
                     <div class="field-label">Start</div>
                     <div class="datetime-row">
-                        <input type="date" id="msgStartDate">
-                        <input type="time" id="msgStartTime" value="00:00">
+                        <input type="text" class="isodate" id="msgStartDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="msgStartTime" value="00:00" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
                 <div class="field-group">
                     <div class="field-label">End</div>
                     <div class="datetime-row">
-                        <input type="date" id="msgEndDate">
-                        <input type="time" id="msgEndTime" value="23:59">
+                        <input type="text" class="isodate" id="msgEndDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="msgEndTime" value="23:59" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
             </div>
@@ -329,8 +333,8 @@
                 <div class="field-group">
                     <div class="field-label">Topup Date &amp; Time</div>
                     <div class="datetime-row">
-                        <input type="date" id="topupDate">
-                        <input type="time" id="topupTime" value="12:00">
+                        <input type="text" class="isodate" id="topupDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="topupTime" value="12:00" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
                 <button class="btn btn-primary" onclick="logTopup()">Log Topup</button>

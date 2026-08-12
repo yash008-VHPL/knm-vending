@@ -179,7 +179,7 @@
   /* ── stop composer ── */
   .daybar{display:flex;gap:9px;align-items:center;flex-wrap:wrap;background:#fff;border:1px solid var(--line);
           border-radius:10px;padding:9px 11px;margin-bottom:12px}
-  .daybar input[type=date]{width:auto;padding:6px 9px;font-size:.8rem;font-weight:600}
+  .daybar input[type=date],.daybar input.isodate{width:auto;padding:6px 9px;font-size:.8rem;font-weight:600}
   .daybar label{font-size:.76rem;font-weight:600;display:flex;gap:5px;align-items:center;margin:0}
   .sbox{position:relative;margin-bottom:8px}
   .sbox input{font-size:.78rem;height:32px;padding:4px 9px}
@@ -221,7 +221,7 @@
               display:flex;gap:5px;align-items:center;text-transform:none}
   .stp-ed .nl input{width:14px;height:14px;accent-color:var(--blue)}
   .stp-ed .r{display:flex;gap:6px;margin-top:5px}
-  .stp-ed select,.stp-ed input[type=date]{height:28px;font-size:.72rem;padding:2px 6px}
+  .stp-ed select,.stp-ed input[type=date],.stp-ed input.isodate{height:28px;font-size:.72rem;padding:2px 6px}
   .stp-ed .btn{flex:1}
   .kpi small b{display:inline;font-size:inherit;font-weight:800;color:var(--ink);line-height:inherit}
 
@@ -307,12 +307,25 @@
   #embhost select{min-width:180px}
   #embhost input[type="text"]{width:110px}
   #embhost input[type="date"]{width:150px}
+  #embhost input.isodate{width:150px}
+  #embhost input.isotime{width:110px}
+  #embhost input.isodt{width:190px}
   #embhost select:focus,
   #embhost input[type="text"]:focus, #embhost input[type="search"]:focus,
+  #embhost input.isodate:focus, #embhost input.isotime:focus,
   #embhost input[type="number"]:focus, #embhost input[type="date"]:focus,
   #embhost input[type="time"]:focus, #embhost input[type="datetime-local"]:focus{
     outline:none;border-color:#1a56db;box-shadow:0 0 0 3px rgba(26,86,219,.15)}
   #embhost input[type="checkbox"], #embhost input[type="radio"]{width:auto;height:auto}
+  /* Last, and scoped up to match. A bare input.iso-bad (0,1,1) loses its border
+     colour to `#embhost input[type="text"]` (1,1,1) and to `.lgc select, .lgc
+     input[type="text"]` (0,2,1), so an invalid box inside an embedded legacy
+     screen went grey with only the red halo. The :focus variants come after the
+     :focus groups above for the same source-order reason. */
+  input.iso-bad, input.iso-bad:focus,
+  .lgc input.iso-bad, .lgc input.iso-bad:focus,
+  #embhost input.iso-bad, #embhost input.iso-bad:focus{
+    border-color:#dc2626;box-shadow:0 0 0 3px rgba(220,38,38,.15)}
   /* index.html's button variants, which alpha's .btn has no equivalent for. */
   #embhost .btn-primary{background:#1a56db;color:#fff}
   #embhost .btn-secondary{background:#e5e7eb;color:#374151}
@@ -432,7 +445,7 @@
   <h3>Receiving Personnel signature</h3>
   <p class="note" style="margin:0 0 12px">The customer's representative confirms services rendered and goods delivered are in good order.</p>
   <div class="field"><label>Name (typed signature)</label><input id="woSigName" placeholder="Full name"></div>
-  <div class="field"><label>Date</label><input type="date" id="woSigDate"></div>
+  <div class="field"><label>Date</label><input type="text" class="isodate" id="woSigDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"></div>
   <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:6px">
     <button class="btn ghost" onclick="woSigClose()">Cancel</button>
     <button class="btn ghost" onclick="woSigUnavailable()">Customer unavailable</button>
@@ -453,6 +466,76 @@
    existing production work-order API (/api/wo/*): same validation, role checks,
    activity log, top-up sync and movement location-cutover as the main dashboard. */
 const ME = {{ (username or "") | tojson }};
+/* ── ISO date / time inputs ───────────────────────────────────────────────────
+   Every date box on this page is <input type="text" class="isodate" size="10"> rather
+   than type="date". A native date input is painted by the BROWSER from the OS
+   locale — Safari on a US Mac shows 08/04/2026 and 11:59 PM — and no attribute,
+   CSS rule or lang tag changes that. Owning the box is the only way to show ISO
+   to every user regardless of their machine.
+
+   Nothing downstream had to change: a native date input's .value was ALREADY
+   "YYYY-MM-DD" and a time input's "HH:MM", which is exactly what these hold
+   once normalised. The trade is the native calendar / clock popup, which is
+   gone — so this accepts what people actually type (2026-8-4, 2026/08/04,
+   20260804, 9:05, 0905) and rewrites it to canonical form on the way out.
+
+   Delegated from document in the CAPTURE phase for two reasons: most of these
+   inputs are injected later by JS into tables and modals, so there is no init
+   point to hook; and capture runs BEFORE an element's own onchange="…", so an
+   inline handler reading this.value sees the normalised string, not the raw
+   keystrokes. Invalid text is left alone and marked .iso-bad rather than being
+   silently erased — losing a half-typed date on blur is worse than showing it
+   in red. */
+(function(){
+  function normDate(v){
+    v = String(v == null ? "" : v).trim();
+    if (!v) return "";
+    var m = v.match(/^(\d{4})\D?(\d{1,2})\D?(\d{1,2})$/);
+    if (!m) return null;
+    var y = +m[1], mo = +m[2], d = +m[3];
+    var dt = new Date(y, mo - 1, d);
+    // Rejects 2026-02-31 and 2026-13-01: the Date constructor rolls those over
+    // into March / January instead of failing, so compare the parts back.
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    return y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+  }
+  function normDT(v){
+    v = String(v == null ? "" : v).trim();
+    if (!v) return "";
+    // accept "2026-08-11 14:30" as well as the canonical T form
+    var m = v.match(/^(.+?)[T ](.+)$/);
+    if (!m) return null;
+    var d = normDate(m[1]), t = normTime(m[2]);
+    if (d === null || t === null || !d || !t) return null;
+    return d + "T" + t;
+  }
+  function normTime(v){
+    v = String(v == null ? "" : v).trim();
+    if (!v) return "";
+    var m = v.match(/^(\d{1,2})\D?([0-5]\d)$/);
+    if (!m) return null;
+    var h = +m[1];
+    if (h > 23) return null;
+    return String(h).padStart(2, "0") + ":" + m[2];
+  }
+  function fix(el){
+    if (!el || el.tagName !== "INPUT") return;
+    var isD = el.classList.contains("isodate"), isT = el.classList.contains("isotime"),
+        isDT = el.classList.contains("isodt");
+    if (!isD && !isT && !isDT) return;
+    var out = isD ? normDate(el.value) : isT ? normTime(el.value) : normDT(el.value);
+    if (out === null) { el.classList.add("iso-bad"); return; }
+    el.classList.remove("iso-bad");
+    if (out !== el.value) el.value = out;
+  }
+  document.addEventListener("focusout", function(e){ fix(e.target); }, true);
+  document.addEventListener("change",   function(e){ fix(e.target); }, true);
+  window.isoNormalise = fix;
+  window.isoNormDate  = normDate;
+  window.isoNormTime  = normTime;
+  window.isoNormDT    = normDT;
+})();
+
 const MYROLES = ({{ (roles or []) | tojson }}).map(r=>String(r||"").toLowerCase())
   .map(r=>({dispatch:"field_manager"}[r]||r)).filter((v,i,a)=>a.indexOf(v)===i);
 
@@ -795,7 +878,7 @@ function renderWorkOrder(){
 
   h+=`<div class="grid2">
     <div class="field"><label>Company / Location</label><input type="text" readonly value="${woEsc(mc.name||mc.code)}"></div>
-    <div class="field"><label>Date</label><input type="date" value="${woEsc(v.visit_date||woToday())}" disabled></div></div>
+    <div class="field"><label>Date</label><input type="text" class="isodate" value="${woEsc(v.visit_date||woToday())}" disabled placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"></div></div>
   <div class="grid2">
     <div class="field"><label>Machine Code</label><input type="text" readonly value="${woEsc(mc.code)}"></div>
     <div class="field"><label>Dispense Counter</label><input type="number" id="woCounter" placeholder="Read from machine display" value="${v.dispense_counter!=null?v.dispense_counter:""}"></div></div>`;
@@ -833,7 +916,7 @@ function renderWorkOrder(){
     <div class="wo-sec">Service Personnel (you)</div>
     <div class="grid2">
       <div class="field"><label>Your name (typed signature)</label><input type="text" id="woSvcName" value="${woEsc(v.service_name||ME||"")}"></div>
-      <div class="field"><label>Date</label><input type="date" id="woSvcDate" value="${woEsc(v.service_date||woToday())}"></div></div>
+      <div class="field"><label>Date</label><input type="text" class="isodate" id="woSvcDate" value="${woEsc(v.service_date||woToday())}" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"></div></div>
     <div class="wo-act">
       <button class="btn ghost" onclick="closeWorkOrder()">Close</button>
       <button class="btn ghost" onclick="woSave(true)">Save draft</button>
@@ -1361,7 +1444,7 @@ function machineDrawerHtml(m,d){
     <p class="note" style="margin:0 0 8px">Splits this machine's history at the date it actually moved.</p>
     <div class="grid2">
       <div class="field"><label>Previous location</label><input id="tfPrev" placeholder="Where it was before"></div>
-      <div class="field"><label>Moved on</label><input type="date" id="tfWhen"></div>
+      <div class="field"><label>Moved on</label><input type="text" class="isodate" id="tfWhen" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"></div>
     </div>
     <button class="btn sm" onclick="tfRecordMove('${woEsc(m.code)}',this)">Add move</button>`:"";
 
@@ -1463,11 +1546,23 @@ function buildSites(){
 }
 const seqOf = s => Math.min(...s.items.map(w => w.routeSeq == null ? 9999 : w.routeSeq));
 
-function setBoardDate(v){ boardDate = v || sgtToday(); render(); }
+function setBoardDate(v){
+  /* The day box is a text input now, so this can be handed "12/08/2026" or
+     "garbage". Refuse it and keep the day we were on: boardDate feeds
+     stopsOnBoard()'s === comparison (an unmatchable string empties the board
+     and reads as a genuinely quiet day), the scheduled_date on every stop this
+     screen creates, and shiftBoardDate's Date parse, which throws
+     "Invalid time value" on anything non-ISO and leaves Prev/Next dead. */
+  const d = window.isoNormDate ? window.isoNormDate(v) : v;
+  if (d === null) { toast("Enter the date as YYYY-MM-DD"); render(); return; }
+  boardDate = d || sgtToday(); render();
+}
 function shiftBoardDate(d){
   // Parse and step in UTC. Parsing as local and formatting as UTC made Next a
   // no-op and Prev a two-day jump for any browser east of Greenwich.
-  const t = new Date(boardDate + "T00:00:00Z"); t.setUTCDate(t.getUTCDate() + d);
+  const t = new Date(boardDate + "T00:00:00Z");
+  if (isNaN(t.getTime())) { boardDate = sgtToday(); render(); return; }  // belt and braces
+  t.setUTCDate(t.getUTCDate() + d);
   boardDate = t.toISOString().slice(0, 10); render();
 }
 function toggleCarry(el){ showCarry = el.checked; render(); }
@@ -1794,7 +1889,7 @@ function renderPlanBoard(){
       the Schedule tab always shows the full picture.</div>` : ""}
     <div class="daybar">
       <button class="btn sm ghost" onclick="shiftBoardDate(-1)">‹ Prev</button>
-      <input type="date" value="${boardDate}" onchange="setBoardDate(this.value)">
+      <input type="text" class="isodate" value="${boardDate}" onchange="setBoardDate(this.value)" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
       <button class="btn sm ghost" onclick="shiftBoardDate(1)">Next ›</button>
       <button class="btn sm ghost" onclick="setBoardDate(sgtToday())">Today</button>
       ${carry ? `<label><input type="checkbox" ${showCarry ? "checked" : ""} onchange="toggleCarry(this)">
@@ -1975,7 +2070,7 @@ function editStop(btn){
       <select class="drv">${(drivers.length ? drivers : boardPeople()).map(d =>
         `<option value="${woEsc(d)}"${d.toLowerCase() === (email || "").toLowerCase() ? " selected" : ""}>${woEsc(driverName(d))}</option>`).join("")}
         <option value="">— unassign —</option></select>
-      <input type="date" class="dt" value="${woEsc(day)}">
+      <input type="text" class="isodate dt" value="${woEsc(day)}" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
     </div>
     <div class="r">
       <button class="btn sm" onclick="saveStop(this)">Save</button>
@@ -2174,7 +2269,11 @@ function fxRenderList(){
         ${r.group_id?`<span class="fx-b grp">🔗 group ${woEsc(r.group_id)}</span>`:""}</div></div>`;}).join("");
 }
 
-function fxDT(s){if(!s)return "—";try{return new Date(s).toLocaleString();}catch(e){return String(s);}}
+/* ISO, local clock, 24h. toLocaleString() rendered per the viewer's OS locale. */
+function fxDT(s){if(!s)return "—";const d=new Date(s);if(isNaN(d.getTime()))return String(s);
+  const p=n=>String(n).padStart(2,"0");
+  return d.getFullYear()+"-"+p(d.getMonth()+1)+"-"+p(d.getDate())+" "
+       + p(d.getHours())+":"+p(d.getMinutes())+":"+p(d.getSeconds());}
 function fxModal(title,sub,html){$("#fxTitle").textContent=title;$("#fxSub").textContent=sub||"";
   $("#fxBody").innerHTML=html;$("#fxBg").classList.add("show");}
 function fxClose(){$("#fxBg").classList.remove("show");FX.photos=[];}
@@ -2189,7 +2288,7 @@ function fxOpenCreate(preCode){
   fxModal("New fault report","",`
     <div class="field"><label>Machine *</label><select id="fx_m">${opts}</select></div>
     <div class="grid2">
-      <div class="field"><label>First reported at *</label><input type="datetime-local" id="fx_when" value="${n.toISOString().slice(0,16)}"></div>
+      <div class="field"><label>First reported at *</label><input type="text" class="isodt" id="fx_when" value="${n.toISOString().slice(0,16)}" placeholder="YYYY-MM-DDTHH:MM" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}T([01][0-9]|2[0-3]):[0-5][0-9]" maxlength="16" autocomplete="off" size="16"></div>
       <div class="field"><label>Reported by</label><input id="fx_by" placeholder="Customer name / contact"></div>
     </div>
     <div class="field"><label>Verbatim report *</label><textarea id="fx_desc" rows="3" placeholder="What did the customer say? Exact symptoms…"></textarea></div>
@@ -2298,8 +2397,8 @@ function renderSalesUI(){
   return `<div class="card">
     <div class="sales-controls">
       <div class="field"><label>Location</label><select id="sal_loc"><option value="">All Locations</option></select></div>
-      <div class="field"><label>Start</label><div class="datetime-row"><input type="date" id="sal_s0"><input type="time" id="sal_s1" value="00:00" style="max-width:90px"></div></div>
-      <div class="field"><label>End</label><div class="datetime-row"><input type="date" id="sal_e0"><input type="time" id="sal_e1" value="23:59" style="max-width:90px"></div></div>
+      <div class="field"><label>Start</label><div class="datetime-row"><input type="text" class="isodate" id="sal_s0" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_s1" value="00:00" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
+      <div class="field"><label>End</label><div class="datetime-row"><input type="text" class="isodate" id="sal_e0" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_e1" value="23:59" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
       <div class="view-toggle"><button id="sal_vsum" class="on" onclick="setSalesView('summary')">Summary</button><button id="sal_vtxn" onclick="setSalesView('transactions')">Transactions</button></div>
       <button class="btn" id="sal_btn" onclick="runSalesSearch()">Search</button>
     </div>
@@ -2330,7 +2429,8 @@ function renderSalesUI(){
 
 function initSalesTab(){
   const now=new Date(),s=new Date(now);s.setDate(now.getDate()-7);
-  const fmt=d=>d.toISOString().slice(0,10);
+  const fmt=d=>d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")
+              +"-"+String(d.getDate()).padStart(2,"0");   // LOCAL, not toISOString() (UTC)
   const e0=$("#sal_e0"),s0=$("#sal_s0");
   if(e0&&!e0.value)e0.value=fmt(now);
   if(s0&&!s0.value)s0.value=fmt(s);

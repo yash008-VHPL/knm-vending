@@ -141,17 +141,36 @@
         select             { min-width: 180px; }
         input[type="text"] { width: 110px; }
         input[type="date"] { width: 150px; }
+        /* ISO date/time boxes are type="text" now (a native date input is drawn
+           by the browser from the OS locale -- 08/04/2026 on a US Mac -- and no
+           attribute changes that). They already pick up the shared 40px block
+           via input[type="text"]; these two restore the per-type WIDTHS that
+           selector used to give them. `input.isodate` not `.isodate`: bare class
+           is 0,1,0 and would lose to input[type="text"] at 0,1,1. */
+        input.isodate { width: 150px; }
+        input.isotime { width: 110px; }
+        input.isodt   { width: 190px; }
 
         select:focus,
         input[type="text"]:focus,
         input[type="search"]:focus,
         input[type="number"]:focus,
+        input.isodate:focus, input.isotime:focus,
         input[type="date"]:focus,
         input[type="time"]:focus,
         input[type="datetime-local"]:focus {
             outline: none;
             border-color: #1a56db;
             box-shadow: 0 0 0 3px rgba(26,86,219,0.15);
+        }
+
+        /* AFTER the :focus group on purpose. input.iso-bad:focus and
+           input.isodate:focus are both (0,2,1), so source order is the only
+           tie-break -- placed earlier the red never showed while the box still
+           had focus, which is exactly when the user is looking at it. */
+        input.iso-bad, input.iso-bad:focus {
+            border-color: #dc2626;
+            box-shadow: 0 0 0 3px rgba(220,38,38,0.15);
         }
 
         /* ── Buttons ── */
@@ -450,15 +469,15 @@
                 <div class="field-group">
                     <div class="field-label">Start</div>
                     <div class="datetime-row">
-                        <input type="date" id="startDate">
-                        <input type="time" id="startTime" value="00:00">
+                        <input type="text" class="isodate" id="startDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="startTime" value="00:00" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
                 <div class="field-group">
                     <div class="field-label">End</div>
                     <div class="datetime-row">
-                        <input type="date" id="endDate">
-                        <input type="time" id="endTime" value="23:59">
+                        <input type="text" class="isodate" id="endDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="endTime" value="23:59" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
                 <div class="view-toggle">
@@ -547,15 +566,15 @@
                 <div class="field-group">
                     <div class="field-label">Start</div>
                     <div class="datetime-row">
-                        <input type="date" id="msgStartDate">
-                        <input type="time" id="msgStartTime" value="00:00">
+                        <input type="text" class="isodate" id="msgStartDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="msgStartTime" value="00:00" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
                 <div class="field-group">
                     <div class="field-label">End</div>
                     <div class="datetime-row">
-                        <input type="date" id="msgEndDate">
-                        <input type="time" id="msgEndTime" value="23:59">
+                        <input type="text" class="isodate" id="msgEndDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="msgEndTime" value="23:59" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
             </div>
@@ -618,8 +637,8 @@
                 <div class="field-group">
                     <div class="field-label">Topup Date &amp; Time</div>
                     <div class="datetime-row">
-                        <input type="date" id="topupDate">
-                        <input type="time" id="topupTime" value="12:00">
+                        <input type="text" class="isodate" id="topupDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
+                        <input type="text" class="isotime" id="topupTime" value="12:00" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5">
                     </div>
                 </div>
                 <button class="btn btn-primary" onclick="logTopup()">Log Topup</button>
@@ -826,6 +845,76 @@
 </div><!-- /container -->
 
 <script>
+/* ── ISO date / time inputs ───────────────────────────────────────────────────
+   Every date box on this page is <input type="text" class="isodate" size="10"> rather
+   than type="date". A native date input is painted by the BROWSER from the OS
+   locale — Safari on a US Mac shows 08/04/2026 and 11:59 PM — and no attribute,
+   CSS rule or lang tag changes that. Owning the box is the only way to show ISO
+   to every user regardless of their machine.
+
+   Nothing downstream had to change: a native date input's .value was ALREADY
+   "YYYY-MM-DD" and a time input's "HH:MM", which is exactly what these hold
+   once normalised. The trade is the native calendar / clock popup, which is
+   gone — so this accepts what people actually type (2026-8-4, 2026/08/04,
+   20260804, 9:05, 0905) and rewrites it to canonical form on the way out.
+
+   Delegated from document in the CAPTURE phase for two reasons: most of these
+   inputs are injected later by JS into tables and modals, so there is no init
+   point to hook; and capture runs BEFORE an element's own onchange="…", so an
+   inline handler reading this.value sees the normalised string, not the raw
+   keystrokes. Invalid text is left alone and marked .iso-bad rather than being
+   silently erased — losing a half-typed date on blur is worse than showing it
+   in red. */
+(function(){
+  function normDate(v){
+    v = String(v == null ? "" : v).trim();
+    if (!v) return "";
+    var m = v.match(/^(\d{4})\D?(\d{1,2})\D?(\d{1,2})$/);
+    if (!m) return null;
+    var y = +m[1], mo = +m[2], d = +m[3];
+    var dt = new Date(y, mo - 1, d);
+    // Rejects 2026-02-31 and 2026-13-01: the Date constructor rolls those over
+    // into March / January instead of failing, so compare the parts back.
+    if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+    return y + "-" + String(mo).padStart(2, "0") + "-" + String(d).padStart(2, "0");
+  }
+  function normDT(v){
+    v = String(v == null ? "" : v).trim();
+    if (!v) return "";
+    // accept "2026-08-11 14:30" as well as the canonical T form
+    var m = v.match(/^(.+?)[T ](.+)$/);
+    if (!m) return null;
+    var d = normDate(m[1]), t = normTime(m[2]);
+    if (d === null || t === null || !d || !t) return null;
+    return d + "T" + t;
+  }
+  function normTime(v){
+    v = String(v == null ? "" : v).trim();
+    if (!v) return "";
+    var m = v.match(/^(\d{1,2})\D?([0-5]\d)$/);
+    if (!m) return null;
+    var h = +m[1];
+    if (h > 23) return null;
+    return String(h).padStart(2, "0") + ":" + m[2];
+  }
+  function fix(el){
+    if (!el || el.tagName !== "INPUT") return;
+    var isD = el.classList.contains("isodate"), isT = el.classList.contains("isotime"),
+        isDT = el.classList.contains("isodt");
+    if (!isD && !isT && !isDT) return;
+    var out = isD ? normDate(el.value) : isT ? normTime(el.value) : normDT(el.value);
+    if (out === null) { el.classList.add("iso-bad"); return; }
+    el.classList.remove("iso-bad");
+    if (out !== el.value) el.value = out;
+  }
+  document.addEventListener("focusout", function(e){ fix(e.target); }, true);
+  document.addEventListener("change",   function(e){ fix(e.target); }, true);
+  window.isoNormalise = fix;
+  window.isoNormDate  = normDate;
+  window.isoNormTime  = normTime;
+  window.isoNormDT    = normDT;
+})();
+
     const USER_ROLE = "{{ role }}";
 
     // ── Date defaults ──────────────────────────────────────────────────────────
