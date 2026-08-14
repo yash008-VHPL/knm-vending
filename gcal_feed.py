@@ -169,9 +169,14 @@ def snapshot(frm=None, to=None):
 
 
 def _fetch(get_cursor):
-    body = {"k": FEED_SECRET, "back": BACK_DAYS, "days": FORWARD_DAYS}
-    r = requests.post(FEED_URL, json=body,
-                      timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+    # GET, not POST. Apps Script /exec answers with a 302 to
+    # script.googleusercontent.com to serve the output, and requests downgrades a
+    # redirected POST to GET -- which silently drops the JSON body, so doGet ran
+    # with no parameters and the script answered "unauthorized". GET with query
+    # params is the path verified by hand in a browser.
+    params = {"k": FEED_SECRET, "back": BACK_DAYS, "days": FORWARD_DAYS}
+    r = requests.get(FEED_URL, params=params,
+                     timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
     r.raise_for_status()
     data = r.json()
     if not data.get("ok"):
