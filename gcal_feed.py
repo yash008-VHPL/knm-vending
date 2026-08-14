@@ -141,6 +141,7 @@ _cache = {
     "error": None,
     "ok": False,
     "generated_at": None,
+    "sync": None,
 }
 _started = False
 
@@ -159,6 +160,7 @@ def snapshot(frm=None, to=None):
             "fetchedAt": _cache["fetched_at"],
             "generatedAt": _cache["generated_at"],
             "enabled": enabled(),
+            "sync": _cache["sync"],
         }
     if frm:
         evs = [e for e in evs if e["date"] >= frm]
@@ -230,6 +232,23 @@ def refresh_once(get_cursor):
         _cache["generated_at"] = generated
         _cache["error"] = None
         _cache["ok"] = True
+
+    # One-way sync into WO_DeliveryOrders. Kept AFTER the cache update so a sync
+    # fault can never cost us a good feed — the pane still renders, it just
+    # reports the sync error. Disable with GCAL_SYNC=0.
+    if _cfg("GCAL_SYNC", "1") not in ("0", "false", "False", "off"):
+        try:
+            import gcal_sync
+            rep = gcal_sync.run(events, get_cursor)
+        except Exception as e:
+            rep = {"error": "%s: %s" % (type(e).__name__, e)}
+        if rep.get("error"):
+            print("[gcal_feed] sync error: %s" % rep["error"])
+        elif rep.get("created") or rep.get("cancelled"):
+            print("[gcal_feed] sync: +%d created, -%d cancelled, %d flagged"
+                  % (rep.get("created", 0), rep.get("cancelled", 0), rep.get("flagged", 0)))
+        with _lock:
+            _cache["sync"] = rep
     return True
 
 
