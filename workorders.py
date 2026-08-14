@@ -6463,3 +6463,20 @@ def api_visit_list():
         return jsonify(out)
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
+# ── Google Calendar feed (read-only) ─────────────────────────────────────────
+# Sales keys the round in Google Calendar. gcal_feed polls an Apps Script web
+# app on a BACKGROUND thread; this route only ever reads that in-memory cache,
+# so it can never block the single gunicorn worker on an outbound call.
+
+@workorders_bp.route("/schedule/gcal", methods=["GET"])
+@require_roles(*SALES_ROLES)
+def api_schedule_gcal():
+    try:
+        import gcal_feed
+    except Exception as e:
+        return jsonify({"enabled": False, "ok": False, "stops": [],
+                        "count": 0, "error": f"feed module unavailable: {e}"})
+    return jsonify(gcal_feed.snapshot(
+        _parse_date(request.args.get("from")),
+        _parse_date(request.args.get("to")),
+    ))
