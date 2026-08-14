@@ -44,8 +44,8 @@ FEED_URL     = _cfg("GCAL_FEED_URL")
 FEED_SECRET  = _cfg("GCAL_FEED_SECRET")
 BACK_DAYS    = 7
 FORWARD_DAYS = 56
-CONNECT_TIMEOUT = 5
-READ_TIMEOUT    = 15
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT    = 90
 
 def _poll_seconds():
     try:
