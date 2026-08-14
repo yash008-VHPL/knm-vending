@@ -1787,3 +1787,19 @@ except Exception as e:
 
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
+# ── Google Calendar feed poller (additive; never blocks startup) ──────────────
+# Background daemon thread, started once at import. No-op unless GCAL_FEED_URL
+# and GCAL_FEED_SECRET are set as App Service environment variables.
+try:
+    import gcal_feed
+
+    def _gcal_cursor():
+        c = get_connection()
+        return c, c.cursor()
+
+    if gcal_feed.start(_gcal_cursor):
+        print("[startup] gcal_feed poller started")
+    else:
+        print("[startup] gcal_feed idle (GCAL_FEED_URL/SECRET not set)")
+except Exception as e:
+    print(f"[startup] gcal_feed not started: {e}")
