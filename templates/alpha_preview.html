@@ -275,6 +275,36 @@
   .sc-occ{display:flex;align-items:center;gap:5px;font-size:.68rem;color:var(--mut);font-weight:600}
   .sc-occ input{width:52px;flex:0 0 auto}
 
+  /* ── FROM GOOGLE CALENDAR (.gc-*) ───────────────────────────────────────── */
+  /* Deliberately a separate pane, not merged into the .sc-day cells: these have
+     no WO_DeliveryOrders row, so dispatch can neither assign nor complete them.
+     Showing them as if they were stops would have people planning rounds that
+     no driver ever receives. */
+  .gc-p{border:1px solid var(--line);border-left:3px solid #8b5cf6;border-radius:10px;
+        background:#faf9ff;padding:9px 11px;margin:0 0 14px}
+  .gc-h{display:flex;align-items:center;gap:8px;font-size:.76rem;font-weight:800;cursor:pointer}
+  .gc-h .sub{font-weight:600;color:var(--mut);font-size:.68rem}
+  .gc-h .car{margin-left:auto;color:var(--mut);font-size:.8rem}
+  .gc-warn{font-size:.68rem;color:var(--bad);font-weight:700;margin:6px 0 0}
+  .gc-b{margin-top:9px}
+  .gc-day{margin-bottom:9px}
+  .gc-day>b{display:block;font-size:.68rem;letter-spacing:.03em;color:var(--mut);margin-bottom:4px}
+  .gc-it{display:flex;align-items:flex-start;gap:8px;border:1px solid var(--line);border-radius:7px;
+         padding:5px 7px;margin-bottom:4px;background:#fff;font-size:.72rem}
+  .gc-it.dim{opacity:.62;background:#f8fafc}
+  .gc-it .g{flex:1;min-width:0}
+  .gc-it .g b{display:block;font-weight:700;overflow-wrap:anywhere;line-height:1.25}
+  .gc-it .g small{display:block;color:var(--mut);font-size:.66rem}
+  .gc-pl{display:flex;flex-wrap:wrap;gap:4px 10px;margin-top:3px}
+  .gc-pl label{display:flex;align-items:center;gap:4px;font-size:.66rem;font-weight:600;color:var(--mut)}
+  .gc-pl input{width:13px;height:13px;accent-color:#8b5cf6}
+  .gc-tag{font-size:.58rem;font-weight:800;letter-spacing:.05em;text-transform:uppercase;
+          border-radius:999px;padding:1px 6px;white-space:nowrap}
+  .gc-tag.new{background:#ede9fe;color:#6d28d9}
+  .gc-tag.warn{background:#fef3c7;color:#92400e}
+  .gc-tag.done{background:#dcfce7;color:#166534}
+  .gc-it .btn{flex:0 0 auto;height:24px;font-size:.66rem;padding:0 8px}
+
   .plan-wrap{display:flex;gap:14px;align-items:flex-start}
   .plan-main{flex:1;min-width:0}
   .plan-rail{flex:0 0 268px;position:sticky;top:12px}
@@ -706,7 +736,7 @@ function render(){pendingEmbed=null;buildTabs();const m=$("#main");
   /* The calendar and the dispatch rail read /api/wo/schedule directly rather
      than bootstrap's work[] — that list is capped and unbounded in date, so a
      quarter of keyed schedule would push the far weeks out of it silently. */
-  if(state.area==="schedule") ensureSchedule();
+  if(state.area==="schedule"){ ensureSchedule(); ensureGcal(); }
   if(state.area==="plan")     ensureRail();
   /* showEmbed() above stopped the Live status poller. Restart it here — after
      the screen exists — and only when Live status is what is on screen. */
@@ -1602,6 +1632,148 @@ function scShift(n){ SC.anchor = dAdd(scAnchor(), n * 7); SC.stale = true; rende
 function scMore(){ SC.weeks += 4; SC.stale = true; render(); }
 function scReload(){ SC.stale = true; render(); }
 
+/* ── FROM GOOGLE CALENDAR ────────────────────────────────────────────────────
+   Sales keys the round in Google Calendar; gcal_feed.py polls it on a server
+   side background thread and this reads that cache. These entries are NOT
+   stops — no WO_DeliveryOrders row exists until someone presses Create, so
+   nothing here is assignable, drivable or completable. That is why they live
+   in their own pane instead of inside the day cells.
+   The whole 63-day cache is fetched once and filtered client side, so paging
+   the weeks with scShift/scMore needs no refetch. */
+let GC = {stops:[], stale:true, ok:false, error:null, enabled:true, open:true, meta:{}};
+function gcReload(){ GC.stale = true; render(); }
+function gcToggle(){ GC.open = !GC.open; render(); }
+
+async function ensureGcal(){
+  if (!GC.stale) return;
+  GC.stale = false;                      // before the await, same as ensureSchedule
+  const d = await api("/api/wo/schedule/gcal");
+  if (d){
+    GC.stops   = d.stops || [];
+    GC.ok      = !!d.ok;
+    GC.error   = d.error || null;
+    GC.enabled = d.enabled !== false;
+    GC.meta    = {fetchedAt:d.fetchedAt, generatedAt:d.generatedAt};
+  }
+  render();
+}
+
+const gcName = c => {
+  const m = machines.find(x => String(x.code) === String(c));
+  return (m && m.name) ? m.name : String(c);
+};
+/* Already keyed in the real schedule? SC.stops excludes Sundays, so a Sunday
+   calendar entry always reads as not-yet-created. Sales cannot key a Sunday
+   anyway, so that is the honest answer rather than a bug. */
+const gcHas = (code, date) =>
+  SC.stops.some(s => String(s.machine_code) === String(code) && s.date === date);
+
+function renderGcalPane(){
+  if (!GC.enabled) return "";
+  const {from, to} = scRange();
+  const evs = GC.stops.filter(e => e.date >= from && e.date <= to)
+                      .sort((a,b) => a.date === b.date
+                            ? String(a.site).localeCompare(String(b.site))
+                            : (a.date < b.date ? -1 : 1));
+  const pend = evs.filter(e => e.status === "ok" &&
+                          !e.codes.every(c => gcHas(c, e.date))).length;
+  const head = `<div class="gc-h" onclick="gcToggle()">
+      <span>From Google Calendar</span>
+      <span class="sub">${evs.length} event${evs.length !== 1 ? "s" : ""} in view${
+        pend ? ` · ${pend} not yet created` : ""}</span>
+      <span class="car">${GC.open ? "▾" : "▸"}</span></div>`;
+
+  let warn = "";
+  if (GC.error)      warn = `<p class="gc-warn">Feed error — showing the last good copy. ${woEsc(GC.error)}</p>`;
+  else if (!GC.ok)   warn = `<p class="gc-warn">Feed has not returned yet.</p>`;
+
+  if (!GC.open) return `<div class="gc-p">${head}${warn}</div>`;
+
+  const today = sgtToday();
+  const byDay = {};
+  evs.forEach(e => { (byDay[e.date] = byDay[e.date] || []).push(e); });
+  const days = Object.keys(byDay).sort().map(d =>
+    `<div class="gc-day"><b>${DOW6[(dDow(d)+6)%7] || ""} ${dLabel(d)}</b>
+       ${byDay[d].map(e => gcItem(e, today)).join("")}</div>`).join("");
+
+  const body = evs.length
+    ? `<div class="gc-b">${days}</div>`
+    : `<div class="gc-b"><p class="sc-empty">No calendar events in these weeks.</p></div>`;
+  return `<div class="gc-p">${head}${warn}${body}
+    <p class="note" style="margin:6px 0 0">Read-only mirror of the sales calendar.
+      Nothing here reaches a driver until it is created as a stop.</p></div>`;
+}
+
+function gcItem(e, today){
+  const title = woEsc(e.title || e.site);
+  const newTag = e.isNew ? '<span class="gc-tag new">NEW</span> ' : "";
+  const past = e.date < today;
+
+  if (e.status === "unmapped" || e.status === "unknown"){
+    return `<div class="gc-it dim"><div class="g"><b>${newTag}${title}</b>
+      <small>Not mapped to a machine — add it to GCalSiteAlias.</small></div>
+      <span class="gc-tag warn">unmapped</span></div>`;
+  }
+  if (e.status === "over"){
+    return `<div class="gc-it dim"><div class="g"><b>${newTag}${title}</b>
+      <small>Asks for ${e.qty} machines but only ${e.codes.length} are mapped.</small></div>
+      <span class="gc-tag warn">check alias</span></div>`;
+  }
+
+  const done = e.codes.every(c => gcHas(c, e.date));
+  const exact = e.status === "ok";
+  const picks = e.codes.map(c => {
+    const had = gcHas(c, e.date);
+    return `<label title="${woEsc(gcName(c))}">
+      <input type="checkbox" class="gc-pick" value="${woEsc(c)}"
+        ${(exact && !had) ? "checked" : ""} ${had ? "disabled" : ""}>
+      ${woEsc(gcName(c))}${had ? " ✓" : ""}</label>`;
+  }).join("");
+
+  const right = done
+    ? '<span class="gc-tag done">scheduled</span>'
+    : past
+      ? '<span class="gc-tag warn">past</span>'
+      : `<button class="btn sm" onclick="gcCreate(this)">Create</button>`;
+
+  /* qty < mapped machines means the calendar asked for a subset and the title
+     does not say which. Never guess — that is how a driver is sent to the
+     wrong machine. Leave the boxes clear and make someone choose. */
+  const hint = exact ? "" :
+    `<small>Calendar says ${e.qty} of ${e.codes.length} — tick which.</small>`;
+
+  return `<div class="gc-it" data-date="${e.date}" data-title="${woEsc(e.title || "")}">
+    <div class="g"><b>${newTag}${title}</b>${hint}
+      <div class="gc-pl">${picks}</div></div>${right}</div>`;
+}
+
+async function gcCreate(btn){
+  const it = btn.closest(".gc-it");
+  const date = it.dataset.date;
+  const codes = [...it.querySelectorAll("input.gc-pick:checked")].map(i => i.value);
+  if (!codes.length){ toast("Tick at least one machine."); return; }
+  btn.disabled = true;
+  let made = 0, skipped = 0, failed = 0;
+  for (const code of codes){
+    const r = await api("/api/wo/schedule/stops", {method:"POST", body:{
+      machine_code:   code,
+      scheduled_date: date,
+      repeat:         "none",
+      occurrences:    1,
+      note:           "From Google Calendar: " + (it.dataset.title || ""),
+    }});
+    if (!r){ failed++; continue; }
+    made    += (r.created || []).length;
+    skipped += (r.skipped || []).length;
+  }
+  btn.disabled = false;
+  toast(`${made} stop${made !== 1 ? "s" : ""} created`
+        + (skipped ? ` · ${skipped} already booked` : "")
+        + (failed  ? ` · ${failed} failed` : ""));
+  SC.stale = true; render();
+}
+
+
 async function ensureSchedule(){
   if (!SC.stale) return;
   SC.stale = false;                       // set BEFORE the await, or the render()
@@ -1663,6 +1835,7 @@ function renderSchedule(){
         ${SC.stops.length} scheduled stop${SC.stops.length !== 1 ? "s" : ""} in view${
         SC.sundays ? ` · ${SC.sundays} on a Sunday (not shown — dispatch handles those on the Plan board)` : ""}</span>
     </div>
+    ${renderGcalPane()}
     ${weeks.join("")}
     <button class="btn sm ghost" onclick="scMore()">Show 4 more weeks</button>
     <p class="note">Stops are created unassigned. Dispatch puts a driver's name on them on the Plan board.</p>`;
