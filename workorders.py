@@ -4281,10 +4281,20 @@ def api_delivery_assign(did):
     try:
         conn = get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s", (did,))
-        if not cursor.fetchone():
+        cursor.execute("SELECT Status FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s", (did,))
+        _r = cursor.fetchone()
+        if not _r:
             conn.close()
             return jsonify({"error": "Delivery order not found."}), 404
+        # A completed top-up must not be reassigned or re-dated. This route
+        # rewrites ScheduledDate below, so without the guard the board's
+        # auto-plan could stamp a finished delivery onto another day and the
+        # driver's signed Work Order would no longer match the day it was
+        # worked. Mirrors the identical guards already on
+        # /joborders/<id>/assign (StatusCode 2/3) and /movementorders/<id>/assign.
+        if (_r[0] or "").lower() == "completed":
+            conn.close()
+            return jsonify({"error": "This top-up is already completed; it cannot be reassigned."}), 400
         sets, params = ["AssignedTo = %s"], [assigned]
         if priority and priority in ("low", "normal", "high"):
             sets.append("Priority = %s"); params.append(priority)

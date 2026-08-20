@@ -376,6 +376,259 @@ def _fetch_work(cur, meta=None):
     return work
 
 
+# ── Completed stops for ONE board day ────────────────────────────────────────
+# Deliberately NOT part of /alpha/api/bootstrap. That payload is capped at
+# _DELIVERY_CAP rows and its ORDER BY sorts completed rows LAST, so on a fleet
+# carrying a quarter of materialised sales repeats the completed rows are the
+# first thing truncation throws away — the dispatcher would see a silent gap
+# where a finished stop should be. This endpoint is keyed on a single date, so
+# it is bounded by one day's work no matter how far ahead sales has keyed.
+#
+# It also keeps `work` (and therefore openWork(), BOARD_SITES, autoPlan and
+# assignSite on the client) completely unchanged: a completed stop can never
+# leak into an edit, a delete or a reassignment loop, because it never enters
+# the structures those functions read.
+
+def _has_table(cur, name):
+    try:
+        cur.execute("""SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+                       WHERE TABLE_NAME=%s""", (name,))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _iso_day(s):
+    try:
+        return datetime.strptime((s or "").strip(), "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def _accepted_joborders(cur, jids):
+    """Job orders whose manager review DECISION was 'accept'.
+
+    Returns a set, or None if the decision could not be determined.
+
+    StatusCode 3 alone is not enough: api_joborder_review closes the WO with
+    StatusCode = 3 "regardless of decision", so a REJECTED job carries the same
+    code as an accepted one. The decision exists only in WO_Activity.Detail,
+    which _log_activity writes as f"{decision}" (+ optional " - notes") from a
+    value already whitelisted to 'accept' / 'reject'.
+
+    On failure this returns None, NOT an empty set. An empty set would send
+    every accepted job down the else-branch and label it "REJECTED - may need
+    re-dispatch", i.e. a transient DB error would tell dispatch to re-send
+    drivers to sites the manager had signed off. Unknown must not read as bad.
+    """
+    if not jids:
+        return set()
+    try:
+        marks = ", ".join(["%s"] * len(jids))
+        cur.execute(f"""
+            SELECT DISTINCT ParentID FROM WO_Activity
+            WHERE ParentType = 'joborder' AND Action = 'manager_review'
+              AND ParentID IN ({marks})
+              AND LOWER(LEFT(CAST(Detail AS NVARCHAR(20)), 6)) = 'accept'
+        """, tuple(jids))
+        return {int(r[0]) for r in cur.fetchall()}
+    except Exception as e:
+        import sys
+        print("[alpha] review-decision lookup failed:", e, file=sys.stderr)
+        return None
+
+
+def _fetch_completed_day(cur, day):
+    """Stops finished on `day`, split into finalised (green) and submitted (amber).
+
+    finalised = nothing further is expected of anyone.
+    submitted = the work is done but a human still owes a decision, so dispatch
+                must keep the ability to re-send a driver.
+
+    Date rule: `ScheduledDate = day` OR (undated AND completed on `day` in SGT).
+    The board deliberately carries undated work (showCarry), and the ad-hoc
+    delivery order that api_visit_update mints when a driver records quantities
+    against an unplanned visit has no ScheduledDate at all. Matching only on
+    ScheduledDate would make exactly those stops vanish the moment they were
+    completed - reintroducing, for the commonest unplanned case, the hole this
+    endpoint exists to close. CompletedAt is UTC; +8h puts it on the SGT day.
+
+    Returns (rows, failed) - failed is True when any block errored, so the
+    caller can tell the client "partial" rather than let a swallowed exception
+    read as a quiet day.
+    """
+    out = []
+    failed = False
+    iso = day.isoformat()
+    has_visits = _has_table(cur, "WO_VisitSessions")
+    # Both placeholders take the same day: dated stops match ScheduledDate,
+    # undated ones match the SGT date they were completed on.
+    _when = ("(%s.ScheduledDate = %%s OR (%s.ScheduledDate IS NULL "
+             "AND CAST(DATEADD(hour, 8, %s.CompletedAt) AS DATE) = %%s))")
+
+    # -- Deliveries -----------------------------------------------------------
+    if _wo_has_scheduled(cur, "WO_DeliveryOrders"):
+        # MAX(CASE WHEN signed THEN VisitID END), not MAX(VisitID): a DO can
+        # carry a signed visit AND a later draft, and taking the plain MAX would
+        # hand the dispatcher a link to the draft (404 "PDF not yet generated").
+        # SignedVisit is therefore both the green test and the PDF target.
+        _vis = ("""LEFT JOIN (
+                     SELECT LinkedDeliveryOrderID AS do_id,
+                            COUNT(*) AS Visits,
+                            MAX(CASE WHEN Status = 'signed' THEN VisitID END) AS SignedVisit
+                     FROM WO_VisitSessions
+                     WHERE LinkedDeliveryOrderID IS NOT NULL
+                     GROUP BY LinkedDeliveryOrderID
+                   ) v ON v.do_id = d.DeliveryOrderID"""
+                if has_visits else "")
+        _cols = ("ISNULL(v.Visits,0) AS Visits, v.SignedVisit" if has_visits
+                 else "CAST(0 AS INT) AS Visits, CAST(NULL AS INT) AS SignedVisit")
+        try:
+            cur.execute(f"""
+                SELECT d.DeliveryOrderID, d.MachineName, d.MachineCode, d.AssignedTo,
+                       d.Notes, d.RecipientName, d.RouteSeq, {_cols}
+                FROM WO_DeliveryOrders d
+                {_vis}
+                WHERE d.Status = 'completed' AND {_when % ('d', 'd', 'd')}
+            """, (iso, iso))
+            for did, mname, mcode, asg, notes, recip, rseq, nvis, svid in cur.fetchall():
+                recip = (recip or "").strip()
+                if svid is not None:
+                    # Signed on site through the Work Order sheet.
+                    fin, why = True, (("Signed for by " + recip) if recip else "Signed on site")
+                elif int(nvis or 0) == 0 and recip:
+                    # No visit at all: completed from the main dashboard's
+                    # /deliveryorders/<id>/complete, which REFUSES to run
+                    # without a recipient name. That is a signature - painting
+                    # it amber would put most of the board in warning colour on
+                    # any fleet still using the legacy button.
+                    fin, why = True, f"Signed for by {recip} (completed in the main dashboard)"
+                elif int(nvis or 0) == 0:
+                    fin, why = False, "Completed with no signature on file"
+                else:
+                    fin, why = False, "Customer unavailable - signature still outstanding"
+                out.append({
+                    "id": f"DEL-{did}", "kind": "delivery", "rid": int(did),
+                    "type": "delivery",
+                    "machine": str(mcode) if mcode else "?", "machineName": mname,
+                    "desc": (notes or "")[:140],
+                    "assignedTo": asg, "scheduledDate": iso,
+                    "routeSeq": int(rseq) if rseq is not None else None,
+                    "state": "finalised" if fin else "submitted",
+                    "why": why,
+                    # Only ever the SIGNED visit. Labelling a draft or an
+                    # unsigned sheet "Open signed Work Order" is worse than
+                    # offering no link.
+                    "visitId": int(svid) if svid is not None else None,
+                })
+        except Exception as e:
+            import sys
+            print("[alpha] completed deliveries failed:", e, file=sys.stderr)
+            failed = True
+
+    # -- Job orders -----------------------------------------------------------
+    if _wo_has_scheduled(cur, "WO_JobOrders"):
+        try:
+            cur.execute(f"""
+                SELECT j.JobOrderID, j.DisplayID, j.MachineName, j.MachineCode, j.AssignedTo,
+                       j.StatusCode, j.Diagnosis, j.RouteSeq
+                FROM WO_JobOrders j
+                WHERE j.StatusCode IN (2, 3) AND {_when % ('j', 'j', 'j')}
+            """, (iso, iso))
+            rows = cur.fetchall()
+            closed = [int(r[0]) for r in rows if int(r[5] or 0) == 3]
+            ok = _accepted_joborders(cur, closed)
+            if ok is None:
+                failed = True
+            for jid, disp, mname, mcode, asg, sc, diag, rseq in rows:
+                jid = int(jid)
+                if int(sc or 0) == 2:
+                    fin, why = False, "Submitted - awaiting manager review"
+                elif ok is None:
+                    # Decision unknown. Fail GREEN: the work IS closed, and the
+                    # only thing in doubt is whether the manager accepted it.
+                    fin, why = True, "Closed by the manager"
+                elif jid in ok:
+                    fin, why = True, "Reviewed and accepted"
+                else:
+                    fin, why = False, "Closed as REJECTED - may need re-dispatch"
+                out.append({
+                    "id": disp or f"JOB-{jid}", "kind": "joborder", "rid": jid,
+                    "type": "service",
+                    "machine": str(mcode) if mcode else "?", "machineName": mname,
+                    "desc": (diag or "")[:140],
+                    "assignedTo": asg, "scheduledDate": iso,
+                    "routeSeq": int(rseq) if rseq is not None else None,
+                    "state": "finalised" if fin else "submitted",
+                    "why": why, "visitId": None,
+                })
+        except Exception as e:
+            import sys
+            print("[alpha] completed job orders failed:", e, file=sys.stderr)
+            failed = True
+
+    # -- Movements ------------------------------------------------------------
+    if _wo_has_scheduled(cur, "WO_MovementOrders"):
+        try:
+            cur.execute(f"""
+                SELECT m.MovementOrderID, m.DisplayID, m.MovementType, m.MachineCode,
+                       m.FromLocation, m.ToLocation, m.AssignedTo, m.RouteSeq
+                FROM WO_MovementOrders m
+                WHERE m.StatusCode = 2 AND {_when % ('m', 'm', 'm')}
+            """, (iso, iso))
+            for mid, disp, mtype, mcode, frm, to, asg, rseq in cur.fetchall():
+                desc = (mtype or "move").title()
+                if frm or to:
+                    desc += f": {frm or '?'} -> {to or '?'}"
+                out.append({
+                    "id": disp or f"MOV-{mid}", "kind": "movement", "rid": int(mid),
+                    "type": "movement",
+                    "machine": str(mcode) if mcode else "?", "machineName": None,
+                    "desc": desc[:140],
+                    "assignedTo": asg, "scheduledDate": iso,
+                    "routeSeq": int(rseq) if rseq is not None else None,
+                    "state": "finalised", "why": "Move completed", "visitId": None,
+                })
+        except Exception as e:
+            import sys
+            print("[alpha] completed movements failed:", e, file=sys.stderr)
+            failed = True
+
+    return out, failed
+
+
+@alpha_bp.route("/alpha/api/board/completed")
+def alpha_board_completed():
+    blocked = _gate()
+    if blocked is not None:
+        return blocked
+    day = _iso_day(request.args.get("date"))
+    if day is None:
+        return jsonify({"error": "date must be YYYY-MM-DD."}), 400
+    conn = None
+    try:
+        conn = _conn()
+        cur = conn.cursor()
+        stops, failed = _fetch_completed_day(cur, day)
+        # NB: "partial", not "error". The client's api() helper treats ANY
+        # payload carrying `.error` as a hard failure — it returns null and
+        # toasts the value — so an `error` key here would both discard the rows
+        # that DID load and pop a bare word at the dispatcher.
+        return jsonify({"date": day.isoformat(), "stops": stops, "partial": bool(failed)})
+    except Exception as e:
+        import sys
+        print("[alpha] completed-day DB error:", e, file=sys.stderr)
+        # A soft failure must not blank the board: the client keeps rendering
+        # open work and says plainly that the green block is missing.
+        return jsonify({"date": day.isoformat(), "stops": [], "partial": True})
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 @alpha_bp.route("/alpha")
 def alpha_index():
     blocked = _gate()

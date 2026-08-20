@@ -215,6 +215,28 @@
   .stp .ed{background:none;border:none;color:#94a3b8;cursor:pointer;font-size:.95rem;line-height:1;padding:0 2px}
   .stp .ed:hover{color:var(--blue)}
   .stp.carry{border-style:dashed;border-color:var(--amber-br);background:#fffbeb}
+  /* Completed stops. Compound selectors (.stp.is-*), never a bare .done — the
+     existing `.tag.done` rule already paints the DONE chip and the fleet
+     table's "decommissioned" badge, and a bare rule would repaint both. */
+  .stp.is-done{border-color:var(--ok);background:var(--green-bg)}
+  .stp.is-done .b b{color:#14532d}
+  .stp.is-sub{border-color:var(--warn);background:var(--amber-bg)}
+  .stp.is-sub .b b{color:#78350f}
+  .stp.is-done .n,.stp.is-sub .n{color:#15803d;font-size:.8rem}
+  .stp.is-sub .n{color:#b45309}
+  /* Chips for the completed block. NOT `.tag.done` — its background is
+     #dcfce7, identical to .stp.is-done's, so a COMPLETED chip would be
+     invisible on its own row, and a green chip reading "ACTION OUTSTANDING"
+     on an amber row says the opposite of what it means. */
+  .tag.cdone{background:#15803d;color:#fff}
+  .tag.cpend{background:#b45309;color:#fff}
+  .stp .why{display:block;font-size:.66rem;margin-top:2px;font-weight:600}
+  .stp.is-done .why{color:#15803d}
+  .stp.is-sub .why{color:#b45309}
+  .stp .wolink{font-size:.66rem;color:var(--blue);text-decoration:none;font-weight:700}
+  .stp .wolink:hover{text-decoration:underline}
+  .bd-done-h{font-size:.6rem;font-weight:800;letter-spacing:.06em;color:var(--mut);
+             text-transform:uppercase;margin:8px 0 4px;padding-top:6px;border-top:1px dashed var(--line)}
   .stp-ed{margin-top:6px;padding-top:6px;border-top:1px solid var(--line)}
   .stp-ed textarea{min-height:38px;font-size:.74rem;padding:4px 7px;margin-bottom:4px}
   .stp-ed .nl{font-size:.6rem;font-weight:800;letter-spacing:.06em;color:var(--mut);margin:2px 0 2px;
@@ -623,6 +645,9 @@ async function reload(){
      still unassigned. Mark both stale; the next render refetches whichever the
      user is actually looking at. */
   SC.stale=true; RAIL.stale=true;
+  /* Completing a stop is one of the things that calls reload(), and the green
+     block lives outside this payload — drop it so the next render refetches. */
+  doneInvalidate();
   setBanner(d.health); render();
 }
 const kb=[{id:"KB-12",sym:"No dispense after coin",root:"Jammed dispense motor",fix:"Clear jam, cycle motor, test 3 vends"},
@@ -714,7 +739,7 @@ function showEmbed(key){
      including back into Live status itself (fhLoad restarts it). Leave it
      running and it writes into a #fhGrid that render() already destroyed, once
      every two minutes, forever. */
-  fhStop();
+  fhStop(); pbStop();
   const cfg=key&&EMBEDS[key];
   if(!cfg){host.classList.remove("on");return;}
   const el=document.getElementById(cfg.el);
@@ -740,7 +765,13 @@ function render(){pendingEmbed=null;buildTabs();const m=$("#main");
      than bootstrap's work[] — that list is capped and unbounded in date, so a
      quarter of keyed schedule would push the far weeks out of it silently. */
   if(state.area==="schedule"){ ensureSchedule(); ensureGcal(); }
-  if(state.area==="plan")     ensureRail();
+  /* Only the Day board shows completed stops — Route planner and Log a top-up
+     are embedded legacy panes that never read them, so fetching there is a
+     wasted round trip on every visit. */
+  if(state.area==="plan"){
+    ensureRail();
+    if(subActive("plan","board")==="board"){ ensureDoneStops(); pbStart(); }
+  }
   /* showEmbed() above stopped the Live status poller. Restart it here — after
      the screen exists — and only when Live status is what is on screen. */
   if(fleetCur()==="status") fhStart();
@@ -1560,6 +1591,75 @@ let boardDate = sgtToday();
 let showCarry = true;          // include open work with no scheduled date
 let BOARD_SITES = [];
 
+/* ── Completed stops for the board's day ───────────────────────────────────
+   Kept in its OWN state, fetched from its own date-keyed endpoint, and never
+   merged into work[] / openWork() / BOARD_SITES. That separation is the whole
+   safety argument for this feature:
+
+     · openWork(), the KPIs, the unassigned list, autoPlan() and assignSite()
+       are untouched, so a completed stop can never reach an edit, a delete or
+       a reassignment loop — not because a filter catches it, but because it is
+       not in the structure those functions read.
+     · bootstrap's work[] is capped at 900 delivery rows and sorts completed
+       rows LAST, so on a fleet carrying a quarter of materialised sales
+       repeats the completed rows are the first casualties of truncation. A
+       date-keyed query is bounded by one day and cannot be starved.
+
+   Two states come back. `finalised` (green) means nobody owes anything else.
+   `submitted` (amber) means the work is done but a human still owes a
+   decision — pending manager review, a rejected job, or a delivery completed
+   with the customer unavailable to sign. Amber must stay legible as "you may
+   still need to send someone", which is exactly what a green lock would hide. */
+let DONE = {date: null, stops: [], loading: false, failed: false, gen: 0};
+const doneStops = () => (DONE.date === boardDate ? DONE.stops : []);
+async function ensureDoneStops(){
+  if (DONE.loading || DONE.date === boardDate) return;
+  DONE.loading = true;
+  /* Stamp the date AND the generation we asked at. The date alone is not
+     enough: doneInvalidate() can fire while a request is in flight (the
+     dispatcher clicks Assign, reload() runs), and ensureDoneStops() early-
+     returns on DONE.loading, so the stale response would land afterwards,
+     still match boardDate, and quietly overwrite the invalidation with
+     pre-action data. The counter makes that response identifiable as stale. */
+  const asked = boardDate, gen = DONE.gen;
+  const d = await api(`/alpha/api/board/completed?date=${encodeURIComponent(asked)}`);
+  DONE.loading = false;
+  if (boardDate !== asked || gen !== DONE.gen) { ensureDoneStops(); return; }
+  DONE.date = asked;
+  DONE.stops = (d && d.stops) || [];
+  DONE.failed = !d || !!(d && d.partial);
+  render();
+}
+const doneInvalidate = () => { DONE.date = null; DONE.stops = []; DONE.failed = false; DONE.gen++; };
+
+/* The dispatcher's board is otherwise a snapshot from page load: stops are
+   completed on the DRIVERS' devices, and nothing on Plan polls. Without this a
+   stop never turns green until the dispatcher happens to click something.
+   Cheap by construction — the completed endpoint is bounded by one day. A full
+   reload() (which re-runs the multi-second vends scan) is triggered only when
+   the poll actually finds a stop that was not there before, so open work and
+   the green block cannot disagree for more than one interval. */
+let PB = {timer: null, seen: null};
+function pbStart(){ pbStop(); PB.timer = setInterval(pbPoll, 90000); }
+function pbStop(){ if (PB.timer){ clearInterval(PB.timer); PB.timer = null; } }
+async function pbPoll(){
+  if (state.area !== "plan" || DONE.loading) return;
+  const asked = boardDate, gen = DONE.gen;
+  const d = await api(`/alpha/api/board/completed?date=${encodeURIComponent(asked)}`);
+  if (!d || boardDate !== asked || gen !== DONE.gen) return;
+  const rows = d.stops || [];
+  const key = r => `${r.kind}:${r.rid}:${r.state}`;
+  const now = rows.map(key).sort().join("|");
+  DONE.date = asked; DONE.stops = rows; DONE.failed = !!d.partial;
+  const changed = PB.seen !== null && PB.seen !== now;
+  /* Record BEFORE the reload. Setting it afterwards would leave the old
+     signature in place, so the next tick would compare against it, see a
+     difference again, and reload forever every 90 seconds. */
+  PB.seen = now;
+  if (changed) { await reload(); return; }   // reload() re-renders and refetches
+  render();
+}
+
 /* A stop = one machine, one driver, one day. The underlying rows are the
    delivery order and/or job order that already exist. */
 function stopsOnBoard(){
@@ -2057,7 +2157,22 @@ function renderPlanBoard(){
       laterUn ? ` <span class="sub" style="font-weight:600;color:var(--mut);font-size:.75rem">· ${laterUn} more scheduled after this day (see Schedule)</span>` : ""}</h3>
     ${un.length ? `<div class="rows">${un.map(triageRow).join("")}</div>`
                 : '<p class="empty">Nothing unassigned.</p>'}
-    <p class="note">Live — every action writes through the same work-order API the main dashboard uses.</p>
+    ${(() => {
+      /* A completed stop with no AssignedTo sits on nobody's card. It is rare
+         (a manager completing a delivery that was never dispatched) but it is
+         work that happened, and silently dropping it is how a board earns
+         distrust. Named here rather than invented onto some driver's card. */
+      const orphan = doneStops().filter(w => !w.assignedTo);
+      const oNote = orphan.length ? `<div class="legacy-note" style="margin-top:12px">
+        <b>${orphan.length} completed item(s) were never assigned to a driver</b>
+        and so appear on no card: ${orphan.map(w => woEsc(w.id)).join(", ")}.</div>` : "";
+      const fNote = DONE.failed ? `<div class="legacy-note" style="margin-top:12px">
+        <b>Completed stops could not be loaded</b> — the board is showing open work only,
+        so a finished stop will look missing rather than green. Reload the page; if it
+        persists, tell a manager.</div>` : "";
+      return oNote + fNote; })()}
+    <p class="note">Live — every action writes through the same work-order API the main dashboard uses.
+      Completed stops are shown for reference and cannot be edited, removed or reassigned.</p>
     </div>${renderRail()}</div>`;
 }
 
@@ -2096,6 +2211,48 @@ function driverCard(email){
       <button class="ed" title="Edit this stop" onclick="editStop(this)">✎</button></div>`;
   }).join("");
 
+  /* Completed stops, grouped by machine, rendered BELOW the open ones and
+     numbered with a glyph rather than a position. The open stops keep 1..n:
+     inserting completed rows into that sequence would renumber a driver's
+     remaining work, and "you're on stop 4" over the phone would then point at
+     something already finished. No ✎ button is emitted, which is also the only
+     route to removeStop() — so these rows carry no edit and no delete path.
+     The server refuses them independently; see api_delivery_assign and the
+     Status/StatusCode guards on /api/wo/stops/*. */
+  const dmine = doneStops().filter(w => (w.assignedTo || "").toLowerCase() === lc);
+  const dby = {};
+  dmine.forEach(w => {
+    const k = w.machine || "?";
+    (dby[k] = dby[k] || {code: k, name: null, items: []}).items.push(w);
+    if (!dby[k].name) { const m = mByCode(k); dby[k].name = m ? m.name : (w.machineName || k); }
+  });
+  const dsites = Object.values(dby);
+  const doneRows = dsites.map(s => {
+    /* Green only when NOTHING at this machine is still awaiting a human
+       decision. A site holding an accepted job order AND a delivery nobody
+       signed for is amber — the weaker of the two, never the flattering one. */
+    const fin = s.items.every(w => w.state === "finalised");
+    const kinds = s.items.map(w => `<span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>`).join("");
+    const why = [...new Set(s.items.map(w => w.why).filter(Boolean))].join(" · ");
+    const note = s.items.map(w => w.desc).filter(Boolean)[0];
+    /* Only the SIGNED visit carries a link. The server sends visitId only for
+       a visit whose status is 'signed', so an unsigned or draft sheet can
+       never be offered under a label that claims it was signed. */
+    const vid = (s.items.find(w => w.visitId) || {}).visitId;
+    return `<div class="stp ${fin ? "is-done" : "is-sub"}" data-code="${woEsc(s.code)}">
+      <span class="n">${fin ? "✓" : "!"}</span>
+      <span class="b"><b>${woEsc(s.name || s.code)}</b><span class="k">${kinds}
+        <span class="tag ${fin ? "cdone" : "cpend"}">${fin ? "COMPLETED" : "ACTION OUTSTANDING"}</span></span>
+        ${note ? `<small>${woEsc(note)}</small>` : ""}
+        <span class="why">${woEsc(why)}</span>
+        ${vid ? `<a class="wolink" href="/api/wo/visits/${vid}/pdf" target="_blank" rel="noopener">Open signed Work Order ↗</a>` : ""}
+      </span></div>`;
+  }).join("");
+  const doneBlock = dsites.length
+    ? `<div class="bd-done-h">Completed ${woEsc(dLabel(boardDate))} · ${
+        dsites.length} site${dsites.length !== 1 ? "s" : ""}</div>${doneRows}`
+    : "";
+
   // The composer is on EVERY card. "Off roster" only means Graph did not list
   // this person under the Operator app role — it never meant stops cannot be
   // scheduled for them, and when the roster fails to load entirely every card
@@ -2111,8 +2268,11 @@ function driverCard(email){
   return `<div class="bd-c" data-email="${woEsc(email)}">
     <div class="bd-h"><span class="who"><b>${woEsc(driverName(email))}</b>${
       driverName(email) === email ? "" : `<span class="em">${woEsc(email)}</span>`}</span>
-      <span class="pill">${mine.length} stop${mine.length !== 1 ? "s" : ""}</span></div>
-    ${composer}${stops || '<p class="note" style="margin:2px 0 0;font-size:.72rem">No stops yet.</p>'}</div>`;
+      <span class="pill">${mine.length} stop${mine.length !== 1 ? "s" : ""}${
+        dsites.length ? ` · ${dsites.length} done` : ""}</span></div>
+    ${composer}${stops || (dsites.length
+        ? '<p class="note" style="margin:2px 0 0;font-size:.72rem">Nothing left open.</p>'
+        : '<p class="note" style="margin:2px 0 0;font-size:.72rem">No stops yet.</p>')}${doneBlock}</div>`;
 }
 
 /* Who the board can schedule for when Graph is unavailable: whoever already
@@ -2121,6 +2281,13 @@ let adhocDrivers = [];
 const boardPeople = () => [...new Set([
   ...drivers.map(d => d.toLowerCase()),
   ...openWork().map(w => (w.assignedTo || "").toLowerCase()).filter(Boolean),
+  /* A driver who FINISHED everything holds no open work, so without this line
+     he drops out of `people`, driverCard() is never called for him, and the
+     green stops he just completed render nowhere — the exact failure this
+     feature exists to prevent. It bites hardest when the Graph roster is
+     unavailable (see rosterProblem()), because then `drivers` is empty and
+     open work is the only thing putting a card on the board. */
+  ...doneStops().map(w => (w.assignedTo || "").toLowerCase()).filter(Boolean),
   ...adhocDrivers,
 ])].filter(Boolean);
 function addAdhocDriver(id){
