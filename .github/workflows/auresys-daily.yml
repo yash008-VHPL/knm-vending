@@ -52,8 +52,8 @@ jobs:
           NETS_CARD_PEPPER:  ${{ secrets.NETS_CARD_PEPPER }}
           DB_SERVER:         machineserver.database.windows.net
           DB_NAME:           "Machine DispensedDrink"
-          NETS_DB_USER:      ${{ secrets.NETS_DB_USER }}
-          NETS_DB_PASSWORD:  ${{ secrets.NETS_DB_PASSWORD }}
+          NETS_DB_USER:      ${{ secrets.NETS_DB_USER || secrets.DB_USER }}
+          NETS_DB_PASSWORD:  ${{ secrets.NETS_DB_PASSWORD || secrets.DB_PASSWORD }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           HEARTBEAT_URL:     ${{ secrets.HEARTBEAT_URL }}
         run: |
