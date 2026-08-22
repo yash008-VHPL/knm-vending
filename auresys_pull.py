@@ -289,10 +289,12 @@ def load(conn, rows, window, args):
     cur.execute("INSERT INTO dbo.NETS_Pull_Run "
                 "(Run_Id, Window_From, Window_To, Source_File, Csv_Line_Count, "
                 " Rows_Parsed, Header_Signature, Status) "
-                "OUTPUT INSERTED.Run_Seq "
+                "OUTPUT INSERTED.Run_Id, INSERTED.Run_Seq "
                 "VALUES (NEWID(), %s, %s, 'api:getTransaction', %s, %s, %s, 'RUNNING')",
                 (window[0], window[-1], len(rows), len(rows), "|".join(COLUMNS)))
-    run_seq = cur.fetchone()[0]
+    # NETS_Load_Audit still keys on the GUID; NETS_Transaction uses the compact
+    # Run_Seq. Both come from the same row, so carry both.
+    run_id, run_seq = cur.fetchone()
 
     try:
         counts, unmapped = Counter(), set()
@@ -337,7 +339,7 @@ def load(conn, rows, window, args):
                 note = None
 
             if action == "SKIPPED_SHRINK":
-                cur.execute(SQL_AUDIT, (None, term, date, before, staged, 0, 0,
+                cur.execute(SQL_AUDIT, (run_id, term, date, before, staged, 0, 0,
                                         sum_before, sum_before, action, note))
                 log("  SHRINK  %s %s stored=%d staged=%d SKIPPED" % (term, date, before, staged))
                 counts[action] += 1
@@ -358,7 +360,7 @@ def load(conn, rows, window, args):
                          r["amount"], r["card_hash"],
                          PEPPER_VER if r["card_hash"] else None, run_seq)
                         for r in prows])
-                cur.execute(SQL_AUDIT, (None, term, date, before, staged, deleted,
+                cur.execute(SQL_AUDIT, (run_id, term, date, before, staged, deleted,
                                         len(prows), sum_before, sum_staged, action, note))
                 cur.execute("COMMIT TRANSACTION")
             except Exception:
