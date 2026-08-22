@@ -60,9 +60,16 @@ PEPPER_VER = 1
 ZERO = decimal.Decimal("0.00")
 SGT = dt.timezone(dt.timedelta(hours=8))
 
-# Auresys status text -> stored code. Anything unrecognised aborts rather than
-# being silently bucketed, because a mis-bucketed status corrupts the count.
+# Auresys status text -> stored code. The API localises this string by session
+# locale and defaults to Chinese for a non-browser client, so both are mapped.
+# Anything unrecognised aborts rather than being silently bucketed, because a
+# mis-bucketed status corrupts the dispense count.
 STATUS_SUCCESS, STATUS_STLM, STATUS_FAIL = 0, 1, 2
+STATUS_MAP = {
+    "success": STATUS_SUCCESS, "\u6210\u529f": STATUS_SUCCESS,
+    "stlm": STATUS_STLM, "\u7d50\u7b97": STATUS_STLM, "\u7ed3\u7b97": STATUS_STLM,
+}
+FAIL_PREFIXES = ("fail", "\u5931\u6557", "\u5931\u8d25")
 
 
 class Abort(Exception):
@@ -76,14 +83,16 @@ def log(m):
 
 
 def status_code(raw):
+    """Returns the stored code, or None if the value is not recognised. The
+    caller collects every unknown value and reports them together - failing one
+    at a time turns a five-minute fix into five round trips."""
     s = (raw or "").strip()
-    if s == "Success":
-        return STATUS_SUCCESS
-    if s == "STLM":
-        return STATUS_STLM
-    if s.startswith("Fail"):
+    key = s.lower()
+    if key in STATUS_MAP:
+        return STATUS_MAP[key]
+    if key.startswith(FAIL_PREFIXES):
         return STATUS_FAIL
-    raise Abort("ABORTED_PARSE", "unrecognised Status %r - refusing to guess" % raw)
+    return None
 
 
 def card_hash(raw, pepper):
@@ -191,13 +200,18 @@ def fetch_day(session, token, terminals, day):
 
 
 def parse_rows(raw_rows, pepper, day):
-    out = []
+    out, unknown = [], {}
     for r in raw_rows:
         for k in ("vmsID", "time", "dispenseStatus", "amount"):
             if k not in r:
                 raise Abort("ABORTED_PARSE",
                             "API row is missing %r - the response shape changed. "
                             "Run with --probe. Row keys: %s" % (k, sorted(r)))
+        code = status_code(r["dispenseStatus"])
+        if code is None:
+            unknown.setdefault(str(r["dispenseStatus"]).strip(), 0)
+            unknown[str(r["dispenseStatus"]).strip()] += 1
+            continue
         ts = dt.datetime.strptime(str(r["time"]).strip(), "%Y-%m-%d %H:%M:%S")
         amt = decimal.Decimal(str(r["amount"])).quantize(ZERO)
         if not amt.is_finite():
@@ -211,11 +225,15 @@ def parse_rows(raw_rows, pepper, day):
             "outlet": (r.get("outletName") or "").strip(),
             "ts": ts,
             "date": ts.date(),
-            "status": status_code(r["dispenseStatus"]),
+            "status": code,
             "scheme": (r.get("paymentType") or "").strip()[:20],
             "amount": amt,
             "card_hash": card_hash(r.get("cardNo"), pepper),
         })
+    if unknown:
+        raise Abort("ABORTED_PARSE",
+                    "unrecognised Status values - refusing to guess. Send Claude this "
+                    "whole line: %s" % sorted(unknown.items(), key=lambda kv: -kv[1]))
     return out
 
 
@@ -417,6 +435,11 @@ def main():
 
     session = requests.Session()
     session.headers["User-Agent"] = "knm-auresys-pull/1.0"
+    # The API localises status text by session locale and falls back to Chinese
+    # for a non-browser client - the portal only looks English because a browser
+    # sends a language header and sets a locale cookie. Do both.
+    session.headers["Accept-Language"] = "en-US,en;q=0.9"
+    session.cookies.set("locale", "en", domain="autwp.auresys.solutions")
     try:
         login(session, user, pw)
         token, terminals = open_report_page(session)
