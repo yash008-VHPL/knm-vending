@@ -240,9 +240,16 @@ def parse_rows(raw_rows, pepper, day):
 # --------------------------------------------------------------------------- #
 # database
 # --------------------------------------------------------------------------- #
-SQL_STORED = ("SELECT COUNT(*), ISNULL(SUM(Amount),0) FROM dbo.NETS_Transaction "
-              "WHERE NETS_Terminal_No = %s AND Txn_Date = %s")
-SQL_DELETE = "DELETE FROM dbo.NETS_Transaction WHERE NETS_Terminal_No = %s AND Txn_Date = %s"
+# One scan for the whole window instead of a COUNT per machine-day. At 73
+# terminals x 10 days that is 1 round trip instead of 730.
+SQL_SCAN = ("SELECT NETS_Terminal_No, Txn_Date, COUNT(*), ISNULL(SUM(Amount),0) "
+            "FROM dbo.NETS_Transaction WHERE Txn_Date BETWEEN %s AND %s "
+            "GROUP BY NETS_Terminal_No, Txn_Date")
+# pymssql has no bulk insert and its executemany loops singleton INSERTs, so
+# rows are batched into multi-row VALUES. SQL Server caps a statement at 2100
+# parameters; at 10 columns that is 210 rows, so 180 leaves headroom.
+INSERT_CHUNK = 180
+AUDIT_CHUNK = 150
 SQL_INSERT = ("INSERT INTO dbo.NETS_Transaction "
               "(NETS_Terminal_No, Machine_Code, Location_Name, Txn_DateTime, "
               " Txn_Status_Code, Scheme, Amount, Card_Hash, Card_Hash_Ver, Load_Batch_Ref) "
@@ -297,7 +304,14 @@ def load(conn, rows, window, args):
     run_id, run_seq = cur.fetchone()
 
     try:
-        counts, unmapped = Counter(), set()
+        # ---- one scan of the window, not one query per partition ----
+        cur.execute(SQL_SCAN, (window[0], window[-1]))
+        stored = {}
+        for term, d, cnt, amt in cur.fetchall():
+            if hasattr(d, "date"):
+                d = d.date()
+            stored[(term, d)] = (int(cnt), decimal.Decimal(str(amt)).quantize(ZERO))
+
         parts = {}
         for r in rows:
             parts.setdefault((r["terminal"], r["date"]), []).append(r)
@@ -309,11 +323,11 @@ def load(conn, rows, window, args):
 
         today = dt.datetime.now(SGT).date()
         alive = {r["terminal"] for r in rows}
+        counts, unmapped, audits = Counter(), set(), []
+        to_delete, to_insert = {}, {}     # keyed by date
 
         for (term, date), prows in sorted(parts.items()):
-            cur.execute(SQL_STORED, (term, date))
-            before, sum_before = cur.fetchone()
-            sum_before = decimal.Decimal(str(sum_before or 0)).quantize(ZERO)
+            before, sum_before = stored.get((term, date), (0, ZERO))
             staged = len(prows)
             sum_staged = sum((r["amount"] for r in prows), ZERO)
 
@@ -339,8 +353,8 @@ def load(conn, rows, window, args):
                 note = None
 
             if action == "SKIPPED_SHRINK":
-                cur.execute(SQL_AUDIT, (run_id, term, date, before, staged, 0, 0,
-                                        sum_before, sum_before, action, note))
+                audits.append((run_id, term, date, before, staged, 0, 0,
+                               sum_before, sum_before, action, note))
                 log("  SHRINK  %s %s stored=%d staged=%d SKIPPED" % (term, date, before, staged))
                 counts[action] += 1
                 continue
@@ -350,23 +364,54 @@ def load(conn, rows, window, args):
                 unmapped.add(term)
                 note = ((note + "; ") if note else "") + "terminal not in nets_mapping"
 
+            to_delete.setdefault(date, []).append(term)
+            if prows:
+                to_insert.setdefault(date, []).extend(
+                    (term, code, r["outlet"], r["ts"], r["status"], r["scheme"],
+                     r["amount"], r["card_hash"],
+                     PEPPER_VER if r["card_hash"] else None, run_seq) for r in prows)
+            # Rows_Deleted is the pre-scan count, which is exactly what the
+            # delete removes - a batched delete cannot report it per partition.
+            audits.append((run_id, term, date, before, staged, before,
+                           len(prows), sum_before, sum_staged, action, note))
+            counts[action] += 1
+
+        # ---- write, one transaction per date ----
+        for date in sorted(set(to_delete) | set(to_insert)):
+            terms = to_delete.get(date, [])
+            vals = to_insert.get(date, [])
             cur.execute("BEGIN TRANSACTION")
             try:
-                cur.execute(SQL_DELETE, (term, date))
-                deleted = cur.rowcount
-                if prows:
-                    cur.executemany(SQL_INSERT, [
-                        (term, code, r["outlet"], r["ts"], r["status"], r["scheme"],
-                         r["amount"], r["card_hash"],
-                         PEPPER_VER if r["card_hash"] else None, run_seq)
-                        for r in prows])
-                cur.execute(SQL_AUDIT, (run_id, term, date, before, staged, deleted,
-                                        len(prows), sum_before, sum_staged, action, note))
+                for i in range(0, len(terms), 500):
+                    chunk = terms[i:i + 500]
+                    cur.execute(
+                        "DELETE FROM dbo.NETS_Transaction WHERE Txn_Date = %s "
+                        "AND NETS_Terminal_No IN (" + ",".join(["%s"] * len(chunk)) + ")",
+                        tuple([date] + chunk))
+                for i in range(0, len(vals), INSERT_CHUNK):
+                    chunk = vals[i:i + INSERT_CHUNK]
+                    cur.execute(
+                        "INSERT INTO dbo.NETS_Transaction "
+                        "(NETS_Terminal_No, Machine_Code, Location_Name, Txn_DateTime, "
+                        " Txn_Status_Code, Scheme, Amount, Card_Hash, Card_Hash_Ver, "
+                        " Load_Batch_Ref) VALUES "
+                        + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(chunk)),
+                        tuple(v for row in chunk for v in row))
                 cur.execute("COMMIT TRANSACTION")
             except Exception:
                 cur.execute("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION")
                 raise
-            counts[action] += 1
+            log("  %s  %d terminals, %d rows" % (date, len(terms), len(vals)))
+
+        for i in range(0, len(audits), AUDIT_CHUNK):
+            chunk = audits[i:i + AUDIT_CHUNK]
+            cur.execute(
+                "INSERT INTO dbo.NETS_Load_Audit "
+                "(Load_Batch_Id, NETS_Terminal_No, Txn_Date, Rows_Before, Rows_Staged, "
+                " Rows_Deleted, Rows_Inserted, Sum_Amount_Before, Sum_Amount_After, "
+                " Load_Action, Note) VALUES "
+                + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(chunk)),
+                tuple(v for row in chunk for v in row))
 
         seen = {}
         for r in rows:
