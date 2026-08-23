@@ -428,7 +428,11 @@
   .fx-act{display:flex;gap:7px;justify-content:flex-end;flex-wrap:wrap;margin-top:8px}
   .fx-log{font-size:.76rem;color:#374151}
   .fx-log div{padding:4px 0;border-bottom:1px solid #f3f4f6}
-  nav.tabs button.oldapp{margin-left:auto;color:#7c3aed;font-weight:700}
+  /* Both right-hand controls sit in one group. margin-left:auto on the BUTTONS
+     put it on each of them, so the flex row spread them apart instead of
+     pairing them; it belongs on the group. */
+  nav.tabs .navright{margin-left:auto;display:flex;gap:4px;align-items:center}
+  nav.tabs button.oldapp{color:#7c3aed;font-weight:700}
   /* Inner section toggle inside a sub-tab (Event log, Refill status). Visually
      lighter than .subnav so the hierarchy reads sub-tab > section. */
   .subnav.secnav{margin:-4px 0 12px}
@@ -707,16 +711,18 @@ function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
      be handed a 403. New tab on purpose: it boots its own script and its own
      stylesheet, so navigating there in-place and back would re-run this app's
      boot() and lose the board's day and filters. */
+  const right=document.createElement("span");right.className="navright";
   if(MYROLES.includes("admin")){
-    const old=document.createElement("button");old.textContent="Archive (2608)";old.className="oldapp";
-    old.title="The previous dashboard, archived 2026-08-23 (read/write, same database)";
-    old.onclick=()=>window.open("/archive2608","_blank","noopener");nav.appendChild(old);}
+    const old=document.createElement("button");old.textContent="Old App";old.className="oldapp";
+    old.title="The previous dashboard, archived 2026-08-23 at /archive2608 (read/write, same database)";
+    old.onclick=()=>window.open("/archive2608","_blank","noopener");right.appendChild(old);}
   /* The archived dashboard carried the only Sign out control in the app. This
      is production now and it runs on shared driver tablets, so it needs its
      own. */
   const so=document.createElement("button");so.textContent="Sign out";so.className="oldapp";
   so.title="Sign out of this device";
-  so.onclick=()=>{location.href="/.auth/logout?post_logout_redirect_uri=/signed-out";};nav.appendChild(so);}
+  so.onclick=()=>{location.href="/.auth/logout?post_logout_redirect_uri=/signed-out";};right.appendChild(so);
+  nav.appendChild(right);}
 
 /* ── Embedded legacy screens ──────────────────────────────────────────────────
    key = "<area>:<sub>". el = the pane id inside #embhost. init = the one-shot
