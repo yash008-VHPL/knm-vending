@@ -1,6 +1,11 @@
 """
-Alpha app — streamlined UI mounted at /alpha (LIVE ACTIONS)
-===========================================================
+KNM ops app — streamlined UI, PRODUCTION at "/" (LIVE ACTIONS)
+==============================================================
+2026-08-23 cutover: this blueprint serves "/". It stays mounted at /alpha too
+(same view, not a redirect) so next-phase beta work keeps that path and any
+bookmark or Easy Auth return URL still lands somewhere real. The previous
+dashboard is archived, admin-only, at /archive2608.
+
 Serves the 5-area streamlined UI using REAL data from the SAME database the live
 app already reads. Mounted as a Flask Blueprint inside the existing app so it
 reuses the app's DB connectivity and Easy Auth — no new web app, no new
@@ -18,8 +23,9 @@ workorders.py endpoints.
     try/except as an extra guard.
   * Behind the app's existing Easy Auth (AAD) like every other route.
 
-Routes:  GET /alpha                -> the streamlined UI
+Routes:  GET /  and  GET /alpha    -> the streamlined UI
           GET /alpha/api/bootstrap  -> {health, machines, work, user}
+          GET /alpha/api/board/completed?date=YYYY-MM-DD
 """
 
 import base64
@@ -27,6 +33,8 @@ import json as _json
 from datetime import datetime, timedelta
 
 import pymssql
+from urllib.parse import quote
+
 from flask import Blueprint, jsonify, redirect, render_template, request
 
 import config  # reuse the live app's DB creds
@@ -115,19 +123,38 @@ def _active_role():
         return r[0] if r else None
 
 
-def _gate():
+def _gate(is_api=False):
     """None when the caller may proceed, otherwise the response to return.
 
     /alpha and /alpha/api/bootstrap were the only undecorated routes in the app:
     bootstrap hands back the whole machine registry and every open order, so any
     authenticated tenant user with zero app roles could read it.
+
+    2026-08-23 — the API/page split is tested FIRST, before the sign-in check.
+    A fetch() answered with a 302 to AAD makes res.json() throw, and boot() in
+    alpha_preview.html catches that and falls back to its DEMO seed: on an
+    expired session this app would have shown synthetic machines as if they
+    were the fleet. Now APIs get JSON 401/403 and only page loads redirect.
     """
+    # Passed explicitly by each API route. Deriving it from request.path was
+    # right for the four rules this blueprint serves today, but it now owns "/"
+    # and the failure mode is silent: a fetch answered with a 302 makes
+    # res.json() throw and boot() paints its demo seed.
+    _is_api = bool(is_api) or request.path.startswith("/alpha/api/")
     if not _current_user():
-        return redirect("/.auth/login/aad?post_login_redirect_uri=/alpha")
+        if _is_api:
+            return jsonify({"error": "Your sign-in expired. Reload the page."}), 401
+        _back = request.full_path if request.query_string else request.path
+        # See app.login_required: a leading "//" is emitted as a
+        # protocol-relative Location.
+        if not _back.startswith("/") or _back[:2] in ("//", "/\\"):
+            _back = "/"
+        return redirect("/.auth/login/aad?post_login_redirect_uri="
+                        + quote(_back, safe=""))
     if not _current_roles():
         # Match app.login_required: a page gets the branded page, the API gets
         # JSON. A browser tab full of {"error": ...} is not an answer.
-        if request.path.startswith("/alpha/api/"):
+        if _is_api:
             return jsonify({"error": "You are not authorised to use this app."}), 403
         return ("<h2>Access Denied</h2><p>You are not authorised to use this app."
                 "<br>Please contact your administrator.</p>"
@@ -599,7 +626,7 @@ def _fetch_completed_day(cur, day):
 
 @alpha_bp.route("/alpha/api/board/completed")
 def alpha_board_completed():
-    blocked = _gate()
+    blocked = _gate(is_api=True)
     if blocked is not None:
         return blocked
     day = _iso_day(request.args.get("date"))
@@ -629,6 +656,7 @@ def alpha_board_completed():
                 pass
 
 
+@alpha_bp.route("/")
 @alpha_bp.route("/alpha")
 def alpha_index():
     blocked = _gate()
@@ -646,7 +674,7 @@ def alpha_index():
 
 @alpha_bp.route("/alpha/api/bootstrap")
 def alpha_bootstrap():
-    blocked = _gate()
+    blocked = _gate(is_api=True)
     if blocked is not None:
         return blocked
     conn = None

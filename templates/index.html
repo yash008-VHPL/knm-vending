@@ -377,7 +377,7 @@
     <div class="header-user">
         <span>{{ username }}</span>
         {% if roles and roles|length > 1 %}
-        <select onchange="if(this.value){window.location='/api/switch-role/'+encodeURIComponent(this.value);}"
+        <select onchange="if(this.value){window.location='/api/switch-role/'+encodeURIComponent(this.value)+'?back=/archive2608';}"
                 style="background:rgba(255,255,255,0.18);color:white;border:1px solid rgba(255,255,255,0.3);border-radius:6px;padding:5px 8px;font-size:0.82rem;font-weight:700;cursor:pointer">
             {% for r in roles %}
             <option value="{{ r }}" {% if r == role %}selected{% endif %} style="color:#111827">
@@ -388,7 +388,7 @@
         {% else %}
         <span class="role-badge">{{ role }}</span>
         {% endif %}
-        <a href="/.auth/logout?post_logout_redirect_uri=/" class="logout-btn">Sign out</a>
+        <a href="/.auth/logout?post_logout_redirect_uri=/signed-out" class="logout-btn">Sign out</a>
     </div>
 </header>
 
@@ -446,9 +446,9 @@
          unchanged and this grants no new capability. `dispatch` and
          `customer_service` are deliberately NOT here: they hold no role in
          workorders.py, so every button inside would 403 on them. ── #}
-    {% if role in ['admin', 'field_manager', 'dispatch', 'operator'] %}
-    <button class="tab-btn" style="color:#7c3aed" onclick="window.open('/alpha','_blank')">🧪 Beta App</button>
-    {% endif %}
+    {# 2026-08-23 cutover: this page IS the archive now (/archive2608, admin
+       only). The button points back at the live app rather than at /alpha. #}
+    <button class="tab-btn" style="color:#7c3aed" onclick="window.open('/','_blank','noopener')">↗ Current App</button>
 </div>
 
 <div class="container">

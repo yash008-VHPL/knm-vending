@@ -685,7 +685,10 @@ function buildRolePicker(){
     if($("#woBg").classList.contains("show")
        && !confirm("Switching role reloads the page. Discard the open work order?")){
       sel.value=state.role; return; }
-    location.href="/api/switch-role/"+encodeURIComponent(r)+"?back=/alpha";};
+    // pathname, not a literal: this UI answers on both "/" and "/alpha", and a
+    // hard-coded back= would teleport whoever is on the other one.
+    location.href="/api/switch-role/"+encodeURIComponent(r)
+                 +"?back="+encodeURIComponent(location.pathname);};
 }
 
 /* When the server enforces a role this UI has no screens for, say so instead of
@@ -699,13 +702,21 @@ function roleNotice(){
 }
 function buildTabs(){const nav=$("#tabs");nav.innerHTML="";
   ROLE_NAV[state.role].forEach(a=>{const b=document.createElement("button");b.textContent=AREAS[a];b.className=(a===state.area?"on":"");b.onclick=()=>{state.area=a;render();};nav.appendChild(b);});
-  /* The main dashboard, still the app at "/" — alpha has NOT been cut over.
-     New tab on purpose: it boots its own script and its own stylesheet, so
-     navigating there in-place and back would re-run alpha's boot() and lose the
-     board's day and filters. */
-  const old=document.createElement("button");old.textContent="Old App";old.className="oldapp";
-  old.title="The previous dashboard (read/write, same database)";
-  old.onclick=()=>window.open("/","_blank","noopener");nav.appendChild(old);}
+  /* 2026-08-23 cutover: the previous dashboard moved to /archive2608 and is
+     admin-only there, so the button is admin-only too — anyone else would just
+     be handed a 403. New tab on purpose: it boots its own script and its own
+     stylesheet, so navigating there in-place and back would re-run this app's
+     boot() and lose the board's day and filters. */
+  if(MYROLES.includes("admin")){
+    const old=document.createElement("button");old.textContent="Archive (2608)";old.className="oldapp";
+    old.title="The previous dashboard, archived 2026-08-23 (read/write, same database)";
+    old.onclick=()=>window.open("/archive2608","_blank","noopener");nav.appendChild(old);}
+  /* The archived dashboard carried the only Sign out control in the app. This
+     is production now and it runs on shared driver tablets, so it needs its
+     own. */
+  const so=document.createElement("button");so.textContent="Sign out";so.className="oldapp";
+  so.title="Sign out of this device";
+  so.onclick=()=>{location.href="/.auth/logout?post_logout_redirect_uri=/signed-out";};nav.appendChild(so);}
 
 /* ── Embedded legacy screens ──────────────────────────────────────────────────
    key = "<area>:<sub>". el = the pane id inside #embhost. init = the one-shot
@@ -2893,7 +2904,13 @@ async function boot(){
             || MYROLES.filter(r=>ROLE_NAV[r])[0] || state.role;
   buildRolePicker();state.area=ROLE_HOME[state.role];
   try{
-    const res=await fetch("/alpha/api/bootstrap");const d=await res.json();
+    const res=await fetch("/alpha/api/bootstrap");
+    // 2026-08-23 — an expired session must never reach demoSeed(). This is the
+    // production dashboard on shared driver tablets: four synthetic machines
+    // under a yellow banner is a worse answer than a re-login. The page GET
+    // 302s to AAD, so reloading is the whole fix.
+    if(res.status===401){location.reload();return;}
+    const d=await res.json();
     // A refusal is valid JSON with no .machines, which the old code reported as
     // "no rows returned" — an authorisation problem dressed up as empty data.
     if(!res.ok||d.error) throw new Error(d.error||("HTTP "+res.status));

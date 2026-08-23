@@ -2,6 +2,7 @@ import base64
 import json
 import math
 from flask import Flask, render_template, request, jsonify, redirect
+from urllib.parse import quote
 from functools import wraps
 import pymssql
 from datetime import datetime, timedelta
@@ -96,7 +97,18 @@ def login_required(f):
         if not email:
             if wants_json:
                 return jsonify({"error": "Your sign-in expired. Reload the page."}), 401
-            return redirect("/.auth/login/aad?post_login_redirect_uri=/")
+            # 2026-08-23 cutover: the archive lives at /archive2608, so a hard
+            # "/" here would silently drop an expired archive session onto the
+            # new production app instead of the page it asked for.
+            _back = request.full_path if request.query_string else request.path
+            # Same trap switch_role documents below: "//evil.com" and "/\\evil"
+            # are emitted as protocol-relative Locations. Today Werkzeug's
+            # merge_slashes stops them reaching a view, so this is a guard
+            # against a default, not against a live hole.
+            if not _back.startswith("/") or _back[:2] in ("//", "/\\"):
+                _back = "/"
+            return redirect("/.auth/login/aad?post_login_redirect_uri="
+                            + quote(_back, safe=""))
         if not get_role(email):
             if wants_json:
                 return jsonify({"error": f"{email} is not authorised to use this app."}), 403
@@ -628,13 +640,44 @@ MSG_TYPE_PREFIX = {
 
 @app.route("/logout")
 def logout():
-    return redirect("/.auth/logout?post_logout_redirect_uri=/")
+    return redirect("/.auth/logout?post_logout_redirect_uri=/signed-out")
 
 
-@app.route("/")
+# Deliberately NOT @login_required: it is where /.auth/logout lands. Pointing
+# post_logout_redirect_uri at "/" sends the browser into /.auth/login/aad, which
+# on a shared driver tablet can silently SSO the same person back in and never
+# tells anyone they signed out.
+@app.route("/signed-out")
+def signed_out():
+    return ("<h2>Signed out</h2><p>You have been signed out of KNM Ops.</p>"
+            '<p><a href="/">Sign in again</a></p>')
+
+
+# ── 2026-08-23 cutover ────────────────────────────────────────────────────────
+# The streamlined app (alpha_preview) now serves "/". This dashboard is archived
+# at /archive2608, admin-only, and kept live as the rollback path.
+# Admin is tested against the user's CLAIMS via get_all_roles, NOT get_role():
+# get_role returns the ONE active role, so an admin whose knm_active_role cookie
+# says field_manager would be locked out of their own rollback path.
+@app.route("/archive2608")
 @login_required
 def index():
     email = get_current_user()
+    if ALPHA_OK and "admin" not in get_all_roles(email):
+        return ("<h2>Archived</h2><p>This is the previous dashboard, retained for "
+                "admin reference only.</p>"
+                '<p><a href="/">Go to the dashboard</a></p>'), 403
+    # Claims decide ELIGIBILITY (above); the ACTIVE role decides what renders.
+    # An admin whose knm_active_role cookie says field_manager would otherwise
+    # get the field_manager template — no Test Cleanup tab, no Work Orders tab,
+    # and a 403 from every @admin_required endpoint the page calls. A rollback
+    # path that silently is not one is worse than a refusal.
+    if ALPHA_OK and get_role(email) != "admin":
+        return ("<h2>Switch to Admin</h2><p>The archive renders with your ACTIVE "
+                "role, and yours is not Admin right now.</p>"
+                '<p><a href="/api/switch-role/admin?back=/archive2608">'
+                "Switch to Admin and open the archive</a></p>"
+                '<p><a href="/">Back to the dashboard</a></p>'), 403
     return render_template(
         "index.html",
         role=get_role(email),
@@ -647,7 +690,8 @@ def index():
 @login_required
 def switch_role(new_role):
     """Set the knm_active_role cookie if new_role is one of the user's actual
-    role claims. Then redirect back to '/' so the page re-renders."""
+    role claims, then redirect back to the page that asked (?back=, allowlisted
+    to /, /alpha and /archive2608) so it re-renders with the new role."""
     email = get_current_user()
     roles = get_all_roles(email)
     # canon_role so a bookmarked /api/switch-role/dispatch still works:
@@ -662,7 +706,7 @@ def switch_role(new_role):
     # route that also sets a cookie. Embedded CR/LF additionally 500s. There are
     # exactly two callers, so name them.
     back = request.args.get("back") or "/"
-    resp = redirect(back if back in ("/", "/alpha") else "/")
+    resp = redirect(back if back in ("/", "/alpha", "/archive2608") else "/")
     resp.set_cookie(
         "knm_active_role", new_role,
         max_age=60 * 60 * 24 * 7,   # 7 days
@@ -1776,13 +1820,28 @@ try:
 except Exception as e:
     print(f"[startup] init_workorders_db failed: {e}")
 
-# ── Alpha preview (additive, READ-ONLY) — streamlined UI at /alpha ─────────────
-# Admin-only "Alpha App" tab opens this. Wrapped so it can never break startup.
+# ── Streamlined app — PRODUCTION at "/" since the 2026-08-23 cutover ──────────
+# Also still registered at /alpha for next-phase testing. The try/except is kept
+# deliberately: if this blueprint ever fails to import, "/" 404s loudly but the
+# process still boots, so /archive2608 stays reachable as the rollback path.
+ALPHA_OK = False
 try:
     from alpha_preview import alpha_bp
     app.register_blueprint(alpha_bp)
+    ALPHA_OK = True
 except Exception as e:
     print(f"[startup] alpha_preview blueprint not loaded: {e}")
+
+if not ALPHA_OK:
+    # Production is down. index() drops its admin-only gate (see the ALPHA_OK
+    # test there) and "/" sends everyone to the archive, so operators, sales,
+    # CS and field managers still have a working app instead of a 404 at "/"
+    # and a 403 at the rollback path.
+    print("[startup] FALLBACK: / -> /archive2608, archive gate relaxed")
+
+    @app.route("/")
+    def _alpha_down():
+        return redirect("/archive2608")
 
 
 if __name__ == "__main__":
