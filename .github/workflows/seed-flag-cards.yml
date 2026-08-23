@@ -1,0 +1,66 @@
+name: Seed top-up flag cards (one-shot)
+
+# WHY THIS EXISTS
+# NETS_CARD_PEPPER was generated at random by install_auresys.sh and piped
+# straight into a GitHub secret; nobody has ever seen its value and GitHub will
+# not return it. Hashing the flag cards therefore has to happen HERE, where the
+# secret is available, rather than on a laptop.
+#
+# Run it from the Actions tab. It is idempotent - re-running updates the labels
+# and changes nothing else - and it can be deleted once the cards are seeded.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'true = print the digests, write nothing to the database'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: seed-flag-cards
+  cancel-in-progress: false
+
+jobs:
+  seed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        # Pinned to a commit SHA, not a mutable tag - same reasoning as
+        # auresys-daily.yml: a repointed tag would run arbitrary code in a job
+        # that holds the pepper and the database credentials.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b   # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install --quiet pymssql
+
+      - name: Seed the flag cards
+        env:
+          NETS_CARD_PEPPER: ${{ secrets.NETS_CARD_PEPPER }}
+          NETS_DB_USER:     ${{ secrets.NETS_DB_USER || secrets.DB_USER }}
+          NETS_DB_PASSWORD: ${{ secrets.NETS_DB_PASSWORD || secrets.DB_PASSWORD }}
+          FLAG_CARDS:       ${{ secrets.NETS_FLAG_CARDS }}
+          SEEDED_BY:        github-actions
+        run: |
+          if [ -z "$NETS_CARD_PEPPER" ]; then
+            echo "::error::NETS_CARD_PEPPER is not set on this repository."; exit 1
+          fi
+          if [ -z "$FLAG_CARDS" ]; then
+            echo "::error::NETS_FLAG_CARDS is not set. Add it under Settings > Secrets and variables > Actions."; exit 1
+          fi
+          # The card numbers live in a secret, never in this repository:
+          # knm-vending is public. Written to the runner's tmpfs and discarded
+          # with the runner.
+          umask 077
+          printf '%s\n' "$FLAG_CARDS" > "$RUNNER_TEMP/cards.txt"
+          ARGS=""
+          [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="--dry-run"
+          python topups-2026-08-23/seed_flag_cards.py "$RUNNER_TEMP/cards.txt" $ARGS
+          rm -f "$RUNNER_TEMP/cards.txt"
