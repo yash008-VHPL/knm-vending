@@ -10,10 +10,24 @@ Two screens are served from here:
 
   Calendar  — what actually happened on past days and what is firmed up for
               future ones, grouped by driver. Read-only except for the
-              dispatcher's outcome flag and the assignment page.
-  Plan      — the flag-card vend counter, the next 14 days of the sales
-              calendar, and one batch submit that turns a pile of picks into
-              unassigned stops for a chosen date.
+              dispatcher's outcome flag, the assignment page and the move.
+  Plan      — the flag-card vend counter, the next 14 days of SALES REQUESTS,
+              and one batch submit that places them on a chosen date and shift.
+
+A SALES CALENDAR ENTRY IS A REQUEST, NOT A STOP
+-----------------------------------------------
+This distinction is the whole design and an earlier version got it wrong.
+Sales keys "CGH, Wednesday" into Google Calendar. That is a REQUEST: the site
+wants a visit that week. Dispatch decides which day it actually happens on and
+which shift runs it. So picking a request in the Plan tab MOVES its stop onto
+the chosen date — it never creates a second one. Two open stops for one machine
+is the corruption the duplicate guard exists to prevent: the driver's sheet
+reads TOP 1, so the other can never be closed and then blocks that machine on
+every future date through the ISNULL rule.
+
+The first cut treated an entry that already had a row as "booked" and disabled
+it, which made the entire list inert — gcal_sync had already created a stop for
+every event in its 28-day horizon, so nothing was ever pickable.
 
 THREE THINGS THAT LOOK LIKE MISTAKES AND ARE NOT
 ------------------------------------------------
@@ -77,6 +91,18 @@ MAX_RANGE_DAYS = 400
 # refreshed on demand, is enough — the underlying feed only lands once a day.
 _VEND_CACHE = {"at": None, "payload": None}
 VEND_CACHE_SECONDS = 300
+
+# TWO different questions, deliberately two thresholds.
+#
+#   DEAD  - has the feed stopped? 26h, unchanged: that is the dead-man's switch
+#           the Auresys handoff defines, measured against the 05:00
+#           RECONCILIATION run, which is the run that must never be missed.
+#   STALE - are the numbers current? 15h, i.e. the 17:00 freshness run did not
+#           land. Worth saying, but it is not a broken feed, and painting it red
+#           would light the alarm every time the optional run was skipped while
+#           the pipeline was perfectly healthy.
+FEED_DEAD_SECONDS  = 26 * 3600
+FEED_STALE_SECONDS = 15 * 3600
 
 # Schema probe result. Nine INFORMATION_SCHEMA round trips on every /calendar
 # render is nine too many on a single sync worker. Cached ONLY once every
@@ -393,10 +419,10 @@ def api_topups_vendcounter():
     FOUR HONESTIES THIS ENDPOINT OWES THE SCREEN, all returned as fields rather
     than swallowed:
 
-      staleAsOf   The feed is a DAILY batch (22:30 UTC = 06:30 SGT). A card
-                  tapped at 10:00 today does not exist here until tomorrow
-                  morning. Without this the machine just topped up still sorts
-                  to the top of the list and invites a second visit.
+      staleAsOf   The feed is a BATCH, pulled twice a day (05:00 and 17:00
+                  SGT). A card tapped this morning shows up after the evening
+                  pull, not instantly. Without this the machine just topped up
+                  still sorts to the top of the list and invites a second visit.
       unflagged   Machines with an Auresys terminal that have never shown a flag
                   tap. Counted from their first transaction instead, and marked.
       noTerminal  Machines with no payment terminal at all (~61 of 134). They
@@ -443,7 +469,7 @@ def api_topups_vendcounter():
         # Feed freshness. NETS_Pull_Run is the dead-man's switch: newest SUCCESS
         # older than ~26h means the feed has stopped and every number below is
         # quietly frozen.
-        stale_as_of, feed_ok = None, True
+        stale_as_of, feed_ok, feed_fresh = None, True, True
         try:
             cur.execute("SELECT MAX(Finished_At_UTC) FROM dbo.NETS_Pull_Run "
                         "WHERE Status = 'SUCCESS'")
@@ -451,7 +477,9 @@ def api_topups_vendcounter():
             if r and r[0]:
                 stale_as_of = r[0].isoformat() + "Z"   # UTC. Without the Z the
                 #  browser parses it as local time and the "Nh ago" line goes negative.
-                feed_ok = (now - r[0]).total_seconds() < 26 * 3600
+                age = (now - r[0]).total_seconds()
+                feed_ok = age < FEED_DEAD_SECONDS
+                feed_fresh = age < FEED_STALE_SECONDS
         except Exception:
             pass
 
@@ -553,7 +581,8 @@ def api_topups_vendcounter():
         payload = {
             "rows": rows, "ready": True,
             "cards": n_cards,
-            "staleAsOf": stale_as_of, "feedOk": feed_ok,
+            "staleAsOf": stale_as_of, "feedOk": feed_ok, "feedFresh": feed_fresh,
+            "pullTimes": "05:00 and 17:00 SGT",
             "nullCoded": null_coded,
             "noTerminal": no_terminal,
             "deadReader": dead_reader,
@@ -588,7 +617,9 @@ def api_topups_gcal():
     days = request.args.get("days", type=int) or GCAL_WINDOW_DAYS
     days = max(1, min(days, 56))            # gcal_feed only holds FORWARD_DAYS=56
     today = _sgt_today()
-    to = (datetime.strptime(today, "%Y-%m-%d").date() + timedelta(days=days - 1)).isoformat()
+    _t = datetime.strptime(today, "%Y-%m-%d").date()
+    to = (_t + timedelta(days=days - 1)).isoformat()
+    far = (_t + timedelta(days=90)).isoformat()      # move-target lookahead
 
     try:
         import gcal_feed
@@ -617,17 +648,23 @@ def api_topups_gcal():
             conn = get_connection()
             cur = conn.cursor()
             marks = ", ".join(["%s"] * len(codes))
-            # Bounded to the window on screen. Unbounded, a single stale open
-            # row from last November marked its machine "booked" and disabled it
-            # on every calendar entry, permanently, with no way to find the
-            # offending row from this screen.
+            # Bounded, but MUCH wider than the 14-day request window. Two
+            # failures to avoid at once:
+            #   too narrow - a machine whose open stop sits beyond the window
+            #     reports no move target, so submitting it INSERTS a second open
+            #     stop instead of moving the first. Silent double-booking.
+            #   unbounded  - one stale open row from last November follows the
+            #     machine around forever with no way to find it from here.
+            # today..+90d covers every stop a planner can realistically be
+            # moving, and anything older than today is deliberately excluded:
+            # a stop in the past is history, not something to drag forward.
             cur.execute(
                 "SELECT MachineCode, CONVERT(VARCHAR(10), ScheduledDate, 23), "
                 "       DeliveryOrderID "
                 "FROM WO_DeliveryOrders "
                 "WHERE Status <> 'completed' AND MachineCode IN (%s) "
                 "  AND ScheduledDate BETWEEN %%s AND %%s" % marks,
-                tuple(codes) + (today, to))
+                tuple(codes) + (today, far))
             for c, d, i in cur.fetchall():
                 booked.setdefault(str(c), []).append({"date": d, "id": int(i)})
         except Exception:
@@ -646,9 +683,15 @@ def api_topups_gcal():
         # machines; when one already had a stop, the union disabled all three
         # and the planner could not reach the other two at all.
         ev["bookedByCode"] = {str(c): booked.get(str(c), []) for c in (e.get("codes") or [])}
-        # Only a clean arity match is pickable. partial / over / unmapped /
-        # unknown are shown with their reason and never guessed — the same rule
-        # gcal_sync applies, for the same reason.
+        # Pickable = we know which machine it means. Whether a stop already
+        # exists is NOT a reason to block: the request is the thing sales keyed,
+        # and placing it on a date is exactly what this screen is for. An
+        # existing row is carried as bookedByCode so the client can send its id
+        # and have the server move it rather than duplicate it.
+        #
+        # partial / over / unmapped / unknown stay unpickable — those are cases
+        # where the alias table cannot say which machine is meant, and guessing
+        # is the one thing gcal_sync was careful never to do.
         ev["pickable"] = (e.get("status") == "ok") and bool(e.get("codes"))
         out.append(ev)
 
@@ -690,6 +733,9 @@ def api_topups_batch():
     data = request.get_json(silent=True) or {}
     day = _iso(data.get("scheduled_date"))
     items = data.get("items") or []
+    # An item carrying move_id RELOCATES that stop instead of creating one.
+    # See the module docstring: a sales calendar entry is a request, and placing
+    # it must never leave two open stops for one machine.
     if not day:
         return jsonify({"error": "scheduled_date is required (YYYY-MM-DD)."}), 400
     if day.isoformat() < _sgt_today():
@@ -720,7 +766,7 @@ def api_topups_batch():
             c = str((it or {}).get("machine_code") or "").strip()
             if c and c not in want:
                 want.append(c)
-        reg, blocked = {}, {}
+        reg, blocked, future_open = {}, {}, {}
         if want:
             marks = ", ".join(["%s"] * len(want))
             cur.execute("SELECT MachineCode, MachineName, ISNULL(IsActive,1) "
@@ -744,6 +790,41 @@ def api_topups_batch():
                 tuple(want) + (iso, iso))
             for c, i, d in cur.fetchall():
                 blocked.setdefault(str(c).upper(), (int(i), d))   # first by CreatedAt wins
+            # Any open, dated, future stop for these machines - the set the
+            # "you already have one on another day" check below reads.
+            cur.execute(
+                "SELECT MachineCode, DeliveryOrderID, "
+                "       CONVERT(VARCHAR(10), ScheduledDate, 23) "
+                "FROM WO_DeliveryOrders "
+                "WHERE MachineCode IN (%s) AND Status <> 'completed' "
+                "  AND ScheduledDate IS NOT NULL AND ScheduledDate >= %%s "
+                "ORDER BY ScheduledDate, DeliveryOrderID" % marks,
+                tuple(want) + (_sgt_today(),))
+            for c, i, d in cur.fetchall():
+                future_open.setdefault(str(c).upper(), (int(i), d))
+
+        # Rows the client asked to move, fetched up front so the loop does not
+        # round-trip per item.
+        move_ids = []
+        for it in items:
+            try:
+                mid = int((it or {}).get("move_id"))
+            except (TypeError, ValueError):
+                continue
+            if mid not in move_ids:
+                move_ids.append(mid)
+        movable = {}
+        if move_ids:
+            mm = ", ".join(["%s"] * len(move_ids))
+            cur.execute(
+                "SELECT DeliveryOrderID, MachineCode, MachineName, Status, AssignedTo, "
+                "       CONVERT(VARCHAR(10), ScheduledDate, 23) "
+                "FROM WO_DeliveryOrders WHERE DeliveryOrderID IN (%s)" % mm,
+                tuple(move_ids))
+            for did, mc, mn, st, who, sd in cur.fetchall():
+                movable[int(did)] = {"code": (str(mc).upper() if mc else None),
+                                     "name": mn, "status": (st or "").lower(),
+                                     "assigned": who, "date": sd}
 
         seen = set()
         for it in items:
@@ -768,6 +849,66 @@ def api_topups_batch():
             if not m[1]:
                 skipped.append({"code": code, "name": m[0],
                                 "why": "%s is decommissioned" % m[0]})
+                continue
+
+            # ── MOVE an existing stop rather than create a second one ────────
+            try:
+                mid = int((it or {}).get("move_id"))
+            except (TypeError, ValueError):
+                mid = None
+            if mid is not None:
+                row = movable.get(mid)
+                if not row:
+                    skipped.append({"code": code, "name": m[0],
+                                    "why": "that request's stop no longer exists"})
+                    continue
+                if row["status"] == "completed":
+                    skipped.append({"code": code, "name": m[0],
+                                    "why": "already completed on %s" % (row["date"] or "an earlier day")})
+                    continue
+                if row["code"] != code.upper():
+                    skipped.append({"code": code, "name": m[0],
+                                    "why": "that stop is for a different machine"})
+                    continue
+                # Anything else open for this machine on the target day, other
+                # than the row being moved, is still a collision.
+                other = blocked.get(code.upper())
+                if other and other[0] != mid:
+                    skipped.append({"code": code, "name": m[0], "existing_id": other[0],
+                                    "why": ("already has another open stop on this day"
+                                            if other[1] else
+                                            "has an open stop with no date (DO-%d), which "
+                                            "blocks every day until it is closed or dated"
+                                            % other[0])})
+                    continue
+                sets, params = ["ScheduledDate = %s"], [iso]
+                if have["ShiftCode"]:
+                    sets.append("ShiftCode = %s"); params.append(shift)
+                # Moving a stop invalidates its position in the old day's round.
+                if have["RouteSeq"]:
+                    sets.append("RouteSeq = NULL")
+                params.append(mid)
+                cur.execute("UPDATE WO_DeliveryOrders SET %s WHERE DeliveryOrderID = %%s"
+                            % ", ".join(sets), tuple(params))
+                _log_activity(cur, "deliveryorder", mid, "moved",
+                              "Top-up planner: %s -> %s, %s shift"
+                              % (row["date"] or "undated", iso, SHIFT_LABEL[shift]), user)
+                created.append({"id": mid, "code": code, "name": m[0], "shift": shift,
+                                "moved_from": row["date"], "assigned_to": row["assigned"]})
+                continue
+
+            # No move_id, but this machine already has an open stop on some
+            # OTHER future day. Creating one here would leave two, and the
+            # driver's TOP 1 sheet can only ever reach one of them. Refuse and
+            # say where the existing one is, so the planner picks it from the
+            # request list and moves it instead.
+            elsewhere = future_open.get(code.upper())
+            if elsewhere and elsewhere[1] != iso:
+                skipped.append({
+                    "code": code, "name": m[0], "existing_id": elsewhere[0],
+                    "why": "already has an open stop on %s (DO-%d) — pick that "
+                           "request from the list to MOVE it here rather than "
+                           "adding a second" % (elsewhere[1], elsewhere[0])})
                 continue
 
             # See the module docstring, point 2. The ISNULL is load-bearing.
@@ -935,6 +1076,143 @@ def api_topups_assign():
 
         conn.commit()
         return jsonify({"ok": True, "assigned": done, "skipped": skipped})
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+        return jsonify({"error": _db_error(e)}), 500
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /api/topups/move
+# ─────────────────────────────────────────────────────────────────────────────
+
+@topups_bp.route("/move", methods=["POST"])
+@require_roles(*DISPATCH_ROLES)
+def api_topups_move():
+    """Dispatch relocates one stop to another day, or withdraws it entirely.
+
+    Sales says which sites want a visit; dispatch says which day. This is that
+    authority, exercised from the Calendar rather than the planner — the same
+    stop, moved back and forth, never copied.
+
+    action = "move"     -> scheduled_date (+ optional shift)
+    action = "withdraw" -> deletes the stop, returning the site to the request
+                           pool it came from.
+
+    WHY WITHDRAW DELETES RATHER THAN CLEARING ScheduledDate
+    A stop with a NULL ScheduledDate is not "unscheduled" — because
+    WO_VisitSessions carries a single LinkedDeliveryOrderID, the duplicate guard
+    has to treat an undated open row as colliding with EVERY date
+    (workorders.py:3752-3765). Nulling the date would therefore lock that
+    machine out of the planner completely, which is the opposite of withdrawing
+    it. Deleting is what the sales cancel path already does
+    (workorders._cancel_stop_rows), and it snapshots to WO_DeletedLog first, so
+    it is recoverable.
+
+    Withdraw refuses once a driver holds the stop: at that point it is in
+    somebody's round, and pulling it out from under them silently is how a
+    driver ends up at a site nobody expects. Unassign it first.
+    """
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "move").lower()
+    try:
+        did = int(data.get("id"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "id is required."}), 400
+
+    user = get_current_user()
+    conn = None
+    try:
+        conn = get_connection()
+        cur = conn.cursor()
+        have = _topup_cols(cur)
+        if not have["ScheduledDate"]:
+            return jsonify({"error": "Scheduling columns are not migrated yet."}), 503
+
+        cur.execute("SELECT Status, MachineCode, MachineName, AssignedTo, "
+                    "       CONVERT(VARCHAR(10), ScheduledDate, 23) "
+                    "FROM WO_DeliveryOrders WHERE DeliveryOrderID = %s", (did,))
+        r = cur.fetchone()
+        if not r:
+            return jsonify({"error": "That stop no longer exists."}), 404
+        status, code, name, who, cur_date = (r[0] or "").lower(), r[1], r[2], r[3], r[4]
+        if status == "completed":
+            return jsonify({"error": "%s was completed on %s — it cannot be moved."
+                                     % (name, cur_date or "an earlier day")}), 409
+
+        if action == "withdraw":
+            if who:
+                return jsonify({"error": "%s is assigned to %s. Unassign it first, then "
+                                         "withdraw it." % (name, who)}), 409
+            # No _log_activity first: _cancel_stop_rows DELETEs this order's
+            # WO_Activity rows on its way out (workorders.py:3838), so anything
+            # written here would be wiped in the same breath. What survives is
+            # the reason string below, in WO_DeletedLog, alongside a full row
+            # snapshot — which is what makes this recoverable rather than gone.
+            from workorders import _cancel_stop_rows
+            gone = _cancel_stop_rows(
+                cur, [did], user,
+                "Withdrawn from the plan (was %s)" % (cur_date or "undated"))
+            if not gone:
+                # The helper only deletes rows whose Status is exactly 'open'.
+                # Anything else means someone changed it while this was in flight.
+                conn.rollback()
+                return jsonify({"error": "%s is no longer an open stop — reload the "
+                                         "calendar." % name}), 409
+            conn.commit()
+            return jsonify({"ok": True, "id": did, "action": "withdraw", "name": name})
+
+        day = _iso(data.get("scheduled_date"))
+        if not day:
+            return jsonify({"error": "scheduled_date is required (YYYY-MM-DD)."}), 400
+        iso = day.isoformat()
+        if iso < _sgt_today():
+            return jsonify({"error": "Pick today or a later date."}), 400
+
+        shift = data.get("shift")
+        shift = {"day": 0, "night": 1, 0: 0, 1: 1, "0": 0, "1": 1}.get(shift)
+
+        if code:
+            cur.execute(
+                "SELECT TOP 1 DeliveryOrderID FROM WO_DeliveryOrders "
+                "WHERE MachineCode = %s AND DeliveryOrderID <> %s "
+                "  AND Status <> 'completed' "
+                "  AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s "
+                "ORDER BY CreatedAt, DeliveryOrderID", (code, did, iso, iso))
+            dup = cur.fetchone()
+            if dup:
+                return jsonify({"error": "%s already has another open stop on %s "
+                                         "(DO-%d)." % (name, iso, int(dup[0]))}), 409
+
+        sets, params = ["ScheduledDate = %s"], [iso]
+        if shift is not None and have["ShiftCode"]:
+            sets.append("ShiftCode = %s"); params.append(shift)
+        if have["RouteSeq"]:
+            # Its position belonged to the old day's round.
+            seq = _next_route_seq(cur, (who or "").lower() or None, iso) if who else None
+            if seq is not None:
+                sets.append("RouteSeq = %s"); params.append(seq)
+            else:
+                sets.append("RouteSeq = NULL")
+        params.append(did)
+        cur.execute("UPDATE WO_DeliveryOrders SET %s WHERE DeliveryOrderID = %%s"
+                    % ", ".join(sets), tuple(params))
+        _log_activity(cur, "deliveryorder", did, "moved",
+                      "%s -> %s%s" % (cur_date or "undated", iso,
+                                      (", %s shift" % SHIFT_LABEL[shift])
+                                      if shift is not None else ""), user)
+        conn.commit()
+        return jsonify({"ok": True, "id": did, "action": "move",
+                        "name": name, "from": cur_date, "to": iso, "shift": shift})
     except Exception as e:
         if conn is not None:
             try:

@@ -1,10 +1,27 @@
-name: Daily Auresys Transaction Pull
+name: Auresys Transaction Pull (05:00 and 17:00 SGT)
 
-# 06:30 SGT = 22:30 UTC the previous day. GitHub cron is always UTC.
-# Chosen after the machines settle (~02:30 SGT) so the previous day is complete.
+# GitHub cron is always UTC.
+#
+#   21:00 UTC  ->  05:00 SGT next day   THE RECONCILIATION RUN
+#                  Window ends at D-1. Runs after the machines settle (~02:30
+#                  SGT) so the previous day is complete. This is the run the
+#                  D-1 telemetry comparison depends on, and it must stay
+#                  D-1-only: vw_NETS_Daily_Count excludes today for a reason.
+#
+#   09:00 UTC  ->  17:00 SGT same day   THE FRESHNESS RUN
+#                  Adds --include-today so the day so far is loaded, partial.
+#                  This exists for the dashboard vend counter: a flag card
+#                  tapped in the morning shows up the same evening instead of
+#                  the next day. The 05:00 run then reloads that day complete
+#                  and replaces it (staged > before -> LOADED).
+#
+# A partial today is safe for "dispenses since last flag" - it undercounts
+# slightly until the next pull, which beats being a day stale. It is NOT safe
+# for the reconciliation, which is why only one of the two runs carries the flag.
 on:
   schedule:
-    - cron: '30 22 * * *'
+    - cron: '0 21 * * *'
+    - cron: '0 9 * * *'
   workflow_dispatch:
     inputs:
       days:
@@ -18,6 +35,10 @@ on:
         required: false
       dry_run:
         description: 'true = report only, write nothing'
+        required: false
+        default: 'false'
+      include_today:
+        description: "true = also load today's partial data (the 17:00 run does this)"
         required: false
         default: 'false'
 
@@ -63,5 +84,12 @@ jobs:
             [ -n "${{ github.event.inputs.to }}" ] && ARGS="$ARGS --to ${{ github.event.inputs.to }}"
           fi
           [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          # github.event.schedule is the literal cron string that fired this run
+          # - the only way to tell the two schedules apart. It is empty on a
+          # manual dispatch, which is why the input is checked as well.
+          if [ "${{ github.event.schedule }}" = "0 9 * * *" ] \
+             || [ "${{ github.event.inputs.include_today }}" = "true" ]; then
+            ARGS="$ARGS --include-today"
+          fi
           echo "auresys_pull.py $ARGS"
           python auresys_pull.py $ARGS

@@ -106,6 +106,13 @@
 .tp-chip .x{border:0;background:transparent;cursor:pointer;color:var(--mut);
   font-size:.9rem;line-height:1;padding:0 3px;font-family:inherit}
 .tp-chip .x:hover{color:var(--bad)}
+/* Already on this day: shown, not editable from here. Moving or withdrawing it
+   is Calendar work, so it deliberately has no ✕. */
+.tp-chip.has{background:var(--bg);border-color:var(--line);border-style:dashed;
+  padding-right:9px}
+.tp-chip .who{font-size:.62rem;color:var(--mut);text-transform:uppercase;
+  letter-spacing:.03em}
+.tp-g .tag.move{background:#eef2ff;color:#3730a3}
 
 .tp-pl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start}
 @media(max-width:1100px){.tp-pl{grid-template-columns:1fr}}
@@ -173,7 +180,11 @@ const TP = {
   cal:   {anchor:null, weeks:3, stops:[], other:{}, today:null, loading:false,
           stale:true, err:null, syncOn:null},
   assign:{open:false, date:null, picked:new Set(), busy:false},
+  /* onDate = what is ALREADY scheduled for plan.date. Fetched whenever the
+     date changes, so the composer answers "what is this day already carrying?"
+     instead of always looking empty. */
   plan:  {date:null, staged:[], shiftFor:null, blockErr:null,
+          onDate:{date:null, stops:[], loading:false},
           vend:{rows:[], ready:false, err:null, stale:true, loading:false, meta:null},
           gcal:{events:[], stale:true, loading:false, err:null, syncOn:null},
           busy:false},
@@ -247,11 +258,18 @@ function tpStopRow(s, past, judgeable){
      jamming its machine on every date through the ISNULL duplicate rule. It is
      surfaced against today so the batch endpoint's "has an open stop with no
      date" refusal points at something the dispatcher can actually see. */
-  if(s.blocking) return `<div class="tp-s r" title="${tpEsc(
-    (s.machineName||s.machineCode||"?")+" — open stop with no date (DO-"+s.id+
-    "). It blocks this machine on every day until it is closed or given a date.")}">
-    <span class="nm">${tpEsc(s.machineName||s.machineCode||"?")}</span>
-    <span class="sh">NO DATE</span></div>`;
+  if(s.blocking){
+    /* Three separate messages tell the dispatcher this row must be dated, and
+       until now none of them led anywhere: it was the only stop on the board
+       with no click target. tpMoveOpen handles an undated stop correctly. */
+    const fix = tpCanAssign();
+    return `<div class="tp-s r${fix?" act":""}" ${fix?`onclick="tpMoveOpen(${s.id})"`:""}
+      title="${tpEsc((s.machineName||s.machineCode||"?")+" — open stop with no date (DO-"+s.id+
+      "). It blocks this machine on every day until it is closed or given a date."
+      +(fix?" Click to give it one.":""))}">
+      <span class="nm">${tpEsc(s.machineName||s.machineCode||"?")}</span>
+      <span class="sh">NO DATE</span></div>`;
+  }
   /* Colour precedence, stated once so it cannot drift: a dispatcher's
      judgement beats the derivation, and a signed visit beats everything the
      derivation could otherwise call amber. The server settles both and hands
@@ -261,11 +279,17 @@ function tpStopRow(s, past, judgeable){
      had already worked out and rendered flat blue, and was the only day whose
      stops could not be judged. */
   const cls = TP_COLOUR[s.colour] || "p";
-  const can = judgeable && tpCanAssign();
+  /* Past and today -> set the outcome. Ahead of today -> move it or withdraw
+     it. Both are dispatch-only; sales sees the same board, read-only. */
+  const can = tpCanAssign();
+  const act = !can ? "" : judgeable ? `onclick="tpOutcome(${s.id})"`
+                                    : `onclick="tpMoveOpen(${s.id})"`;
   const sh  = s.shift===0 ? "DAY" : s.shift===1 ? "NIGHT" : "";
-  return `<div class="tp-s ${cls}${can?" act":""}" ${can?`onclick="tpOutcome(${s.id})"`:""}
+  return `<div class="tp-s ${cls}${can?" act":""}" ${act}
     title="${tpEsc((s.machineName||s.machineCode||"")+(s.why?" — "+s.why:"")
-      + (s.undated?" — no planned date; filed on the day it was completed":""))}">
+      + (s.undated?" — no planned date; filed on the day it was completed":"")
+      + (can ? (judgeable ? " — click to set the outcome"
+                          : " — click to move it to another day or withdraw it") : ""))}">
     <span class="nm">${tpEsc(s.machineName||s.machineCode||"?")}</span>
     ${sh?`<span class="sh">${sh}</span>`:""}
     ${s.colourSource==="dispatch"?'<span class="src" title="Set by dispatch">✎</span>':""}
@@ -357,7 +381,7 @@ function tpRenderCalendar(){
       <span><i style="background:var(--warn)"></i>Faulty service</span>
       <span><i style="background:var(--bad)"></i>Unable</span>
       <span><i style="background:var(--blue)"></i>Planned</span>
-      ${tpCanAssign()?'<span style="color:var(--mut)">Click a past stop to set or clear its colour.</span>':""}
+      ${tpCanAssign()?'<span style="color:var(--mut)">Click a past stop to set its colour · click a planned stop to move or withdraw it.</span>':""}
     </div>
     ${TP.cal.loading && !TP.cal.stops.length ? '<p class="tp-empty">Loading…</p>' : weeks.join("")}
     <button class="btn sm ghost" onclick="tpCalMore()">Show 3 more weeks</button>
@@ -391,6 +415,51 @@ async function tpOutcome(id){
     body:{id, outcome, note:(note||"").trim()||null}});
   if(!r){ return; }   // api() has already toasted
   TP.cal.stale = true; toast("Saved."); render();
+}
+
+/* Dispatch moves a planned stop to another day, or withdraws it.
+
+   Sales says which sites want a visit; dispatch says which day. This is that
+   authority from the Calendar side — the same stop, back and forth, never
+   copied. prompt() rather than a drawer on purpose: it is a correction, and a
+   second full editing surface for a stop is how two screens start disagreeing
+   about what a stop is. */
+async function tpMoveOpen(id){
+  const s = TP.cal.stops.find(x=>x.id===id);
+  if(!s) return;
+  const cur = s.date || "";
+  const v = prompt(
+    `${s.machineName||s.machineCode}\n` +
+    `Currently ${cur}${s.shift===1?" · night":s.shift===0?" · day":""}` +
+    `${s.assignedTo?" · "+tpDriverName(s.assignedTo):" · unassigned"}\n\n` +
+    `New date as YYYY-MM-DD, optionally with " day" or " night".\n` +
+    `Type  withdraw  to take it off the plan entirely.`, cur);
+  if(v===null) return;
+  const t = v.trim().toLowerCase();
+  if(!t) return;
+
+  if(t==="withdraw"){
+    if(s.assignedTo){
+      toast(`${s.machineName} is assigned to ${tpDriverName(s.assignedTo)} — unassign it first.`);
+      return; }
+    if(!confirm(`Withdraw ${s.machineName||s.machineCode} from ${cur}?\n\n`
+              + `The stop is deleted. It is snapshotted to the deletion log, and `
+              + `the sales request stays in the list so it can be placed again.`)) return;
+    const r = await api("/api/topups/move", {method:"POST", body:{id, action:"withdraw"}});
+    if(!r) return;
+    TP.cal.stale = true; TP.plan.gcal.stale = true; TP.plan.onDate.date = null;
+    toast(`${r.name} withdrawn.`); render(); return;
+  }
+
+  const m = t.match(/^(\d{4}-\d{2}-\d{2})(?:\s+(day|night))?$/);
+  if(!m){ toast('Use YYYY-MM-DD, optionally followed by "day" or "night".'); return; }
+  if(m[1] < tpToday()){ toast("Pick today or a later date."); return; }
+  const r = await api("/api/topups/move", {method:"POST",
+    body:{id, action:"move", scheduled_date:m[1], shift:m[2]||null}});
+  if(!r) return;
+  TP.cal.stale = true; TP.plan.gcal.stale = true; TP.plan.onDate.date = null;
+  toast(`${r.name}: ${r.from||"undated"} → ${r.to}.`);
+  render();
 }
 
 /* ── Assignment page ───────────────────────────────────────────────────── */
@@ -516,23 +585,55 @@ function tpPlanEnsure(){
   if(!TP.plan.date) TP.plan.date = tpToday();
   if(TP.plan.vend.stale && !TP.plan.vend.loading) tpVendLoad(false);
   if(TP.plan.gcal.stale && !TP.plan.gcal.loading) tpGcalLoad();
+  tpOnDateEnsure();
+}
+
+/* What is ALREADY scheduled for the date in the composer. Without this the box
+   always read empty and a dispatcher had no way to see, at the moment of
+   planning, that Monday was already carrying nine stops. */
+async function tpOnDateLoad(){
+  const d = TP.plan.date;
+  if(!d || TP.plan.onDate.loading) return;
+  /* Hold the object we started on. tpSetDate REPLACES TP.plan.onDate, so
+     writing .loading back on whatever is current when the reply lands would
+     clear the in-flight flag for a different date and briefly render "nothing
+     on this day" for a day that has stops. */
+  const box = TP.plan.onDate;
+  box.loading = true; box.date = d;
+  const r = await api(`/api/topups/calendar?from=${d}&to=${d}`);
+  box.loading = false;
+  if(TP.plan.onDate !== box || TP.plan.date !== d) return;
+  box.stops = (r && r.stops || []).filter(x => x.date === d && !x.blocking);
+  /* Completed stops stay in the list (the composer should show that the day
+     already carries them) but must never become a move target — the server
+     refuses to move a completed row, so offering it is a dead click. */
+  box.stops.forEach(x => {
+    x.movable = (String(x.status||"").toLowerCase() !== "completed"); });
+  render();
+}
+function tpOnDateEnsure(){
+  if(TP.plan.onDate.date !== TP.plan.date && !TP.plan.onDate.loading) tpOnDateLoad();
 }
 
 function tpSetDate(v){
   const iso = (window.isoNormDate ? isoNormDate(v) : v) || "";
   if(!/^\d{4}-\d{2}-\d{2}$/.test(iso)){ toast("Use YYYY-MM-DD."); return; }
   if(iso < tpToday()){ toast("Pick today or a later date."); TP.plan.date = tpToday(); render(); return; }
-  TP.plan.date = iso; render();
+  TP.plan.date = iso;
+  TP.plan.onDate = {date:null, stops:[], loading:false};   // refetch for the new day
+  render();
 }
 /* One click opens the day/night picker; the shift choice is what actually
    stages the machine. A machine cannot be staged without a shift, because the
    server refuses an item that has none. */
 function tpShiftOpen(key){ TP.plan.shiftFor = (TP.plan.shiftFor===key ? null : key); render(); }
 function tpShiftCancel(){ TP.plan.shiftFor = null; render(); }
-function tpStage(code, name, shift, source, gcalId, title){
+function tpStage(code, name, shift, source, gcalId, title, moveId){
   if(TP.plan.staged.some(x=>x.machine_code===code)){
     toast(`${name} is already on the list.`); TP.plan.shiftFor=null; render(); return; }
-  TP.plan.staged.push({machine_code:code, name, shift,
+  /* move_id, when present, is the stop this request is already sitting on.
+     The server relocates that row instead of inserting a second one. */
+  TP.plan.staged.push({machine_code:code, name, shift, move_id:moveId||null,
                        source:source||"planner", gcal_event_id:gcalId||null, title:title||null});
   TP.plan.shiftFor = null; render();
 }
@@ -556,7 +657,8 @@ async function tpSubmit(){
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({scheduled_date: TP.plan.date,
         items: TP.plan.staged.map(x=>({machine_code:x.machine_code, shift:x.shift,
-          source:x.source, gcal_event_id:x.gcal_event_id, title:x.title}))})});
+          move_id:x.move_id, source:x.source,
+          gcal_event_id:x.gcal_event_id, title:x.title}))})});
     let d=null; try{ d = await res.json(); }catch(_){}
     if(!res.ok || (d && d.error)){
       TP.plan.busy = false;
@@ -590,12 +692,21 @@ function tpVendRail(){
 
   const stale = m.staleAsOf ? new Date(m.staleAsOf) : null;
   const hrs = (stale && !isNaN(stale)) ? Math.round((Date.now()-stale.getTime())/3600000) : null;
+  const times = m.pullTimes || "05:00 and 17:00 SGT";
+  const ago = hrs==null ? "unknown" : hrs+"h ago";
   const freshWarn = (m.feedOk===false)
     ? `<div class="tp-warn tp-bad"><b>The Auresys feed has stopped.</b>
-       Last successful pull ${hrs==null?"unknown":hrs+"h"} ago. Every number below is
-       frozen at that point.</div>`
-    : `<p class="tp-note">Feed is a daily batch — last pull ${hrs==null?"unknown":hrs+"h ago"}.
-       A card tapped today does not appear here until tomorrow morning.</p>`;
+       Last successful pull ${ago} — past the point where a missed run is the only
+       explanation. Every number below is frozen there.</div>`
+    : (m.feedFresh===false)
+    /* Amber, not red. The 17:00 run is the optional one; missing it makes the
+       counter a day old, which is worth saying, but the feed is not broken and
+       the red banner would cry wolf every time that run was skipped. */
+    ? `<div class="tp-warn"><b>Counter is a day behind.</b>
+       The evening pull has not landed — last pull ${ago}. Anything topped up
+       since then is not reflected below.</div>`
+    : `<p class="tp-note">Pulled twice a day, ${tpEsc(times)} — last pull ${ago}.
+       A card tapped this morning shows up after the evening pull.</p>`;
 
   const dead = m.deadReader || [];
   /* Named, not hidden. A machine whose reader has been silent for 30 days is
@@ -617,13 +728,20 @@ function tpVendRail(){
     const cell = r.everFlagged
       ? `<span class="ct">${r.dispenses}</span>`
       : `<span class="noflag">no flag yet</span>`;
+    /* If this machine already has a stop on the chosen date, picking it here
+       adjusts that stop rather than colliding with it. */
+    const ex = (TP.plan.onDate.stops||[]).find(
+      x => String(x.machineCode)===String(r.code) && x.movable);
     return `<button class="tp-v${on?" on":""}${(r.everFlagged && r.dispenses>=350)?" hot":""}"
-        onclick="tpShiftOpen(${tpJ(key)})" title="${tpEsc(r.everFlagged
-          ? "Last flagged "+String(r.lastFlag||"").slice(0,16).replace("T"," ")
-          : "No flag-card tap has ever been recorded at this machine, so there is no "
-            +"'since' to count from. Tap a flag card there on the next visit.")}">
-        <span class="nm">${tpEsc(r.name||r.code)}</span>${cell}</button>
-      ${open?tpShiftPicker(r.code, r.name, "planner", null, null):""}`;
+        onclick="tpShiftOpen(${tpJ(key)})" title="${tpEsc(
+          (ex ? "Already on this day (DO-"+ex.id+"). Picking it sets the shift. — " : "") +
+          (r.everFlagged
+            ? "Last flagged "+String(r.lastFlag||"").slice(0,16).replace("T"," ")
+            : "No flag-card tap has ever been recorded at this machine, so there is no "
+              +"'since' to count from. Tap a flag card there on the next visit."))}">
+        <span class="nm">${tpEsc(r.name||r.code)}</span>
+        ${ex?'<span class="tag done">on this day</span>':""}${cell}</button>
+      ${open?tpShiftPicker(r.code, r.name, "planner", null, null, ex?ex.id:null):""}`;
   };
 
   const flagged  = v.rows.filter(r=>r.everFlagged);
@@ -647,17 +765,17 @@ function tpVendRail(){
 
 function tpJ(v){ return tpEsc(JSON.stringify(v)); }
 
-function tpShiftPicker(code, name, source, gcalId, title){
+function tpShiftPicker(code, name, source, gcalId, title, moveId){
   const j = tpJ;
   return `<div class="tp-sh">
-    <button onclick="tpStage(${j(code)},${j(name||code)},0,${j(source)},${j(gcalId)},${j(title)})">Day shift</button>
-    <button class="night" onclick="tpStage(${j(code)},${j(name||code)},1,${j(source)},${j(gcalId)},${j(title)})">Night shift</button>
+    <button onclick="tpStage(${j(code)},${j(name||code)},0,${j(source)},${j(gcalId)},${j(title)},${j(moveId||null)})">Day shift</button>
+    <button class="night" onclick="tpStage(${j(code)},${j(name||code)},1,${j(source)},${j(gcalId)},${j(title)},${j(moveId||null)})">Night shift</button>
     <button class="cx" onclick="tpShiftCancel()">✕</button>
   </div>`;
 }
 
 function tpGcalList(){
-  const g = TP.plan.gcal;
+  const g = TP.plan.gcal, d0 = TP.plan.date || tpToday();
   if(g.loading && !g.events.length) return '<p class="tp-empty">Loading…</p>';
   if(g.err && !g.events.length) return `<div class="tp-warn"><b>Calendar unavailable</b>${tpEsc(g.err)}</div>`;
   if(!g.events.length) return '<p class="tp-empty">Nothing in the calendar for the next 14 days.</p>';
@@ -684,25 +802,40 @@ function tpGcalList(){
         const key = "g:"+c+":"+e.gcalId;
         const open  = TP.plan.shiftFor===key;
         const on    = TP.plan.staged.some(x=>x.machine_code===c);
-        /* PER CODE. A union across the whole event meant one booked machine at
-           a multi-machine site disabled every other machine there, and the
-           planner could not reach them at all. */
-        const bk = (e.bookedByCode||{})[c] || [];
-        const booked = bk.length;
-        return `<button class="tp-g${on?" on":""}" ${booked?"disabled":""}
-            onclick="tpShiftOpen(${tpJ(key)})"
-            title="${booked?tpEsc("Already has an open stop on "+bk.map(x=>x.date+" (DO-"+x.id+")").join(", "))
-                           :tpEsc(e.title||e.site)}">
+        /* PER CODE, and never disabled for already having a stop.
+           A sales entry is a REQUEST. That it has been placed on some day is
+           state to show, not a reason to lock it: deciding which day it lands
+           on is the entire job of this screen. Picking one sends its stop id so
+           the server MOVES that row rather than creating a second — see the
+           module docstring in topups_api.py. */
+        const bk = ((e.bookedByCode||{})[c] || [])
+                     .slice().sort((a,b)=> a.date < b.date ? -1 : a.date > b.date ? 1 : a.id-b.id);
+        const here = bk.find(x => x.date === d0);
+        const away = bk.find(x => x.date !== d0);
+        const moveId = (here || away || {}).id || null;
+        const tag = here  ? `<span class="tag done">on ${tpEsc(tpLabel(here.date))}</span>`
+                  : away  ? `<span class="tag move">move from ${tpEsc(tpLabel(away.date))}</span>`
+                  :         "";
+        const why = here ? "Already placed on "+d0+" (DO-"+here.id+"). Pick it to set or change the shift."
+                  : away ? "Currently placed on "+away.date+" (DO-"+away.id+"). Picking it MOVES that stop to "+d0+" — it does not create a second."
+                  :        (e.title||e.site);
+        return `<button class="tp-g${on?" on":""}"
+            onclick="tpShiftOpen(${tpJ(key)})" title="${tpEsc(why)}">
             <span class="nm">${tpEsc(e.site||e.title)}${e.codes.length>1?` · ${tpEsc(c)}`:""}</span>
-            ${booked?'<span class="tag done">booked</span>':""}
-          </button>
-          ${open?tpShiftPicker(c, e.site||e.title, "gcal", e.gcalId, e.title):""}`;
+            ${tag}</button>
+          ${open?tpShiftPicker(c, e.site||e.title, "gcal", e.gcalId, e.title, moveId):""}`;
       }).join("");
     }).join("")}`).join("");
 }
 
 function tpRenderPlan(){
   const d = TP.plan.date || tpToday();
+  /* Already on this day, minus anything currently staged for it — otherwise a
+     machine being re-shifted would show twice, once as existing and once as a
+     pick. */
+  const stagedCodes = new Set(TP.plan.staged.map(x=>String(x.machine_code)));
+  const existing = (TP.plan.onDate.date === d ? TP.plan.onDate.stops : [])
+                     .filter(x => !stagedCodes.has(String(x.machineCode)));
   const syncWarn = TP.plan.gcal.syncOn ? `<div class="tp-warn tp-bad">
     <b>Submitting is blocked: Google Calendar auto-sync is ON.</b>
     While GCAL_SYNC is on, the background sync creates its own stops for the next
@@ -729,20 +862,33 @@ function tpRenderPlan(){
         ${TP.plan.staged.length?`<button class="btn sm ghost" onclick="tpClear()">Clear all</button>`:""}
       </div>
       <div class="tp-stage">
-        ${TP.plan.staged.length ? TP.plan.staged.map(x=>`
+        ${existing.map(x=>`
+          <span class="tp-chip has" title="${tpEsc("Already on this day"
+              + (x.assignedTo ? " — " + tpDriverName(x.assignedTo) : " — unassigned")
+              + " (DO-" + x.id + ")")}">${tpEsc(x.machineName||x.machineCode)}
+            <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":x.shift===0?"DAY":"—"}</span>
+            <span class="who">${tpEsc(x.assignedTo ? tpDriverName(x.assignedTo) : "unassigned")}</span>
+          </span>`).join("")}
+        ${TP.plan.staged.map(x=>`
           <span class="tp-chip">${tpEsc(x.name)}
             <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":"DAY"}</span>
+            ${x.move_id?'<span class="who">moving</span>':""}
             <button class="x" title="Remove" onclick="tpUnstage(${tpJ(x.machine_code)})">✕</button>
-          </span>`).join("")
-        : '<span class="ph">Click a machine on either list below, choose day or night, and it lands here.</span>'}
+          </span>`).join("")}
+        ${(!existing.length && !TP.plan.staged.length)
+          ? (TP.plan.onDate.loading
+              ? '<span class="ph">Checking what is already on this day…</span>'
+              : '<span class="ph">Nothing on this day yet. Click a request or a machine below, choose day or night, and it lands here.</span>')
+          : ""}
       </div>
     </div>
 
     <div class="tp-pl">
       <div class="tp-pcard">
-        <h3>Sales calendar — next 14 days</h3>
-        <p class="sub">Pull anything forward onto the date above. Entries already
-          holding an open stop are shown as booked and cannot be picked twice.</p>
+        <h3>Sales requests — next 14 days</h3>
+        <p class="sub">Each entry is a request from sales: the site wants a visit
+          that week. You decide the day and the shift. Picking one places it on
+          the date above — if it is already placed, that <b>moves</b> it.</p>
         ${tpGcalList()}
       </div>
       <div class="tp-rail">
@@ -758,14 +904,21 @@ function tpRenderPlan(){
 
     <div class="tp-submit">
       <span class="sp">${TP.plan.staged.length
-        ? `${TP.plan.staged.length} machine${TP.plan.staged.length===1?"":"s"} → ${d}, unassigned`
-        : "Nothing picked yet."}</span>
+        ? (() => { const mv = TP.plan.staged.filter(x=>x.move_id).length;
+                   const nw = TP.plan.staged.length - mv;
+                   return [nw ? `${nw} new` : null, mv ? `${mv} moved` : null]
+                          .filter(Boolean).join(" · ") + ` → ${d}`; })()
+        : existing.length
+          ? `${existing.length} already on ${d}. Nothing new picked.`
+          : "Nothing picked yet."}</span>
       <button class="btn" onclick="tpSubmit()"
         ${(!TP.plan.staged.length||TP.plan.busy||TP.plan.gcal.syncOn)?"disabled":""}>
         ${TP.plan.busy?"Submitting…":"Submit"}</button>
     </div>
-    <p class="tp-note">Stops are created unassigned. Naming a driver happens in
-      one place only — Calendar ▸ Unassigned.</p>`;
+    <p class="tp-note">New stops are created unassigned; naming a driver happens in
+      one place only, Calendar ▸ Unassigned. Picking a request that is already
+      placed <b>moves</b> it to this date — it never creates a second stop, and
+      it keeps whichever driver already had it.</p>`;
 }
 
 /* ── Area entry point ──────────────────────────────────────────────────── */
@@ -788,7 +941,7 @@ function renderTopups(){
     `<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>`;
   const CRUMB = {
     calendar:"What happened, day by day, grouped by the driver who did it — and what is firmed up ahead.",
-    plan:"Pick machines off the vend counter or the sales calendar, choose a date and a shift, submit.",
+    plan:"Sales say which sites want a visit. You say which day and which shift.",
     series:"Standing rounds — weekly, fortnightly, four-weekly. Unchanged from the old Schedule tab."};
   const body = cur==="plan"   ? tpRenderPlan()
              : cur==="series" ? renderSchedule()
