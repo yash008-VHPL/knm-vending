@@ -419,10 +419,10 @@ def api_topups_vendcounter():
     FOUR HONESTIES THIS ENDPOINT OWES THE SCREEN, all returned as fields rather
     than swallowed:
 
-      staleAsOf   The feed is a BATCH, pulled at 05:00 and 17:00 SGT - the
-                  first catching the night shift, the second the day shift. It
-                  is not live. Without this the machine just topped up an hour
-                  ago still sorts to the top and invites a second visit.
+      staleAsOf   The feed is a BATCH, pulled twice a day (05:00 and 17:00
+                  SGT). A card tapped this morning shows up after the evening
+                  pull, not instantly. Without this the machine just topped up
+                  still sorts to the top of the list and invites a second visit.
       unflagged   Machines with an Auresys terminal that have never shown a flag
                   tap. Counted from their first transaction instead, and marked.
       noTerminal  Machines with no payment terminal at all (~61 of 134). They

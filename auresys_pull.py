@@ -292,11 +292,10 @@ def connect():
 
 
 def load(conn, rows, window, args, last_full=None):
-    """last_full = the newest day that is certainly complete, i.e. D-1.
-
-    That day is always rewritten rather than short-circuited by NO_CHANGE, so a
-    day first written partially is guaranteed to be replaced by a complete one.
-    Independent of --include-today - see the comment on the NO_CHANGE branch."""
+    """last_full = the newest day this run considers COMPLETE (D-1 on the
+    reconciliation run, None when --include-today). That day is always
+    rewritten rather than short-circuited by NO_CHANGE - see the comment on
+    that branch."""
     cur = conn.cursor()
     cur.execute("INSERT INTO dbo.NETS_Pull_Run "
                 "(Run_Id, Window_From, Window_To, Source_File, Csv_Line_Count, "
@@ -337,18 +336,13 @@ def load(conn, rows, window, args, last_full=None):
             sum_staged = sum((r["amount"] for r in prows), ZERO)
 
             if date > today or (date == today and not args.include_today):
-                # Today is incomplete by definition and the D-1 reconciliation
-                # rests on that, so it is excluded unless asked for.
-                #
-                # --include-today is the deliberate exception, and BOTH
-                # scheduled runs carry it:
-                #   05:00 SGT - "today" is 00:00-05:00, which is precisely where
-                #               a night shift's work lands. Without this, a top-up
-                #               finished at 01:00 stayed invisible until 17:00.
-                #   17:00 SGT - "today" is the day so far, for the day shift.
-                # Each pass replaces the last (staged > before -> LOADED), and
-                # D-1 is force-rewritten complete by the last_full rule below.
-                # Tomorrow is never loaded under any flag.
+                # Today is incomplete by definition, and the whole D-1
+                # reconciliation rests on that. --include-today is the deliberate
+                # exception: the 17:00 SGT run loads the day so far so the
+                # dashboard's vend counter is hours old rather than a day old.
+                # The 05:00 run reloads the same day complete and the LOADED
+                # branch replaces it, because staged > before. Tomorrow is never
+                # loaded under any flag.
                 counts["SKIPPED_TODAY"] += 1
                 continue
             if date == today and staged < before:
@@ -377,25 +371,19 @@ def load(conn, rows, window, args, last_full=None):
             if staged == before == 0:
                 continue
             if (staged == before and sum_staged == sum_before and staged > 0
-                    and date != last_full):
+                    and not (date == last_full and not args.include_today)):
                 # identical content already stored: touch nothing. This is what
                 # stops a later mapping fix re-stamping historical rows.
                 #
-                # ONE EXCEPTION, added with --include-today: D-1 - the newest
-                # day that is certainly complete - is ALWAYS rewritten, never
-                # short-circuited. It will have been written partially by the
-                # runs that saw it as "today", and a partial day that is never
-                # rewritten is worse than a missing one: vw_NETS_Daily_Count
-                # stops excluding it the next day and serves undercounted
-                # figures as the daily metric, which reads as telemetry >
-                # Auresys - the direction that does NOT alert. Every genuine
-                # paid-but-no-drink event on that day would be silently
-                # suppressed.
-                #
-                # last_full is deliberately INDEPENDENT of --include-today. An
-                # earlier cut tied the two together, so the moment both
-                # scheduled runs carried the flag the rewrite stopped happening
-                # at all - the exact failure it was added to prevent.
+                # ONE EXCEPTION, added with --include-today: the newest day of a
+                # D-1 run is always rewritten, never short-circuited. That day
+                # may have been written PARTIALLY by yesterday's 17:00 run, and
+                # a partial day that is never rewritten is worse than a missing
+                # one - vw_NETS_Daily_Count stops excluding it the next day and
+                # serves undercounted figures as the daily metric, which reads
+                # as telemetry > Auresys, the direction that does NOT alert. So
+                # every genuine paid-but-no-drink event on that day would be
+                # silently suppressed.
                 #
                 # It also un-freezes the mapping: rows stamped Machine_Code NULL
                 # at 17:00 get re-resolved against nets_mapping the next morning
@@ -520,11 +508,10 @@ def main():
                     help="fetch one day, print one raw row and the field names, load nothing")
     ap.add_argument("--force", action="store_true", help="override the shrink guard")
     ap.add_argument("--include-today", action="store_true", dest="include_today",
-                    help="also load TODAY, partial. Both scheduled runs use it: "
-                         "at 05:00 SGT 'today' is the small hours, which is where "
-                         "a night shift's work lands; at 17:00 it is the day so "
-                         "far. D-1 is always rewritten complete afterwards, so "
-                         "the reconciliation still only ever reads whole days.")
+                    help="also load TODAY, partial. For the 17:00 SGT run, which "
+                         "exists to keep the dashboard's vend counter fresh. The "
+                         "05:00 run must NOT use this: the D-1 reconciliation is "
+                         "built on today always being complete.")
     a = ap.parse_args()
 
     user = os.environ.get("AURESYS_USER")
@@ -613,7 +600,8 @@ def main():
         conn = connect()
         try:
             run_seq, counts, unmapped = load(
-                conn, all_rows, window, a, last_full=today - dt.timedelta(days=1))
+                conn, all_rows, window, a,
+                last_full=None if a.include_today else today - dt.timedelta(days=1))
         finally:
             conn.close()
 

@@ -2,24 +2,22 @@ name: Auresys Transaction Pull (05:00 and 17:00 SGT)
 
 # GitHub cron is always UTC.
 #
-#   21:00 UTC  ->  05:00 SGT next day   NIGHT SHIFT + RECONCILIATION
-#                  Runs after the machines settle (~02:30 SGT), so D-1 is
-#                  complete: this is the pass the D-1 telemetry comparison
-#                  depends on. It also carries --include-today, where "today"
-#                  is only 00:00-05:00 - which is exactly where a NIGHT SHIFT's
-#                  work lands. Without that, a top-up finished at 01:00 stayed
-#                  invisible until 17:00.
+#   21:00 UTC  ->  05:00 SGT next day   THE RECONCILIATION RUN
+#                  Window ends at D-1. Runs after the machines settle (~02:30
+#                  SGT) so the previous day is complete. This is the run the
+#                  D-1 telemetry comparison depends on, and it must stay
+#                  D-1-only: vw_NETS_Daily_Count excludes today for a reason.
 #
-#   09:00 UTC  ->  17:00 SGT same day    DAY SHIFT
-#                  --include-today loads the day so far, so a flag card tapped
-#                  in the morning shows up the same evening.
+#   09:00 UTC  ->  17:00 SGT same day   THE FRESHNESS RUN
+#                  Adds --include-today so the day so far is loaded, partial.
+#                  This exists for the dashboard vend counter: a flag card
+#                  tapped in the morning shows up the same evening instead of
+#                  the next day. The 05:00 run then reloads that day complete
+#                  and replaces it (staged > before -> LOADED).
 #
-# Both runs carry --include-today; the flag only decides whether the CURRENT
-# day is in the window. D-1 - the newest day that is certainly complete - is
-# force-rewritten on every run (see last_full in auresys_pull.load), so a day
-# first written partially is always replaced by a complete one and the
-# reconciliation still only ever reads whole days. vw_NETS_Daily_Count excludes
-# today regardless, so partial rows never reach it on the day itself.
+# A partial today is safe for "dispenses since last flag" - it undercounts
+# slightly until the next pull, which beats being a day stale. It is NOT safe
+# for the reconciliation, which is why only one of the two runs carries the flag.
 on:
   schedule:
     - cron: '0 21 * * *'
@@ -40,7 +38,7 @@ on:
         required: false
         default: 'false'
       include_today:
-        description: "true = also load today's partial data (both scheduled runs do)"
+        description: "true = also load today's partial data (the 17:00 run does this)"
         required: false
         default: 'false'
 
@@ -86,11 +84,10 @@ jobs:
             [ -n "${{ github.event.inputs.to }}" ] && ARGS="$ARGS --to ${{ github.event.inputs.to }}"
           fi
           [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
-          # Every SCHEDULED run loads today; github.event.schedule is non-empty
-          # only on a scheduled run and empty on a manual dispatch. A manual run
-          # stays D-1-only unless asked, so investigating a historical window
-          # never drags today's partial rows in with it.
-          if [ -n "${{ github.event.schedule }}" ] \
+          # github.event.schedule is the literal cron string that fired this run
+          # - the only way to tell the two schedules apart. It is empty on a
+          # manual dispatch, which is why the input is checked as well.
+          if [ "${{ github.event.schedule }}" = "0 9 * * *" ] \
              || [ "${{ github.event.inputs.include_today }}" = "true" ]; then
             ARGS="$ARGS --include-today"
           fi

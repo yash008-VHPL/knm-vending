@@ -702,12 +702,11 @@ function tpVendRail(){
     /* Amber, not red. The 17:00 run is the optional one; missing it makes the
        counter a day old, which is worth saying, but the feed is not broken and
        the red banner would cry wolf every time that run was skipped. */
-    ? `<div class="tp-warn"><b>Counter is behind.</b>
-       A scheduled pull has not landed — last pull ${ago}. Anything topped up
+    ? `<div class="tp-warn"><b>Counter is a day behind.</b>
+       The evening pull has not landed — last pull ${ago}. Anything topped up
        since then is not reflected below.</div>`
-    : `<p class="tp-note">Pulled ${tpEsc(times)} — last pull ${ago}. The 05:00 run
-       picks up the night shift, the 17:00 run the day shift, so a top-up is
-       reflected here within hours rather than the next morning.</p>`;
+    : `<p class="tp-note">Pulled twice a day, ${tpEsc(times)} — last pull ${ago}.
+       A card tapped this morning shows up after the evening pull.</p>`;
 
   const dead = m.deadReader || [];
   /* Named, not hidden. A machine whose reader has been silent for 30 days is
