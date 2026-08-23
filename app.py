@@ -1832,6 +1832,16 @@ try:
 except Exception as e:
     print(f"[startup] alpha_preview blueprint not loaded: {e}")
 
+# ── Topups tab (additive) — Calendar + Plan at /api/topups ────────────────────
+# Wrapped like every other optional blueprint so a missing column, a missing
+# GRANT on the Auresys tables, or a syntax error in the new module can never
+# stop the app from booting. GET /api/topups/health says whether it is live.
+try:
+    from topups_api import topups_bp
+    app.register_blueprint(topups_bp, url_prefix="/api/topups")
+except Exception as e:
+    print(f"[startup] topups_api blueprint not loaded: {e}")
+
 if not ALPHA_OK:
     # Production is down. index() drops its admin-only gate (see the ALPHA_OK
     # test there) and "/" sends everyone to the archive, so operators, sales,

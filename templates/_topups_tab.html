@@ -1,0 +1,823 @@
+{# ===========================================================================
+   Topups tab — Calendar + Plan                                    2026-08-23
+
+   Included by alpha_preview.html BEFORE its main <script>, so every function
+   here is on window by the time render() dispatches to it. Nothing in this
+   file runs at parse time; every reference to a main-script global ($, api,
+   toast, woEsc, state, subActive, render, techs, driverName) is inside a
+   function body and therefore resolved at call time.
+
+   Namespacing: every CSS class is tp-*, every global is TP* or tp*. The alpha
+   stylesheet is one flat sheet with no scoping, so a bare .day or .chip here
+   would reach into the dispatch board and the sales grid.
+   =========================================================================== #}
+<style>
+/* ── Topups: shared ─────────────────────────────────────────────────────── */
+.tp-bar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;background:var(--card);
+  border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:0 0 14px}
+.tp-bar .sp{flex:1}
+.tp-warn{background:var(--amber-bg);border:1px solid var(--warn);border-radius:8px;
+  padding:10px 12px;margin:0 0 14px;font-size:.82rem;line-height:1.45}
+.tp-warn b{display:block;margin-bottom:2px}
+.tp-bad{background:var(--red-bg);border:1px solid var(--bad)}
+.tp-note{color:var(--mut);font-size:.76rem;margin:8px 0 0}
+.tp-empty{color:var(--mut);font-size:.8rem;margin:6px 0;font-style:italic}
+
+/* ── Calendar ───────────────────────────────────────────────────────────── */
+.tp-wk{margin:0 0 18px}
+.tp-wkh{display:flex;align-items:baseline;gap:10px;margin:0 0 8px;font-size:.8rem;
+  font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
+.tp-wkh .sub{font-weight:500;text-transform:none;letter-spacing:0}
+.tp-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:8px}
+@media(max-width:1100px){.tp-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:640px){.tp-grid{grid-template-columns:1fr}}
+.tp-day{background:var(--card);border:1px solid var(--line);border-radius:10px;
+  padding:8px;min-height:120px;display:flex;flex-direction:column;gap:6px}
+.tp-day.today{border-color:var(--blue);box-shadow:0 0 0 2px rgba(26,86,219,.12)}
+.tp-day.past{background:#fafbfc}
+.tp-dh{display:flex;justify-content:space-between;align-items:baseline;
+  border-bottom:1px solid var(--line);padding-bottom:4px}
+.tp-dh b{font-size:.78rem}
+.tp-dh span{font-size:.7rem;color:var(--mut)}
+.tp-drv{margin-top:2px}
+.tp-drvh{display:flex;justify-content:space-between;align-items:center;gap:4px;
+  font-size:.68rem;font-weight:700;color:var(--mut);text-transform:uppercase;
+  letter-spacing:.03em;margin:0 0 3px}
+.tp-drvh .n{background:var(--chip);color:var(--blue-d);border-radius:8px;
+  padding:0 5px;font-size:.65rem}
+/* One stop. The left border is the colour channel; the fill stays pale so a
+   day with seven stops does not become a block of solid green. */
+.tp-s{display:flex;justify-content:space-between;align-items:center;gap:6px;
+  border:1px solid var(--line);border-left-width:4px;border-radius:6px;
+  padding:3px 6px;margin:0 0 3px;font-size:.72rem;background:#fff;cursor:default}
+.tp-s .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tp-s .sh{font-size:.6rem;font-weight:700;letter-spacing:.04em;color:var(--mut);
+  border:1px solid var(--line);border-radius:4px;padding:0 3px;flex:none}
+.tp-s.g{border-left-color:var(--ok);background:var(--green-bg)}
+.tp-s.y{border-left-color:var(--warn);background:var(--amber-bg)}
+.tp-s.r{border-left-color:var(--bad);background:var(--red-bg)}
+.tp-s.p{border-left-color:var(--blue)}
+.tp-s.act{cursor:pointer}
+.tp-s.act:hover{border-color:var(--blue)}
+.tp-s .src{font-size:.58rem;color:var(--mut);flex:none}
+.tp-un{width:100%;text-align:left;border:1px dashed var(--warn);background:var(--amber-bg);
+  color:var(--ink);border-radius:6px;padding:4px 6px;font-size:.72rem;font-weight:600;
+  cursor:pointer;font-family:inherit}
+.tp-un:hover{border-style:solid}
+.tp-other{font-size:.65rem;color:var(--mut);border-top:1px dashed var(--line);
+  padding-top:4px;margin-top:auto}
+.tp-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:.72rem;color:var(--mut);
+  margin:0 0 12px}
+.tp-legend i{display:inline-block;width:10px;height:10px;border-radius:2px;
+  margin-right:4px;vertical-align:-1px}
+
+/* ── Assignment page ────────────────────────────────────────────────────── */
+.tp-as{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px}
+@media(max-width:900px){.tp-as{grid-template-columns:1fr}}
+.tp-ascol{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+.tp-ascol h4{margin:0 0 8px;font-size:.8rem}
+.tp-m{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  border:1px solid var(--line);border-radius:7px;padding:6px 8px;margin:0 0 5px;
+  font-size:.78rem;cursor:pointer;background:#fff}
+.tp-m:hover{border-color:var(--blue)}
+.tp-m.on{border-color:var(--blue);background:var(--chip);box-shadow:inset 0 0 0 1px var(--blue)}
+.tp-m .who{font-size:.68rem;color:var(--mut)}
+.tp-drvbtn{display:block;width:100%;text-align:left;border:1px solid var(--line);
+  background:#fff;border-radius:7px;padding:7px 9px;margin:0 0 5px;font-size:.78rem;
+  cursor:pointer;font-family:inherit}
+.tp-drvbtn:hover{border-color:var(--blue);background:var(--chip)}
+.tp-drvbtn:disabled{opacity:.45;cursor:not-allowed}
+.tp-drvbtn .em{display:block;font-size:.66rem;color:var(--mut)}
+
+/* ── Plan ───────────────────────────────────────────────────────────────── */
+.tp-comp{background:var(--card);border:1px solid var(--blue);border-radius:10px;
+  padding:12px;margin:0 0 14px;box-shadow:0 1px 3px rgba(0,0,0,.05)}
+.tp-comp .r1{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:0 0 8px}
+.tp-comp .r1 label{font-size:.75rem;font-weight:700;color:var(--mut);margin:0}
+.tp-comp .r1 input.isodate{width:130px}
+.tp-stage{min-height:52px;border:1px dashed var(--line);border-radius:8px;padding:7px;
+  display:flex;flex-wrap:wrap;gap:5px;align-content:flex-start;background:var(--bg)}
+.tp-stage .ph{color:var(--mut);font-size:.76rem;font-style:italic}
+.tp-chip{display:inline-flex;align-items:center;gap:5px;background:var(--chip);
+  border:1px solid var(--blue);border-radius:14px;padding:2px 4px 2px 9px;font-size:.73rem}
+.tp-chip .sh{font-size:.6rem;font-weight:700;letter-spacing:.04em;
+  background:var(--blue);color:#fff;border-radius:8px;padding:1px 5px}
+.tp-chip .sh.night{background:var(--ink)}
+.tp-chip .x{border:0;background:transparent;cursor:pointer;color:var(--mut);
+  font-size:.9rem;line-height:1;padding:0 3px;font-family:inherit}
+.tp-chip .x:hover{color:var(--bad)}
+
+.tp-pl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start}
+@media(max-width:1100px){.tp-pl{grid-template-columns:1fr}}
+.tp-pcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
+.tp-pcard h3{margin:0 0 2px;font-size:.85rem}
+.tp-pcard .sub{font-size:.72rem;color:var(--mut);margin:0 0 10px}
+/* The vend counter is a portrait list: it scrolls inside itself so the
+   calendar column beside it never has to be scrolled past to reach Submit. */
+.tp-rail{position:sticky;top:12px}
+.tp-vlist{max-height:62vh;overflow-y:auto;margin:0 -4px;padding:0 4px}
+.tp-v{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  border:1px solid var(--line);border-radius:7px;padding:5px 8px;margin:0 0 4px;
+  font-size:.78rem;cursor:pointer;background:#fff;width:100%;text-align:left;
+  font-family:inherit}
+.tp-v:hover{border-color:var(--blue)}
+.tp-v.on{border-color:var(--blue);background:var(--chip)}
+.tp-v .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tp-v .ct{font-variant-numeric:tabular-nums;font-weight:700;flex:none;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.tp-v.hot .ct{color:var(--bad)}
+.tp-v .noflag{font-size:.6rem;color:var(--warn);flex:none}
+.tp-gday{font-size:.7rem;font-weight:700;color:var(--mut);text-transform:uppercase;
+  letter-spacing:.04em;margin:10px 0 4px;border-bottom:1px solid var(--line);padding-bottom:2px}
+.tp-g{display:flex;justify-content:space-between;align-items:center;gap:8px;
+  border:1px solid var(--line);border-radius:7px;padding:5px 8px;margin:0 0 4px;
+  font-size:.78rem;cursor:pointer;background:#fff;width:100%;text-align:left;
+  font-family:inherit}
+.tp-g:hover{border-color:var(--blue)}
+.tp-g.on{border-color:var(--blue);background:var(--chip)}
+.tp-g:disabled{opacity:.55;cursor:not-allowed;background:#fafbfc}
+.tp-g .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tp-g .tag{font-size:.6rem;border-radius:8px;padding:1px 6px;flex:none;
+  background:var(--chip);color:var(--blue-d)}
+.tp-g .tag.warn{background:var(--amber-bg);color:#92400e}
+.tp-g .tag.done{background:var(--green-bg);color:#166534}
+
+/* The day/night picker. Rendered inline under the row that was clicked, not as
+   a modal — a modal here made every pick a three-click round trip. */
+.tp-sh{display:flex;gap:6px;padding:5px 8px 8px;margin:-2px 0 6px}
+.tp-sh button{flex:1;border:1px solid var(--blue);background:#fff;color:var(--blue-d);
+  border-radius:6px;padding:5px;font-size:.72rem;font-weight:700;cursor:pointer;
+  font-family:inherit}
+.tp-sh button:hover{background:var(--blue);color:#fff}
+.tp-sh button.night{border-color:var(--ink);color:var(--ink)}
+.tp-sh button.night:hover{background:var(--ink);color:#fff}
+.tp-sh button.cx{flex:0 0 auto;border-color:var(--line);color:var(--mut)}
+.tp-sh button.cx:hover{background:var(--line);color:var(--ink)}
+
+.tp-submit{position:sticky;bottom:0;z-index:5;background:var(--card);border:1px solid var(--line);
+  border-radius:10px;padding:10px 12px;margin:16px 0 0;display:flex;gap:10px;
+  align-items:center;box-shadow:0 -2px 8px rgba(0,0,0,.06)}
+.tp-submit .sp{flex:1;font-size:.76rem;color:var(--mut)}
+</style>
+
+<script>
+/* ===========================================================================
+   Topups — state
+   ===========================================================================
+   TP.view is deliberately separate from state.sub.topups. The assignment page
+   is not a sub-tab: it is a drill-down that has to survive a re-render and be
+   dismissed back to the exact week the user came from, and putting it in
+   state.sub would have put it in the sub-nav.
+   ======================================================================== */
+const TP = {
+  cal:   {anchor:null, weeks:3, stops:[], other:{}, today:null, loading:false,
+          stale:true, err:null, syncOn:null},
+  assign:{open:false, date:null, picked:new Set(), busy:false},
+  plan:  {date:null, staged:[], shiftFor:null, blockErr:null,
+          vend:{rows:[], ready:false, err:null, stale:true, loading:false, meta:null},
+          gcal:{events:[], stale:true, loading:false, err:null, syncOn:null},
+          busy:false},
+};
+
+const TP_DOW = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+const TP_MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+/* SGT today. Date.now() is ALREADY a UTC epoch, so the shift is a flat +8h —
+   an earlier version added getTimezoneOffset() as well, which for a browser in
+   Singapore cancelled the +8 exactly and returned the UTC date. Between 00:00
+   and 08:00 SGT that is YESTERDAY, so the Plan tab's own date floor rejected
+   its own default and the whole 06:30-onwards planning window was dead.
+   Matches the main script's sgtToday() and workorders._sgt_today(). */
+function tpToday(){
+  if(typeof sgtToday === "function") return sgtToday();
+  return new Date(Date.now() + 480*60000).toISOString().slice(0,10);
+}
+function tpAdd(iso,n){const d=new Date(iso+"T00:00:00Z");d.setUTCDate(d.getUTCDate()+n);
+  return d.toISOString().slice(0,10);}
+function tpDow(iso){return (new Date(iso+"T00:00:00Z").getUTCDay()+6)%7;}   // 0=Mon
+function tpMonday(iso){return tpAdd(iso,-tpDow(iso));}
+function tpLabel(iso){const d=new Date(iso+"T00:00:00Z");
+  return d.getUTCDate()+" "+TP_MON[d.getUTCMonth()];}
+/* woEsc is a top-level const in the main script — it lives in the global
+   LEXICAL environment, not on window, so `window.woEsc` is undefined even
+   though `woEsc` resolves fine. Bind by bare name, guarded by typeof so this
+   file never throws if it is ever loaded on its own. */
+function tpEsc(s){
+  if(typeof woEsc === "function") return woEsc(s);
+  return String(s==null?"":s).replace(/[&<>"']/g,
+    c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function tpTechs(){ return (typeof techs !== "undefined" && techs) ? techs : []; }
+function tpDriverName(e){
+  return (typeof driverName === "function") ? driverName(e) : (e || "unassigned");
+}
+/* Roles that may name a driver. DISPATCH_ROLES on the server excludes sales
+   (workorders.py:60), so the assignment screen is hidden rather than shown and
+   then 403d — that mismatch is exactly what the role plumbing exists to stop. */
+function tpCanAssign(){return state.role==="field_manager"||state.role==="admin";}
+
+/* ── Calendar ──────────────────────────────────────────────────────────── */
+const TP_COLOUR = {0:"g", 1:"y", 2:"r"};
+
+async function tpCalLoad(){
+  if(TP.cal.loading) return;
+  TP.cal.loading = true; TP.cal.stale = false;
+  const from = tpMonday(TP.cal.anchor || tpToday());
+  const to   = tpAdd(from, TP.cal.weeks*7 - 1);
+  const r = await api(`/api/topups/calendar?from=${from}&to=${to}`);
+  TP.cal.loading = false;
+  if(!r){ TP.cal.err = "Could not load the calendar — see the message above."; }
+  else {
+    TP.cal.err    = r.warning || null;
+    TP.cal.stops  = r.stops || [];
+    TP.cal.other  = r.otherWork || {};
+    TP.cal.today  = r.today || tpToday();
+    TP.cal.syncOn = !!r.gcalSyncOn;
+  }
+  render();
+}
+function tpCalEnsure(){ if(TP.cal.stale && !TP.cal.loading) tpCalLoad(); }
+function tpCalShift(n){ TP.cal.anchor = tpAdd(tpMonday(TP.cal.anchor||tpToday()), n*7);
+  TP.cal.stale = true; render(); }
+function tpCalThis(){ TP.cal.anchor = null; TP.cal.stale = true; render(); }
+function tpCalMore(){ TP.cal.weeks += 3; TP.cal.stale = true; render(); }
+
+function tpStopRow(s, past, judgeable){
+  /* An undated OPEN row is not a plan and not an outcome: it is a stop that is
+     jamming its machine on every date through the ISNULL duplicate rule. It is
+     surfaced against today so the batch endpoint's "has an open stop with no
+     date" refusal points at something the dispatcher can actually see. */
+  if(s.blocking) return `<div class="tp-s r" title="${tpEsc(
+    (s.machineName||s.machineCode||"?")+" — open stop with no date (DO-"+s.id+
+    "). It blocks this machine on every day until it is closed or given a date.")}">
+    <span class="nm">${tpEsc(s.machineName||s.machineCode||"?")}</span>
+    <span class="sh">NO DATE</span></div>`;
+  /* Colour precedence, stated once so it cannot drift: a dispatcher's
+     judgement beats the derivation, and a signed visit beats everything the
+     derivation could otherwise call amber. The server settles both and hands
+     down one .colour — the client never recomputes it. */
+  /* Colour whenever the server derived one. Gating on `past` meant TODAY —
+     the one day a dispatcher actually looks at — threw away a colour the server
+     had already worked out and rendered flat blue, and was the only day whose
+     stops could not be judged. */
+  const cls = TP_COLOUR[s.colour] || "p";
+  const can = judgeable && tpCanAssign();
+  const sh  = s.shift===0 ? "DAY" : s.shift===1 ? "NIGHT" : "";
+  return `<div class="tp-s ${cls}${can?" act":""}" ${can?`onclick="tpOutcome(${s.id})"`:""}
+    title="${tpEsc((s.machineName||s.machineCode||"")+(s.why?" — "+s.why:"")
+      + (s.undated?" — no planned date; filed on the day it was completed":""))}">
+    <span class="nm">${tpEsc(s.machineName||s.machineCode||"?")}</span>
+    ${sh?`<span class="sh">${sh}</span>`:""}
+    ${s.colourSource==="dispatch"?'<span class="src" title="Set by dispatch">✎</span>':""}
+  </div>`;
+}
+
+function tpCalDay(iso, byDay, todayIso){
+  /* STRICTLY earlier. Today used to count as "past", so its still-open stops
+     asked TP_COLOUR for a null outcome, got undefined, and rendered with no
+     colour band at all — while tomorrow's rendered blue. The one day a
+     dispatcher actually looks at was the least informative on the screen. */
+  const past  = iso < todayIso;
+  /* Today counts as judgeable — work happens during it — but not as "past" for
+     the unassigned-collapse below, where the day's plan is still live. */
+  const judgeable = iso <= todayIso;
+  const stops = byDay[iso] || [];
+  const groups = {};
+  stops.forEach(s => { const k = s.assignedTo || ""; (groups[k]=groups[k]||[]).push(s); });
+  const unassigned = groups[""] || [];
+  delete groups[""];
+
+  const drivers = Object.keys(groups).sort().map(em => `
+    <div class="tp-drv">
+      <div class="tp-drvh"><span>${tpEsc(tpDriverName(em))}</span>
+        <span class="n">${groups[em].length}</span></div>
+      ${groups[em].map(s=>tpStopRow(s,past,judgeable)).join("")}
+    </div>`).join("");
+
+  let un = "";
+  if(unassigned.length){
+    /* Past days keep the same word. An unassigned stop on a past day is not a
+       plan any more — it is work nobody was ever given, which is precisely
+       what a dispatcher looking backwards needs to see. */
+    un = tpCanAssign()
+      ? `<button class="tp-un" onclick="tpAssignOpen(${tpJ(iso)})">Unassigned (${unassigned.length}) →</button>`
+      : `<div class="tp-un" style="cursor:default">Unassigned (${unassigned.length})</div>`;
+    if(!past) un += unassigned.map(s=>tpStopRow(s,false,judgeable)).join("");
+  }
+
+  const o = TP.cal.other[iso];
+  const other = o && (o.joborders||o.movements)
+    ? `<div class="tp-other">Also on this day: ${o.joborders||0} service · ${o.movements||0} movement
+       <span title="Service job orders and machine movements are not top-ups. They live on Service ▸ Day board.">ⓘ</span></div>`
+    : "";
+
+  return `<div class="tp-day${iso===todayIso?" today":""}${iso<todayIso?" past":""}">
+    <div class="tp-dh"><b>${TP_DOW[tpDow(iso)]}</b><span>${tpLabel(iso)}</span></div>
+    ${drivers}${un}
+    ${(!drivers && !un) ? `<p class="tp-empty">${past?"—":"Nothing planned"}</p>` : ""}
+    ${other}
+  </div>`;
+}
+
+function tpRenderCalendar(){
+  if(TP.assign.open) return tpRenderAssign();
+
+  const today = TP.cal.today || tpToday();
+  const byDay = {};
+  TP.cal.stops.forEach(s => { if(s.date) (byDay[s.date]=byDay[s.date]||[]).push(s); });
+
+  const start = tpMonday(TP.cal.anchor || today);
+  const weeks = [];
+  for(let w=0; w<TP.cal.weeks; w++){
+    const mon = tpAdd(start, w*7), days = [];
+    for(let i=0;i<7;i++) days.push(tpCalDay(tpAdd(mon,i), byDay, today));
+    weeks.push(`<div class="tp-wk">
+      <div class="tp-wkh">Week of ${tpLabel(mon)}
+        <span class="sub">${mon} → ${tpAdd(mon,6)}</span></div>
+      <div class="tp-grid">${days.join("")}</div></div>`);
+  }
+
+  const syncWarn = TP.cal.syncOn ? `<div class="tp-warn tp-bad">
+    <b>Google Calendar auto-sync is still ON.</b>
+    It creates its own stops for the next 28 days and hard-deletes any unassigned
+    stop it does not recognise. The Plan tab will refuse to submit until the
+    GCAL_SYNC app setting is 0 and the app has restarted.</div>` : "";
+
+  return `<div class="tp-bar">
+      <button class="btn sm ghost" onclick="tpCalShift(-1)">‹ Previous week</button>
+      <button class="btn sm ghost" onclick="tpCalThis()">This week</button>
+      <button class="btn sm ghost" onclick="tpCalShift(1)">Next week ›</button>
+      <span class="sp"></span>
+      <button class="btn sm ghost" onclick="TP.cal.stale=true;render()">Refresh</button>
+    </div>
+    ${syncWarn}
+    ${TP.cal.err?`<div class="tp-warn"><b>${tpEsc(TP.cal.err)}</b></div>`:""}
+    <div class="tp-legend">
+      <span><i style="background:var(--ok)"></i>Serviced</span>
+      <span><i style="background:var(--warn)"></i>Faulty service</span>
+      <span><i style="background:var(--bad)"></i>Unable</span>
+      <span><i style="background:var(--blue)"></i>Planned</span>
+      ${tpCanAssign()?'<span style="color:var(--mut)">Click a past stop to set or clear its colour.</span>':""}
+    </div>
+    ${TP.cal.loading && !TP.cal.stops.length ? '<p class="tp-empty">Loading…</p>' : weeks.join("")}
+    <button class="btn sm ghost" onclick="tpCalMore()">Show 3 more weeks</button>
+    <p class="tp-note">Past days show what happened. Green and red are worked out from the
+      record; amber means the stop completed with no signature on file. Anything a
+      dispatcher marks by hand overrides that and is shown with a ✎.</p>`;
+}
+
+/* Dispatcher's colour override. A prompt rather than a drawer on purpose: this
+   is a correction, not a form, and it must not become a second place where a
+   stop can be edited. */
+async function tpOutcome(id){
+  const s = TP.cal.stops.find(x=>x.id===id);
+  if(!s) return;
+  const cur = s.outcome==null ? "" : String(s.outcome);
+  const v = prompt(
+    `${s.machineName||s.machineCode}\n${s.why||""}\n\n` +
+    `0 = serviced (green)\n1 = faulty service (amber)\n2 = unable (red)\n` +
+    `blank = clear, go back to the derived colour`, cur);
+  if(v===null) return;
+  const t = v.trim();
+  let outcome = null;
+  if(t!==""){ if(!["0","1","2"].includes(t)){ toast("Enter 0, 1, 2 or leave blank."); return; }
+    outcome = Number(t); }
+  let note = null;
+  if(outcome!==null){
+    note = prompt("Note (optional) — what the dispatcher saw:", s.outcomeNote||"");
+    if(note===null) return;
+  }
+  const r = await api("/api/topups/outcome", {method:"POST",
+    body:{id, outcome, note:(note||"").trim()||null}});
+  if(!r){ return; }   // api() has already toasted
+  TP.cal.stale = true; toast("Saved."); render();
+}
+
+/* ── Assignment page ───────────────────────────────────────────────────── */
+function tpAssignOpen(iso){ TP.assign = {open:true, date:iso, picked:new Set(), busy:false};
+  render(); }
+function tpAssignClose(){ TP.assign.open = false; render(); }
+function tpAssignPick(id){
+  const s = TP.assign.picked;
+  s.has(id) ? s.delete(id) : s.add(id);
+  render();
+}
+function tpAssignAll(){
+  const un = TP.cal.stops.filter(s=>s.date===TP.assign.date && !s.assignedTo && !s.blocking);
+  TP.assign.picked = new Set(un.map(s=>s.id)); render();
+}
+
+async function tpAssignTo(email){
+  if(TP.assign.busy) return;
+  const ids = [...TP.assign.picked];
+  if(!ids.length){ toast("Tick the machines first, then pick a driver."); return; }
+  TP.assign.busy = true; render();
+  const r = await api("/api/topups/assign", {method:"POST", body:{
+    scheduled_date: TP.assign.date,
+    assignments: ids.map(id=>({id, assigned_to: email||null}))}});
+  TP.assign.busy = false;
+  if(!r){ render(); return; }   // api() has already toasted
+  const n = (r.assigned||[]).length, sk = r.skipped||[];
+  /* Remove only what this call actually handled. Clearing the whole set threw
+     away anything ticked while the request was in flight, with no sign it had
+     happened — the rows stay clickable during the await by design. */
+  ids.forEach(i => TP.assign.picked.delete(i));
+  TP.cal.stale = true;
+  toast(sk.length ? `${n} assigned · ${sk.length} skipped — ${sk[0].why}`
+                  : `${n} assigned to ${email||"nobody"}.`);
+  render();
+}
+
+function tpRenderAssign(){
+  const iso = TP.assign.date;
+  const un  = TP.cal.stops.filter(s=>s.date===iso && !s.assignedTo);
+  const already = TP.cal.stops.filter(s=>s.date===iso && s.assignedTo);
+  const counts = {};
+  already.forEach(s=>{counts[s.assignedTo]=(counts[s.assignedTo]||0)+1;});
+
+  /* Everyone with a stop that day, plus the AAD operator roster. A driver who
+     already carries work but has dropped off the roster must still be listed,
+     or their day becomes unreachable from this screen. */
+  const people = [...new Set([
+    ...(tpTechs().map(t=>(t.email||"").toLowerCase())),
+    ...Object.keys(counts)])].filter(Boolean).sort();
+
+  return `<div class="tp-bar">
+      <button class="btn sm ghost" onclick="tpAssignClose()">‹ Back to calendar</button>
+      <span class="sp"><b>${TP_DOW[tpDow(iso)]} ${tpLabel(iso)}</b> —
+        ${un.length} unassigned · ${already.length} already assigned</span>
+      <button class="btn sm ghost" onclick="tpAssignAll()">Select all</button>
+    </div>
+    ${!people.length ? `<div class="tp-warn"><b>No drivers in the roster.</b>
+       The operator list comes from Microsoft Entra. If it is empty, the
+       MS_OPERATOR_ROLE_ID app setting is missing or nobody holds the operator
+       role.</div>` : ""}
+    <div class="tp-as">
+      <div class="tp-ascol">
+        <h4>Unassigned machines</h4>
+        ${un.length ? un.map(s=>`
+          <div class="tp-m${TP.assign.picked.has(s.id)?" on":""}" onclick="tpAssignPick(${s.id})">
+            <span>${tpEsc(s.machineName||s.machineCode)}</span>
+            <span class="who">${s.shift===1?"NIGHT":s.shift===0?"DAY":"—"}${s.needsService?" · service":""}</span>
+          </div>`).join("") : '<p class="tp-empty">Nothing left unassigned on this day.</p>'}
+        ${already.length ? `<h4 style="margin-top:14px">Already assigned</h4>
+          <p class="tp-note" style="margin:-4px 0 6px">Tick one to move it to a
+            different driver, or to put it back in the unassigned pile.</p>
+          ${already.map(s=>`<div class="tp-m${TP.assign.picked.has(s.id)?" on":""}"
+              onclick="tpAssignPick(${s.id})">
+            <span>${tpEsc(s.machineName||s.machineCode)}</span>
+            <span class="who">${tpEsc(tpDriverName(s.assignedTo))}</span>
+          </div>`).join("")}` : ""}
+      </div>
+      <div class="tp-ascol">
+        <h4>Give ${TP.assign.picked.size} selected to…</h4>
+        ${people.map(em=>`<button class="tp-drvbtn" ${TP.assign.busy?"disabled":""}
+            onclick="tpAssignTo(${tpJ(em)})">
+            ${tpEsc(tpDriverName(em))}
+            <span class="em">${tpEsc(em)}${counts[em]?` · ${counts[em]} already`:""}</span>
+          </button>`).join("")}
+        <button class="tp-drvbtn" style="border-style:dashed" ${TP.assign.busy?"disabled":""}
+          onclick="tpAssignTo(null)">Put back to unassigned</button>
+        <p class="tp-note">Assigning also gives the stop its position in that
+          driver's round, and refuses if the machine already has another open
+          stop on this day.</p>
+      </div>
+    </div>`;
+}
+
+/* ── Plan ──────────────────────────────────────────────────────────────── */
+async function tpVendLoad(force){
+  if(TP.plan.vend.loading) return;
+  TP.plan.vend.loading = true; TP.plan.vend.stale = false;
+  const r = await api("/api/topups/vendcounter" + (force?"?refresh=1":""));
+  TP.plan.vend.loading = false;
+  if(!r){ TP.plan.vend.err = "Could not load the vend counter."; }
+  else { /* `notReady` deliberately, not `error`: api() destroys any body with a
+            truthy `error` key, which threw away the one message that tells
+            somebody how to fix this. */
+         TP.plan.vend.err = r.ready ? null : (r.notReady||"Not ready.");
+         TP.plan.vend.ready = !!r.ready; TP.plan.vend.rows = r.rows||[];
+         TP.plan.vend.meta = r; }
+  render();
+}
+async function tpGcalLoad(){
+  if(TP.plan.gcal.loading) return;
+  TP.plan.gcal.loading = true; TP.plan.gcal.stale = false;
+  const r = await api("/api/topups/gcal?days=14");
+  TP.plan.gcal.loading = false;
+  if(!r){ TP.plan.gcal.err = "Calendar unavailable."; TP.plan.gcal.syncOn = null; }
+  else { TP.plan.gcal.err = r.feedError||null; TP.plan.gcal.events = r.events||[];
+         /* undefined must NEVER read as "sync is off" — that is what silently
+            re-enabled Submit while the auto-sync was live. */
+         TP.plan.gcal.syncOn = (r.gcalSyncOn===undefined ? null : !!r.gcalSyncOn); }
+  render();
+}
+function tpPlanEnsure(){
+  if(!TP.plan.date) TP.plan.date = tpToday();
+  if(TP.plan.vend.stale && !TP.plan.vend.loading) tpVendLoad(false);
+  if(TP.plan.gcal.stale && !TP.plan.gcal.loading) tpGcalLoad();
+}
+
+function tpSetDate(v){
+  const iso = (window.isoNormDate ? isoNormDate(v) : v) || "";
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(iso)){ toast("Use YYYY-MM-DD."); return; }
+  if(iso < tpToday()){ toast("Pick today or a later date."); TP.plan.date = tpToday(); render(); return; }
+  TP.plan.date = iso; render();
+}
+/* One click opens the day/night picker; the shift choice is what actually
+   stages the machine. A machine cannot be staged without a shift, because the
+   server refuses an item that has none. */
+function tpShiftOpen(key){ TP.plan.shiftFor = (TP.plan.shiftFor===key ? null : key); render(); }
+function tpShiftCancel(){ TP.plan.shiftFor = null; render(); }
+function tpStage(code, name, shift, source, gcalId, title){
+  if(TP.plan.staged.some(x=>x.machine_code===code)){
+    toast(`${name} is already on the list.`); TP.plan.shiftFor=null; render(); return; }
+  TP.plan.staged.push({machine_code:code, name, shift,
+                       source:source||"planner", gcal_event_id:gcalId||null, title:title||null});
+  TP.plan.shiftFor = null; render();
+}
+function tpUnstage(code){ TP.plan.staged = TP.plan.staged.filter(x=>x.machine_code!==code); render(); }
+function tpClear(){ TP.plan.staged = []; TP.plan.shiftFor = null; render(); }
+
+async function tpSubmit(){
+  if(TP.plan.busy) return;
+  if(!TP.plan.staged.length){ toast("Pick at least one machine."); return; }
+  if(!TP.plan.date){ toast("Set the date first."); return; }
+  TP.plan.busy = true; TP.plan.blockErr = null; render();
+
+  /* Raw fetch, not api(). api() turns any failure into a 1.9-second toast and
+     returns null, which is the wrong shape for this call: the 409 that fires
+     when the Google Calendar auto-sync is still on is a paragraph explaining
+     which app setting to change, and a paragraph is not a toast. It is
+     rendered as a banner above the composer instead, and it stays there. */
+  let r = null;
+  try{
+    const res = await fetch("/api/topups/batch", {method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({scheduled_date: TP.plan.date,
+        items: TP.plan.staged.map(x=>({machine_code:x.machine_code, shift:x.shift,
+          source:x.source, gcal_event_id:x.gcal_event_id, title:x.title}))})});
+    let d=null; try{ d = await res.json(); }catch(_){}
+    if(!res.ok || (d && d.error)){
+      TP.plan.busy = false;
+      TP.plan.blockErr = (d && d.error) || ("Request failed (" + res.status + ")");
+      if(d && d.code === "gcal_sync_on") TP.plan.gcal.syncOn = true;
+      render(); return;
+    }
+    r = d;
+  }catch(e){
+    TP.plan.busy = false;
+    TP.plan.blockErr = "Network error — " + e; render(); return;
+  }
+  TP.plan.busy = false;
+  const made = (r.created||[]).length, sk = r.skipped||[];
+  /* Only the machines that actually landed leave the staging field. Anything
+     skipped stays put with its reason, so a duplicate does not silently
+     disappear along with the successes. */
+  const madeCodes = new Set((r.created||[]).map(x=>x.code));
+  TP.plan.staged = TP.plan.staged.filter(x=>!madeCodes.has(x.machine_code));
+  TP.cal.stale = true; TP.plan.gcal.stale = true;
+  toast(sk.length
+    ? `${made} stop${made===1?"":"s"} created · ${sk.length} skipped — ${sk[0].why}`
+    : `${made} unassigned stop${made===1?"":"s"} created for ${TP.plan.date}.`);
+  render();
+}
+
+function tpVendRail(){
+  const v = TP.plan.vend, m = v.meta || {};
+  if(v.loading && !v.rows.length) return '<p class="tp-empty">Loading…</p>';
+  if(v.err) return `<div class="tp-warn"><b>Vend counter unavailable</b>${tpEsc(v.err)}</div>`;
+
+  const stale = m.staleAsOf ? new Date(m.staleAsOf) : null;
+  const hrs = (stale && !isNaN(stale)) ? Math.round((Date.now()-stale.getTime())/3600000) : null;
+  const freshWarn = (m.feedOk===false)
+    ? `<div class="tp-warn tp-bad"><b>The Auresys feed has stopped.</b>
+       Last successful pull ${hrs==null?"unknown":hrs+"h"} ago. Every number below is
+       frozen at that point.</div>`
+    : `<p class="tp-note">Feed is a daily batch — last pull ${hrs==null?"unknown":hrs+"h ago"}.
+       A card tapped today does not appear here until tomorrow morning.</p>`;
+
+  const dead = m.deadReader || [];
+  /* Named, not hidden. A machine whose reader has been silent for 30 days is
+     the handoff's alert condition — "check before dispatching anyone" — and
+     lumping it in with "has no payment terminal" turned the one screen that
+     could have surfaced it into the screen that concealed it. */
+  const deadWarn = dead.length ? `<div class="tp-warn"><b>${dead.length}
+    machine${dead.length===1?"":"s"} stopped reporting more than 30 days ago.</b>
+    Dead card reader or a broken feed — not the same as having made no sales.
+    ${dead.slice(0,6).map(d=>tpEsc(d.name||d.code)+" ("+tpEsc(d.lastSeen)+")").join(" · ")}
+    ${dead.length>6?" · and "+(dead.length-6)+" more":""}</div>` : "";
+
+  const row = r => {
+    const key = "v:"+r.code, open = TP.plan.shiftFor===key;
+    const on  = TP.plan.staged.some(x=>x.machine_code===r.code);
+    /* Never a number for a machine that has never been flagged. Showing 0 read
+       as "just done"; showing its whole window read as "most urgent" and sorted
+       it to the top, which sent a driver to the machine that needed one least. */
+    const cell = r.everFlagged
+      ? `<span class="ct">${r.dispenses}</span>`
+      : `<span class="noflag">no flag yet</span>`;
+    return `<button class="tp-v${on?" on":""}${(r.everFlagged && r.dispenses>=350)?" hot":""}"
+        onclick="tpShiftOpen(${tpJ(key)})" title="${tpEsc(r.everFlagged
+          ? "Last flagged "+String(r.lastFlag||"").slice(0,16).replace("T"," ")
+          : "No flag-card tap has ever been recorded at this machine, so there is no "
+            +"'since' to count from. Tap a flag card there on the next visit.")}">
+        <span class="nm">${tpEsc(r.name||r.code)}</span>${cell}</button>
+      ${open?tpShiftPicker(r.code, r.name, "planner", null, null):""}`;
+  };
+
+  const flagged  = v.rows.filter(r=>r.everFlagged);
+  const unfl     = v.rows.filter(r=>!r.everFlagged);
+
+  return `${freshWarn}${deadWarn}
+    <div class="tp-vlist">
+      ${flagged.length ? flagged.map(row).join("")
+                       : '<p class="tp-empty">No machine has been flagged yet.</p>'}
+      ${unfl.length ? `<div class="tp-gday">Never flagged — no baseline</div>
+                       ${unfl.map(row).join("")}` : ""}
+    </div>
+    <p class="tp-note">
+      ${m.cards||0} flag card${m.cards===1?"":"s"} in use ·
+      ${(m.noTerminal||[]).length} machine${(m.noTerminal||[]).length===1?"":"s"} have no
+      payment terminal and can never appear here ·
+      ${m.nullCoded||0} dispenses in the last 30 days could not be attributed to any
+      machine, so these totals do not reconcile to the fleet.
+    </p>`;
+}
+
+function tpJ(v){ return tpEsc(JSON.stringify(v)); }
+
+function tpShiftPicker(code, name, source, gcalId, title){
+  const j = tpJ;
+  return `<div class="tp-sh">
+    <button onclick="tpStage(${j(code)},${j(name||code)},0,${j(source)},${j(gcalId)},${j(title)})">Day shift</button>
+    <button class="night" onclick="tpStage(${j(code)},${j(name||code)},1,${j(source)},${j(gcalId)},${j(title)})">Night shift</button>
+    <button class="cx" onclick="tpShiftCancel()">✕</button>
+  </div>`;
+}
+
+function tpGcalList(){
+  const g = TP.plan.gcal;
+  if(g.loading && !g.events.length) return '<p class="tp-empty">Loading…</p>';
+  if(g.err && !g.events.length) return `<div class="tp-warn"><b>Calendar unavailable</b>${tpEsc(g.err)}</div>`;
+  if(!g.events.length) return '<p class="tp-empty">Nothing in the calendar for the next 14 days.</p>';
+
+  const byDate = {};
+  g.events.forEach(e=>{ (byDate[e.date]=byDate[e.date]||[]).push(e); });
+
+  return Object.keys(byDate).sort().map(d=>`
+    <div class="tp-gday">${TP_DOW[tpDow(d)]} ${tpLabel(d)}</div>
+    ${byDate[d].map(e=>{
+      if(!e.pickable){
+        /* partial / over / unmapped / unknown are never guessed — the same
+           rule gcal_sync applies. Shown with the reason so the alias table
+           gets fixed instead of the event being silently dropped. */
+        const why = {partial:"fewer machines requested than this site has — pick them by hand",
+                     over:"more machines requested than are mapped to this site",
+                     unmapped:"this site has no machine codes recorded",
+                     unknown:"this site name has never been seen"}[e.status] || e.status;
+        return `<button class="tp-g" disabled title="${tpEsc(why)}">
+          <span class="nm">${tpEsc(e.site||e.title)}</span>
+          <span class="tag warn">${tpEsc(e.status)}</span></button>`;
+      }
+      return e.codes.map(c=>{
+        const key = "g:"+c+":"+e.gcalId;
+        const open  = TP.plan.shiftFor===key;
+        const on    = TP.plan.staged.some(x=>x.machine_code===c);
+        /* PER CODE. A union across the whole event meant one booked machine at
+           a multi-machine site disabled every other machine there, and the
+           planner could not reach them at all. */
+        const bk = (e.bookedByCode||{})[c] || [];
+        const booked = bk.length;
+        return `<button class="tp-g${on?" on":""}" ${booked?"disabled":""}
+            onclick="tpShiftOpen(${tpJ(key)})"
+            title="${booked?tpEsc("Already has an open stop on "+bk.map(x=>x.date+" (DO-"+x.id+")").join(", "))
+                           :tpEsc(e.title||e.site)}">
+            <span class="nm">${tpEsc(e.site||e.title)}${e.codes.length>1?` · ${tpEsc(c)}`:""}</span>
+            ${booked?'<span class="tag done">booked</span>':""}
+          </button>
+          ${open?tpShiftPicker(c, e.site||e.title, "gcal", e.gcalId, e.title):""}`;
+      }).join("");
+    }).join("")}`).join("");
+}
+
+function tpRenderPlan(){
+  const d = TP.plan.date || tpToday();
+  const syncWarn = TP.plan.gcal.syncOn ? `<div class="tp-warn tp-bad">
+    <b>Submitting is blocked: Google Calendar auto-sync is ON.</b>
+    While GCAL_SYNC is on, the background sync creates its own stops for the next
+    28 days and hard-deletes any unassigned stop it does not recognise — so
+    anything submitted here would be double-booked or removed within five
+    minutes. Set the GCAL_SYNC app setting to 0 and restart the app.</div>` : "";
+
+  const blockErr = TP.plan.blockErr
+    ? `<div class="tp-warn tp-bad"><b>Nothing was created.</b>
+       ${tpEsc(TP.plan.blockErr)}
+       <button class="btn sm ghost" style="margin-top:6px"
+               onclick="TP.plan.blockErr=null;render()">Dismiss</button></div>`
+    : "";
+
+  return `${syncWarn}${blockErr}
+    <div class="tp-comp">
+      <div class="r1">
+        <label for="tpDate">Service date</label>
+        <input id="tpDate" type="text" class="isodate" size="10" value="${d}"
+               min="${tpToday()}" onchange="tpSetDate(this.value)"
+               placeholder="YYYY-MM-DD">
+        <span style="font-size:.74rem;color:var(--mut)">today or later</span>
+        <span style="flex:1"></span>
+        ${TP.plan.staged.length?`<button class="btn sm ghost" onclick="tpClear()">Clear all</button>`:""}
+      </div>
+      <div class="tp-stage">
+        ${TP.plan.staged.length ? TP.plan.staged.map(x=>`
+          <span class="tp-chip">${tpEsc(x.name)}
+            <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":"DAY"}</span>
+            <button class="x" title="Remove" onclick="tpUnstage(${tpJ(x.machine_code)})">✕</button>
+          </span>`).join("")
+        : '<span class="ph">Click a machine on either list below, choose day or night, and it lands here.</span>'}
+      </div>
+    </div>
+
+    <div class="tp-pl">
+      <div class="tp-pcard">
+        <h3>Sales calendar — next 14 days</h3>
+        <p class="sub">Pull anything forward onto the date above. Entries already
+          holding an open stop are shown as booked and cannot be picked twice.</p>
+        ${tpGcalList()}
+      </div>
+      <div class="tp-rail">
+        <div class="tp-pcard">
+          <h3>Vend counter</h3>
+          <p class="sub">Dispenses since the top-up flag card was last tapped.</p>
+          ${tpVendRail()}
+          <button class="btn sm ghost" style="margin-top:8px"
+                  onclick="tpVendLoad(true)">Refresh counter</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tp-submit">
+      <span class="sp">${TP.plan.staged.length
+        ? `${TP.plan.staged.length} machine${TP.plan.staged.length===1?"":"s"} → ${d}, unassigned`
+        : "Nothing picked yet."}</span>
+      <button class="btn" onclick="tpSubmit()"
+        ${(!TP.plan.staged.length||TP.plan.busy||TP.plan.gcal.syncOn)?"disabled":""}>
+        ${TP.plan.busy?"Submitting…":"Submit"}</button>
+    </div>
+    <p class="tp-note">Stops are created unassigned. Naming a driver happens in
+      one place only — Calendar ▸ Unassigned.</p>`;
+}
+
+/* ── Area entry point ──────────────────────────────────────────────────── */
+function renderTopups(){
+  /* Three sub-tabs, not two. "Repeats" is the old Schedule screen kept
+     verbatim: it is the ONLY place a standing weekly / fortnightly / four-weekly
+     round can be keyed (workorders materialises those as real rows, 12 weeks
+     out, under a SeriesID). The Plan sub-tab creates one-off stops and has no
+     repeat rule, so folding Schedule away without keeping this would have
+     quietly removed recurring rounds from the product. */
+  const modes = [["calendar","Calendar"],["plan","Plan"],["series","Repeats"]];
+  let cur = subActive("topups","calendar");
+  if(!modes.some(([k])=>k===cur)){ cur = "calendar"; state.sub.topups = cur; }
+  /* The drill-down is not a sub-tab, but leaving the sub-nav live while it is
+     open let a click land the user on Plan with the assignment page still
+     flagged open underneath. */
+  if(TP.assign.open && cur !== "calendar"){ TP.assign.open = false; }
+
+  const nav = `<div class="subnav">${modes.map(([k,l])=>
+    `<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>`;
+  const CRUMB = {
+    calendar:"What happened, day by day, grouped by the driver who did it — and what is firmed up ahead.",
+    plan:"Pick machines off the vend counter or the sales calendar, choose a date and a shift, submit.",
+    series:"Standing rounds — weekly, fortnightly, four-weekly. Unchanged from the old Schedule tab."};
+  const body = cur==="plan"   ? tpRenderPlan()
+             : cur==="series" ? renderSchedule()
+             :                  tpRenderCalendar();
+  return `<div class="screen-h"><div><h2>Topups</h2>
+      <div class="crumb">${CRUMB[cur]}</div></div></div>${nav}${body}`;
+}
+
+/* Called by render() once #main exists. Kept out of renderTopups so a fetch
+   never fires from inside a function whose return value is being written into
+   innerHTML. */
+function tpAfterRender(){
+  const cur = subActive("topups","calendar");
+  if(cur==="calendar") tpCalEnsure();
+  else if(cur==="plan") tpPlanEnsure();
+  /* Repeats renders the old Schedule screen, whose Google Calendar pane used to
+     state as fact that entries book themselves 28 days out. With the auto-sync
+     off that is false, and believing it would leave a week unplanned — so the
+     pane needs TP.plan.gcal.syncOn. Fetched ONCE, and only if nothing has
+     fetched it yet: render() already calls ensureGcal() for this sub-tab, and
+     two feed calls per visit was one too many. */
+  else if(cur==="series" && TP.plan.gcal.syncOn===null
+          && TP.plan.gcal.stale && !TP.plan.gcal.loading) tpGcalLoad();
+  /* "series" is handled by the caller in render(), which owns ensureSchedule()
+     and ensureGcal() — they belong to the main script's SC/GC state, not TP's. */
+}
+
+/* Every function above is a top-level declaration in a classic script, so it
+   is already window.<name> and reachable from an inline onclick. TP is a const,
+   which is NOT — and inline handlers in this file do read it. Export it. */
+window.TP = TP;
+</script>

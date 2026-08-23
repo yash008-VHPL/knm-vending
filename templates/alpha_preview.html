@@ -520,6 +520,12 @@
 </div>
 <div class="toast" id="toast"></div>
 
+{# Topups (Calendar + Plan). MUST come before the main <script>: it defines
+   renderTopups() and friends as top-level declarations, so they are on
+   window by the time render() dispatches to them. Everything it reads from
+   the main script is read inside a function body, at call time. #}
+{% include "_topups_tab.html" %}
+
 <script>
 /* Streamlined UI (alpha) — reads from /alpha/api/bootstrap and WRITES through the
    existing production work-order API (/api/wo/*): same validation, role checks,
@@ -598,18 +604,22 @@ const ME = {{ (username or "") | tojson }};
 const MYROLES = ({{ (roles or []) | tojson }}).map(r=>String(r||"").toLowerCase())
   .map(r=>({dispatch:"field_manager"}[r]||r)).filter((v,i,a)=>a.indexOf(v)===i);
 
-const AREAS={fleet:"Fleet",service:"Service",schedule:"Schedule",plan:"Plan",admin:"Admin"};
+/* 2026-08-23 — Plan and Schedule are folded into ONE Topups tab (Calendar +
+   Plan + Repeats). The dispatch Day board, the Leaflet route planner and the
+   legacy Log-a-top-up screen were the rest of the old Plan tab; they move to
+   Service, manager-only, rather than being dropped. */
+const AREAS={fleet:"Fleet",service:"Service",topups:"Topups",admin:"Admin"};
 const ROLE_NAV={
   operator:["service","fleet"], customer_service:["service","fleet"],
-  field_manager:["plan","schedule","service","fleet"],
+  field_manager:["topups","service","fleet"],
   /* Sales lands on Schedule: keying the week's top-ups is the job. She reaches
      the same /api/wo/schedule routes dispatch does, but the server refuses her
      an assigned_to — naming a driver stays dispatch's call. */
-  sales:["schedule","fleet","service"],
-  admin:["plan","schedule","service","fleet","admin"]};
+  sales:["topups","fleet","service"],
+  admin:["topups","service","fleet","admin"]};
 /* dispatch is merged into field_manager (app.ROLE_ALIASES): one entry, one tab
    order, one landing tab — Plan, because the board is the morning job. */
-const ROLE_HOME={operator:"service",customer_service:"service",field_manager:"plan",sales:"schedule",admin:"plan"};
+const ROLE_HOME={operator:"service",customer_service:"service",field_manager:"topups",sales:"topups",admin:"topups"};
 const ROLE_LABEL={operator:"Operator (driver)",customer_service:"Customer Service",field_manager:"Dispatch / Field Manager",sales:"Sales",admin:"Admin"};
 /* Client-side mirror of app.ROLE_ALIASES. The server already canonicalises, but
    a cached page or a stale cookie carrying "dispatch" would otherwise match no
@@ -741,8 +751,14 @@ const EMBEDS={
   /* Same pane as fleet:refill#topups. Two keys onto one element is fine —
      showEmbed clears every pane and lights exactly one — but it IS one shared
      DOM instance, so a half-filled form carries between the two entry points. */
-  "plan:topups":        {el:"lgc-topups",    init:()=>window.__lgcInit&&window.__lgcInit("topups")},
-  "plan:routes":        {el:"lgc-dispatch",  init:()=>window.__lgcInit&&window.__lgcInit("dispatch")},
+  /* Were "plan:topups" / "plan:routes" until the Topups tab landed. The
+     panes come from _legacy_tabs.html, which is included UNGATED, and they
+     have no internal role checks — they relied on index.html hiding the tab.
+     renderService only offers these two sub-tabs to field_manager/admin, and
+     that branch is the only thing standing between an operator and a set of
+     dispatch controls that would 403 on every click. */
+  "service:logtopup":   {el:"lgc-topups",    init:()=>window.__lgcInit&&window.__lgcInit("topups")},
+  "service:routes":     {el:"lgc-dispatch",  init:()=>window.__lgcInit&&window.__lgcInit("dispatch")},
   "admin:cleanup":      {el:"emb-cleanup",   init:()=>window.__adInit&&window.__adInit()}};
 
 /* Set by a render<Area>() when the visible sub-tab is an embedded screen. Read
@@ -769,7 +785,12 @@ function render(){pendingEmbed=null;buildTabs();const m=$("#main");
      down: navigating with it open left a modal floating over an unrelated
      screen, swallowing every click on the page. */
   if($("#fxBg")&&$("#fxBg").classList.contains("show"))fxClose();
-  m.innerHTML=roleNotice()+({service:renderService,fleet:renderFleet,schedule:renderSchedule,plan:renderPlan,admin:renderAdmin}[state.area]||(()=>""))();
+  /* An unknown area used to fall through to ()=>"" — a blank #main with no
+   error, which is exactly how a missed literal in this rename would present.
+   Fail loudly instead. */
+  const _r=({service:renderService,fleet:renderFleet,topups:renderTopups,admin:renderAdmin})[state.area];
+  if(!_r){console.error("[alpha] no renderer for area",state.area);state.area=ROLE_HOME[state.role]||"service";return render();}
+  m.innerHTML=roleNotice()+_r();
   showEmbed(pendingEmbed);
   document.querySelectorAll("[data-sub]").forEach(b=>{b.onclick=()=>{state.sub[state.area]=b.dataset.sub;render();};});
   /* data-sec = an inner section WITHIN a sub-tab. Bound separately because the
@@ -781,13 +802,19 @@ function render(){pendingEmbed=null;buildTabs();const m=$("#main");
   /* The calendar and the dispatch rail read /api/wo/schedule directly rather
      than bootstrap's work[] — that list is capped and unbounded in date, so a
      quarter of keyed schedule would push the far weeks out of it silently. */
-  if(state.area==="schedule"){ ensureSchedule(); ensureGcal(); }
+  if(state.area==="topups"){
+    tpAfterRender();
+    /* The Repeats sub-tab is the old Schedule screen, unchanged. */
+    if(subActive("topups","calendar")==="series"){ ensureSchedule(); ensureGcal(); }
+  }
   /* Only the Day board shows completed stops — Route planner and Log a top-up
      are embedded legacy panes that never read them, so fetching there is a
      wasted round trip on every visit. */
-  if(state.area==="plan"){
-    ensureRail();
-    if(subActive("plan","board")==="board"){ ensureDoneStops(); pbStart(); }
+  /* The Day board now lives under Service. Only that sub-tab reads completed
+     stops, so fetching anywhere else is a wasted round trip on every visit. */
+  if(state.area==="service" && subActive("service","board")==="board"
+     && (state.role==="field_manager"||state.role==="admin")){
+    ensureRail(); ensureDoneStops(); pbStart();
   }
   /* showEmbed() above stopped the Live status poller. Restart it here — after
      the screen exists — and only when Live status is what is on screen. */
@@ -805,7 +832,10 @@ function renderService(){const r=state.role;let modes;
      EDITOR — it has no internal role gating, it relied on index.html hiding the
      tab, and every one of its Save/Delete buttons 403s for anyone else. */
   if(r==="operator")modes=[["myjobs","My Jobs"],["movements","Movements"]];
-  else if(r==="field_manager"||r==="admin")modes=[["triage","Triage board"],["faults","Fault Reports"],["tech","Tech Support"],["movements","Movements"],["kb","Knowledge Base"]];
+  /* 2026-08-23 — board / routes / logtopup arrive from the retired Plan tab.
+     Manager-only, deliberately: the routes and logtopup panes come from
+     _legacy_tabs.html with no role gating of their own. */
+  else if(r==="field_manager"||r==="admin")modes=[["board","Day board"],["triage","Triage board"],["faults","Fault Reports"],["tech","Tech Support"],["movements","Movements"],["kb","Knowledge Base"],["routes","Route planner"],["logtopup","Log a top-up"]];
   else if(r==="customer_service")modes=[["faults","Fault Reports"],["report","Quick report"],["mine","My reports"]];
   else modes=[["faults","Fault Reports"],["report","Report a problem"],["mine","My reports"]];
   let cur=subActive("service",modes[0][0]);
@@ -813,7 +843,7 @@ function renderService(){const r=state.role;let modes;
      button for — that rendered a blank screen with no way back. */
   if(!modes.some(([k])=>k===cur)){cur=modes[0][0];state.sub.service=cur;}
   if(EMBEDS["service:"+cur])pendingEmbed="service:"+cur;
-  const body=pendingEmbed?"":({report:svcReport,mine:svcMine,triage:svcTriage,myjobs:svcMyJobs,kb:svcKB,faults:renderFaults}[cur]||(()=>""))();
+  const body=pendingEmbed?"":({report:svcReport,mine:svcMine,triage:svcTriage,myjobs:svcMyJobs,kb:svcKB,faults:renderFaults,board:renderPlanBoard}[cur]||(()=>""))();
   return `<div class="screen-h"><div><h2>Service</h2><div class="crumb">Report · Triage · Do — one work record across roles</div></div></div>
    <div class="legacy-note">One work record across roles — Fault Reports, Triage, Tech Support, Movements and the KB in one place.</div>
    <div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>${body}`;}
@@ -838,7 +868,7 @@ function svcTriage(){
   /* Triage is a "what needs attention now" inbox. Since the sales calendar
      materialises repeats, every future occurrence is an unassigned open row —
      without this the inbox fills with next quarter's routine top-ups and buries
-     the actual faults. Future-dated stops live on the Schedule tab. */
+     the actual faults. Future-dated stops live on Topups ▸ Calendar. */
   const _now=sgtToday();
   const _due=w=>!w.scheduledDate||w.scheduledDate<=_now;
   const news=work.filter(w=>w.status==="new"&&_due(w)),prog=work.filter(w=>w.status==="assigned");
@@ -1232,7 +1262,10 @@ let FLEETSEC={events:"alerts",refill:"status"};
 
 /* Roles that may reach Plan, i.e. that already have top-up logging there. The
    Refill ▸ Log a top-up section exists only for the roles that do not. */
-const HAS_PLAN=()=>(ROLE_NAV[state.role]||[]).includes("plan");
+/* Was ROLE_NAV.includes("plan"). The legacy Log-a-top-up screen now hangs off
+   Service, and only managers get it there, so the Fleet ▸ Refill copy of it
+   must stay for everyone else. */
+const HAS_PLAN=()=>state.role==="field_manager"||state.role==="admin";
 /* index.html gated Topups and Messages to these four roles, and the server does
    NOT: /api/topups and /api/messages are only @login_required. Merging Machines
    and Ops into one area gave operator and customer service a Fleet tab for the
@@ -1586,7 +1619,7 @@ function fleetRefill(){
       <div class="grow"><b>${woEsc(m.name)}</b><div class="meta">${
         m.vendsSince==null?"vends since refill: —":m.vendsSince+" vends since refill"} · last ${woEsc(m.lastRefill)}</div></div>
     </div>`).join("")}</div>
-    <p class="note">Read-only refill status. Logging happens in ${HAS_PLAN()?"Plan ▸ Log a top-up":"the Log a top-up section above"}.</p>`;
+    <p class="note">Read-only refill status. Logging happens in ${HAS_PLAN()?"Service ▸ Log a top-up":"the Log a top-up section above"}.</p>`;
 }
 
 function fleetReport(code){
@@ -1660,7 +1693,8 @@ let PB = {timer: null, seen: null};
 function pbStart(){ pbStop(); PB.timer = setInterval(pbPoll, 90000); }
 function pbStop(){ if (PB.timer){ clearInterval(PB.timer); PB.timer = null; } }
 async function pbPoll(){
-  if (state.area !== "plan" || DONE.loading) return;
+  if (state.area !== "service" || subActive("service","board") !== "board"
+      || DONE.loading) return;
   const asked = boardDate, gen = DONE.gen;
   const d = await api(`/alpha/api/board/completed?date=${encodeURIComponent(asked)}`);
   if (!d || boardDate !== asked || gen !== DONE.gen) return;
@@ -1831,7 +1865,7 @@ function renderGcalPane(){
       ...flg.map(x => `<div class="row"><span class="dt">${dLabel(x.date)}</span>
           <b>${woEsc(gcName(x.code))}</b>
           <small>dropped from the calendar but already assigned to
-            ${woEsc(driverName(x.assigned_to))} — pull it on the Plan board if it is really off</small></div>`)]
+            ${woEsc(driverName(x.assigned_to))} — pull it on Service ▸ Day board if it is really off</small></div>`)]
       .join("");
     att = `<div class="gc-att"><b>Needs a decision (${exc.length + flg.length + hld.length})</b>${rows}</div>`;
   }
@@ -1852,9 +1886,12 @@ function renderGcalPane(){
     <button class="btn sm ghost" style="margin-top:8px" onclick="gcFull()">${
       GC.full ? "Hide" : "Show"} the calendar as sales keyed it</button>
     <button class="btn sm ghost" style="margin-top:8px" onclick="gcReload()">Refresh</button>
-    <p class="note" style="margin:6px 0 0">Stops are created automatically from this calendar,
-      28 days ahead. Remove an event in Google and its stop is withdrawn — unless a driver
-      already has it, in which case it is listed above instead.</p></div>`;
+    <p class="note" style="margin:6px 0 0">${(window.TP && TP.plan.gcal.syncOn === false)
+      ? `This calendar no longer books itself. Turn an entry into a stop on
+         <b>Topups &#9656; Plan</b>, where you also choose the day and the shift.`
+      : `Stops are created automatically from this calendar, 28 days ahead. Remove an
+         event in Google and its stop is withdrawn — unless a driver already has it,
+         in which case it is listed above instead.`}</p></div>`;
 }
 
 function gcItem(e){
@@ -1916,7 +1953,7 @@ function renderSchedule(){
   }
   const warn = SC.dated ? "" : `<div class="legacy-note"><b>Scheduling columns are not migrated
     on this database.</b> Run the 2026-08-11 migration; until then nothing keyed here can be dated.</div>`;
-  return `<div class="screen-h"><div><h2>Schedule</h2>
+  return `<div class="screen-h" style="margin-top:4px"><div><h2 style="font-size:1.05rem">Repeats</h2>
       <div class="crumb">Search a machine inside a day, tick what is needed, set a repeat if it is a standing round.</div></div>
       <button class="btn ghost" onclick="scReload()">Refresh</button></div>
     ${warn}
@@ -1927,12 +1964,13 @@ function renderSchedule(){
       <span style="flex:1"></span>
       <span class="sub" style="font-size:.72rem;color:var(--mut);font-weight:600">
         ${SC.stops.length} scheduled stop${SC.stops.length !== 1 ? "s" : ""} in view${
-        SC.sundays ? ` · ${SC.sundays} on a Sunday (not shown — dispatch handles those on the Plan board)` : ""}</span>
+        SC.sundays ? ` · ${SC.sundays} on a Sunday (not shown here — Topups ▸ Calendar shows every day)` : ""}</span>
     </div>
     ${renderGcalPane()}
     ${weeks.join("")}
     <button class="btn sm ghost" onclick="scMore()">Show 4 more weeks</button>
-    <p class="note">Stops are created unassigned. Dispatch puts a driver's name on them on the Plan board.</p>`;
+    <p class="note">Stops are created unassigned. Dispatch puts a driver's name on them
+      on <b>Topups &#9656; Calendar &#9656; Unassigned</b>.</p>`;
 }
 
 function scItem(s){
@@ -2144,7 +2182,7 @@ function renderPlanBoard(){
       <input id="adhocDrv" placeholder="operator@kopinearme.com" style="width:220px;display:inline-block;margin:0 6px;height:28px;font-size:.76rem">
       <button class="btn sm" onclick="addAdhocDriver()">Add card</button></div>` : "";
 
-  return `<div class="screen-h"><div><h2>Plan</h2>
+  return `<div class="screen-h"><div><h2>Day board</h2>
       <div class="crumb">Search a machine on a driver's card, tick what is needed, add the stop.</div></div>
       <button class="btn" onclick="autoPlan()">Auto-plan routes</button></div>
     <div class="plan-wrap"><div class="plan-main">
@@ -2153,7 +2191,7 @@ function renderPlanBoard(){
     ${noRoster}
     ${state.workTruncated ? `<div class="legacy-note"><b>Too many open orders to load at once.</b>
       The board is showing the most recent batch, so far-out scheduled stops may be missing —
-      the Schedule tab always shows the full picture.</div>` : ""}
+      Topups ▸ Calendar always shows the full picture.</div>` : ""}
     <div class="daybar">
       <button class="btn sm ghost" onclick="shiftBoardDate(-1)">‹ Prev</button>
       <input type="text" class="isodate" value="${boardDate}" onchange="setBoardDate(this.value)" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10">
@@ -2171,7 +2209,7 @@ function renderPlanBoard(){
         return cl.length ? `<div class="legacy-note" style="margin-top:12px"><b>${cl.length} assigned item(s) have no machine code</b>
           and cannot appear on the board: ${cl.map(w => woEsc(w.id)).join(", ")}. Fix the machine code in the main dashboard.</div>` : ""; })()}
     <h3 style="font-size:.95rem;margin:18px 0 8px">Unassigned work — ${un.length - comp} assignable${comp ? `, ${comp} awaiting a job order` : ""}${
-      laterUn ? ` <span class="sub" style="font-weight:600;color:var(--mut);font-size:.75rem">· ${laterUn} more scheduled after this day (see Schedule)</span>` : ""}</h3>
+      laterUn ? ` <span class="sub" style="font-weight:600;color:var(--mut);font-size:.75rem">· ${laterUn} more scheduled after this day (see Topups ▸ Calendar)</span>` : ""}</h3>
     ${un.length ? `<div class="rows">${un.map(triageRow).join("")}</div>`
                 : '<p class="empty">Nothing unassigned.</p>'}
     ${(() => {
@@ -2193,21 +2231,14 @@ function renderPlanBoard(){
     </div>${renderRail()}</div>`;
 }
 
-/* Plan = the board (native) + the legacy route planner & map, which alpha has
-   no equivalent for (Leaflet, /api/dispatch/plan, drag reordering). */
-function renderPlan(){
-  const modes=[["board","Day board"],["routes","Route planner + map"],["topups","Log a top-up"]];
-  let cur=subActive("plan","board");
-  if(!modes.some(([k])=>k===cur)){cur=modes[0][0];state.sub.plan=cur;}
-  const nav=`<div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>`;
-  const CRUMB={routes:"Pick machines, pick a driver count, let the planner cut the routes.",
-               topups:"Record a refill against a machine, and see when every machine was last topped up."};
-  if(EMBEDS["plan:"+cur]){pendingEmbed="plan:"+cur;
-    return `<div class="screen-h"><div><h2>Plan</h2><div class="crumb">${CRUMB[cur]||""}</div></div></div>${nav}`;}
-  /* The board builds one long string ending in the rail; the subnav belongs
-     between its header and the grid, so it is spliced at the wrapper. */
-  return renderPlanBoard().replace('<div class="plan-wrap">', nav+'<div class="plan-wrap">');
-}
+/* renderPlan() was retired on 2026-08-23. It wrapped renderPlanBoard() and
+   spliced the sub-nav in with
+       .replace('<div class="plan-wrap">', nav + '<div class="plan-wrap">')
+   which returns the string UNCHANGED when the anchor is missing — no throw, no
+   console warning, just a screen with no sub-nav. renderService now supplies
+   the sub-nav itself and calls renderPlanBoard() directly, so there is nothing
+   left to splice. renderPlanBoard, driverCard, autoPlan, assignSite and the
+   rest of the board are untouched and still in use. */
 
 function driverCard(email){
   const lc = (email || "").toLowerCase();
