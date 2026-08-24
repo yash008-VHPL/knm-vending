@@ -6207,6 +6207,38 @@ def api_visit_finalize(vid):
             conn.close()
             return jsonify({"error": "Receiving Personnel name required (or mark customer unavailable)."}), 400
 
+        # At least one service category must be ticked before a sheet can be
+        # signed. The SERVICES table is the record of what was performed at the
+        # machine; finalising with all four boxes empty files a PDF the customer
+        # has signed that says a visit happened and nothing was done — and once
+        # that PDF is in SharePoint it is the document of record.
+        #
+        # Server side because the client can be bypassed and because a stale
+        # cached copy of the sheet is a real state on a shared tablet. Checked
+        # AFTER the front end's PATCH has landed: woSave() runs before the
+        # signature modal opens, so the ticks are in the row by the time
+        # finalize is called.
+        #
+        # EXEMPT when the customer was unavailable. That path is for a driver
+        # who could not service the machine at all — shop closed, no access —
+        # and forcing a tick there makes him record work he did not do. Those
+        # visits finalise as pending_email_signature and are already in front of
+        # a manager, so nothing is quietly lost.
+        if not cust_unavail:
+            cursor.execute(
+                "SELECT CAST(ISNULL(Svc_PMC_Done, 0) AS INT) "
+                "     + CAST(ISNULL(Svc_CMR_Done, 0) AS INT) "
+                "     + CAST(ISNULL(Svc_INR_Done, 0) AS INT) "
+                "     + CAST(ISNULL(Svc_OTH_Done, 0) AS INT) "
+                "FROM WO_VisitSessions WHERE VisitID = %s", (vid,))
+            _svc = cursor.fetchone()
+            if not _svc or int(_svc[0] or 0) < 1:
+                conn.close()
+                return jsonify({"error": "Tick at least one service before signing. "
+                                         "If you could not service the machine at "
+                                         "all, mark the customer unavailable "
+                                         "instead."}), 400
+
         new_status = "pending_email_signature" if cust_unavail else "signed"
 
         cursor.execute("""

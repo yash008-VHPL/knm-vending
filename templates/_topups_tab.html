@@ -645,7 +645,7 @@ function tpRenderDay(){
     </div>
     <p class="tp-note">${tpCanAssign()
       ? "Click a stop to set its outcome, or to move it. ✕ withdraws an unassigned stop outright."
-      : "Read-only — dispatch owns this day."}</p>`;
+      : "Read-only — switch to Admin or Field Manager to assign or withdraw."}</p>`;
 }
 
 /* Dispatch moves a planned stop to another day, or withdraws it.
@@ -1254,6 +1254,17 @@ function renderTopups(){
 
   const nav = `<div class="subnav">${modes.map(([k,l])=>
     `<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>`;
+
+  /* Sales reaches every screen in this tab and can act on none of them: the ✕
+     on a chip, the Assign page, the outcome flag and the move are all behind
+     tpCanAssign(). Suppressing the controls silently made a correct read-only
+     view look like a broken one — the day card in particular, which opens fine
+     and then does nothing. Say which role is active and which one is needed. */
+  const roleWarn = tpCanAssign() ? "" : `<div class="tp-warn">
+    <b>Read-only — you are signed in as ${tpEsc(state.role==="sales"?"Sales":state.role||"a read-only role")}.</b>
+    Assigning a driver, withdrawing a stop and submitting a plan are dispatch
+    actions. Switch the role picker at the top right to <b>Admin</b> or
+    <b>Field Manager</b> to make changes here.</div>`;
   const CRUMB = {
     calendar:"What happened, day by day, grouped by the driver who did it — and what is firmed up ahead.",
     plan:"Sales say which sites want a visit. You say which day and which shift.",
@@ -1262,7 +1273,7 @@ function renderTopups(){
              : cur==="series" ? renderSchedule()
              :                  tpRenderCalendar();
   return `<div class="screen-h"><div><h2>Topups</h2>
-      <div class="crumb">${CRUMB[cur]}</div></div></div>${nav}${body}`;
+      <div class="crumb">${CRUMB[cur]}</div></div></div>${nav}${roleWarn}${body}`;
 }
 
 /* Called by render() once #main exists. Kept out of renderTopups so a fetch

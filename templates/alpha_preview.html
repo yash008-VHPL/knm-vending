@@ -999,7 +999,7 @@ function renderWorkOrder(){
   // never asked for data entry, and nothing on this sheet can block a signed
   // Work Order from closing.
 
-  h+=`<div class="wo-sec">Services</div><table class="wo-t">
+  h+=`<div class="wo-sec">Services <span>— tick at least one</span></div><table class="wo-t">
     <thead><tr><th style="width:52%">Description</th><th style="width:90px" class="c">Completed</th><th>Remarks</th></tr></thead><tbody>`;
   (d.service_categories||[]).forEach(c=>{const cv=(v.services&&v.services[c.code])||{};
     h+=`<tr><td>${woEsc(c.label)}</td>
@@ -1055,6 +1055,15 @@ function woBody(){
     customer_unavailable:$("#woCustChk").checked,
     customer_unavailable_reason:($("#woCustReason").value||"").trim()||null};}
 
+/* The SERVICES ticks, read straight from the DOM rather than from WO.det, so
+   the gate always reflects what the driver can actually see on the sheet.
+   api_visit_finalize enforces the same rule server-side — this is here so he
+   finds out BEFORE the signature modal covers the boxes he needs to tick. */
+function woAnyService(){
+  return (WO.det.service_categories||[]).some(c=>{
+    const el=$("#woS_"+c.code+"_d"); return !!(el&&el.checked); });
+}
+
 async function woSave(notify){
   const r=await api(`/api/wo/visits/${WO.visit.id}`,{method:"PATCH",body:woBody()});
   // A registry problem must reach the technician HERE — woSave runs before the
@@ -1066,6 +1075,21 @@ async function woSave(notify){
 
 async function woSubmit(){
   if(!($("#woSvcName").value||"").trim()){toast("Enter your name (Service Personnel) first.");return;}
+  /* Unless the customer-unavailable box on the SHEET is ticked — that is the
+     one case where no service was performed, and the server exempts it too.
+     Gating here rather than inside the modal keeps the boxes visible while the
+     driver reads the message. */
+  /* The exemption must cost something honest. Naming the unavailable box in
+     this message made it the cheapest way past the gate — one tick and a free
+     text box closes the stop, completes the linked job orders and records
+     "customer unavailable" for a visit where the customer was standing there.
+     So: say what to tick, and let the exemption through only when the reason
+     is actually filled in, not merely when the box is ticked. */
+  if(!woAnyService()){
+    const excused = $("#woCustChk").checked && ($("#woCustReason").value||"").trim();
+    if(!excused){
+      toast("Tick the service you performed before signing.");
+      return;}}
   if(!(await woSave(false)))return;
   $("#woSigName").value=""; $("#woSigDate").value=woToday();
   $("#woSig").classList.add("show");}
@@ -1075,6 +1099,16 @@ function woSigConfirm(){
   const nm=($("#woSigName").value||"").trim(), dt=$("#woSigDate").value;
   if(!nm){toast("Receiving personnel name required.");return;}
   if(!dt){toast("Date required.");return;}
+  /* Reachable with no ticks only when the sheet's unavailable box was ticked
+     and a signature was then obtained after all. A signed sheet is a record of
+     work performed, so it needs a tick — and the server refuses this exact
+     combination, so offering it would be a dead click. */
+  /* Do NOT close the modal: woSubmit blanks #woSigName on reopen, so closing
+     here would make the customer type their name a second time with the driver
+     standing next to them. */
+  if(!woAnyService()){
+    toast("Tick the service you performed, then sign.");
+    return;}
   woFinalize({receiving_name:nm,receiving_date:dt,customer_unavailable:false,
     service_name:($("#woSvcName").value||"").trim(),service_date:$("#woSvcDate").value});}
 
