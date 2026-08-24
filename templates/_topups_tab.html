@@ -136,16 +136,23 @@
 .tp-chip .x{border:0;background:transparent;cursor:pointer;color:var(--mut);
   font-size:.9rem;line-height:1;padding:0 3px;font-family:inherit}
 .tp-chip .x:hover{color:var(--bad)}
-/* Already on this day: shown, not editable from here. Moving or withdrawing it
-   is Calendar work, so it deliberately has no ✕. */
+/* Already on this day. Read-only EXCEPT for the ✕, which takes the stop off
+   this day and returns the site to the request pool — the composer is where a
+   dispatcher notices they over-filled a day, so it is where they must be able
+   to undo it. Withdrawal on the Calendar does the same thing to the same row.
+   .rm restores the tight right padding when the ✕ is present. */
 .tp-chip.has{background:var(--bg);border-color:var(--line);border-style:dashed;
   padding-right:9px}
+.tp-chip.has.rm{padding-right:4px}
 .tp-chip .who{font-size:.62rem;color:var(--mut);text-transform:uppercase;
   letter-spacing:.03em}
 .tp-g .tag.move{background:#eef2ff;color:#3730a3}
 
 .tp-pl{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start}
 @media(max-width:1100px){.tp-pl{grid-template-columns:1fr}}
+/* The left column of .tp-pl. min-width:0 so a long machine name ellipsises
+   inside the grid track instead of stretching it. */
+.tp-plcol{min-width:0}
 .tp-pcard{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
 .tp-pcard h3{margin:0 0 2px;font-size:.85rem}
 .tp-pcard .sub{font-size:.72rem;color:var(--mut);margin:0 0 10px}
@@ -164,6 +171,11 @@
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .tp-v.hot .ct{color:var(--bad)}
 .tp-v .noflag{font-size:.6rem;color:var(--warn);flex:none}
+.tp-find{display:flex;gap:8px;align-items:center;margin:0 0 8px}
+.tp-find input{flex:1;min-width:0;border:1px solid var(--line);border-radius:7px;
+  padding:6px 9px;font-size:.8rem;font-family:inherit;background:#fff;color:var(--ink)}
+.tp-find input:focus{outline:none;border-color:var(--blue);
+  box-shadow:0 0 0 2px rgba(26,86,219,.12)}
 .tp-gday{font-size:.7rem;font-weight:700;color:var(--mut);text-transform:uppercase;
   letter-spacing:.04em;margin:10px 0 4px;border-bottom:1px solid var(--line);padding-bottom:2px}
 .tp-g{display:flex;justify-content:space-between;align-items:center;gap:8px;
@@ -220,7 +232,7 @@ const TP = {
   /* onDate = what is ALREADY scheduled for plan.date. Fetched whenever the
      date changes, so the composer answers "what is this day already carrying?"
      instead of always looking empty. */
-  plan:  {date:null, staged:[], shiftFor:null, blockErr:null,
+  plan:  {date:null, staged:[], shiftFor:null, blockErr:null, find:"", findFocus:false,
           onDate:{date:null, stops:[], loading:false},
           vend:{rows:[], ready:false, err:null, stale:true, loading:false, meta:null},
           gcal:{events:[], stale:true, loading:false, err:null, syncOn:null},
@@ -523,10 +535,15 @@ async function tpOutcome(id){
    drift apart between them. */
 const TP_BUSY = new Set();
 async function tpWithdraw(id){
-  const s = TP.cal.stops.find(x=>x.id===id);
-  /* The row is gone from under the click — a concurrent tpCalLoad dropped it.
+  /* BOTH sources. The Calendar's ✕ finds the row in TP.cal.stops; the Plan
+     composer's ✕ is clicked on a tab that may never have loaded the calendar,
+     where the only copy of the row is TP.plan.onDate.stops. Looking in one
+     place made the composer's ✕ a no-op on a cold Plan tab. */
+  const s = TP.cal.stops.find(x=>x.id===id)
+         || (TP.plan.onDate.stops||[]).find(x=>x.id===id);
+  /* The row is gone from under the click — a concurrent load dropped it.
      Doing nothing at all looks like a broken button; resync instead. */
-  if(!s){ TP.cal.stale = true; render(); return; }
+  if(!s){ TP.cal.stale = true; TP.plan.onDate.date = null; render(); return; }
   /* A one-click ✕ on a tablet is a double-tap waiting to happen, and the second
      POST answers 404 "That stop no longer exists" as a toast. */
   if(TP_BUSY.has(id)) return;
@@ -547,6 +564,7 @@ async function tpWithdraw(id){
   /* Drop it optimistically. TP.cal.stops still holds the row until tpCalLoad
      answers, and until then it is on screen with a live ✕. */
   TP.cal.stops = TP.cal.stops.filter(x=>x.id!==id);
+  if(TP.plan.onDate.stops) TP.plan.onDate.stops = TP.plan.onDate.stops.filter(x=>x.id!==id);
 
   /* Everything that reads WO_DeliveryOrders for this day.
      onDate.date = null is NOT optional: the Plan composer and the vend rail
@@ -977,8 +995,73 @@ function tpShiftPicker(code, name, source, gcalId, title, moveId){
   return `<div class="tp-sh">
     <button onclick="tpStage(${j(code)},${j(name||code)},0,${j(source)},${j(gcalId)},${j(title)},${j(moveId||null)})">Day shift</button>
     <button class="night" onclick="tpStage(${j(code)},${j(name||code)},1,${j(source)},${j(gcalId)},${j(title)},${j(moveId||null)})">Night shift</button>
-    <button class="cx" onclick="tpShiftCancel()">✕</button>
+    <button class="cx" onclick="tpShiftCancel()"
+      title="Close this chooser. The request stays in the list — nothing here can remove it."
+      >Cancel</button>
   </div>`;
+}
+
+/* ── Add any machine ───────────────────────────────────────────────────────
+   Sales requests cover the planned week. This covers everything else: an urgent
+   call, a machine the calendar never mentioned, a site somebody rang about.
+   It stages exactly like a request — same tpStage, same day/night choice, same
+   submit — with source "planner" and no gcal_event_id, so nothing downstream
+   has to care where the pick came from.
+
+   Deliberately NOT filtered against what is already open elsewhere: this client
+   only knows what is on the chosen day (TP.plan.onDate). /batch owns the
+   duplicate rule and reports its refusal per item — "already has an open stop"
+   — which is the same answer, from the one place that can actually be sure. */
+function tpFind(v){
+  TP.plan.find = String(v||"");
+  /* render() replaces #main.innerHTML, so the <input> being typed into is
+     destroyed and re-created on every keystroke — focus and caret go with it.
+     Flag it here and put both back in tpAfterRender, once the new DOM exists.
+     Only on this path: refocusing on every Plan render would steal the caret
+     from the date field. */
+  TP.plan.findFocus = true;
+  render();
+}
+function tpFindClear(){ TP.plan.find = ""; TP.plan.findFocus = true; render(); }
+
+const TP_FIND_MAX = 8;
+
+function tpMachineList(){
+  const all = (typeof machines !== "undefined" && machines) ? machines : [];
+  const q = TP.plan.find.trim().toLowerCase();
+  if(!all.length) return `<p class="tp-empty">The machine list has not loaded yet.</p>`;
+  if(!q) return `<p class="tp-empty">Type a machine name or code to add it to this day.</p>`;
+
+  const hits = all.filter(m =>
+      String(m.name||"").toLowerCase().includes(q) ||
+      String(m.code||"").toLowerCase().includes(q));
+  if(!hits.length) return `<p class="tp-empty">No machine matches “${tpEsc(TP.plan.find)}”.</p>`;
+
+  /* Already on the chosen day -> shown, not pickable. Staging it would collide
+     with itself and /batch would refuse the whole item. */
+  const here = new Map((TP.plan.onDate.date === TP.plan.date
+                        ? TP.plan.onDate.stops : []).map(x=>[String(x.machineCode), x]));
+
+  const rows = hits.slice(0, TP_FIND_MAX).map(m => {
+    const code = String(m.code), name = m.name || code;
+    const key  = "m:" + code;
+    const open = TP.plan.shiftFor === key;
+    const on   = TP.plan.staged.some(x=>String(x.machine_code)===code);
+    const dup  = here.get(code);
+    if(dup) return `<button class="tp-g" disabled
+        title="${tpEsc(name+" is already on "+TP.plan.date+" (DO-"+dup.id+")")}">
+        <span class="nm">${tpEsc(name)}</span>
+        <span class="tag done">already on this day</span></button>`;
+    return `<button class="tp-g${on?" on":""}" onclick="tpShiftOpen(${tpJ(key)})"
+        title="${tpEsc(code)}">
+        <span class="nm">${tpEsc(name)}</span>
+        <span class="tag">${tpEsc(code)}</span></button>
+      ${open?tpShiftPicker(code, name, "planner", null, null, null):""}`;
+  }).join("");
+
+  const more = hits.length > TP_FIND_MAX
+    ? `<p class="tp-note">${hits.length - TP_FIND_MAX} more match — keep typing.</p>` : "";
+  return rows + more;
 }
 
 function tpGcalList(){
@@ -1069,13 +1152,23 @@ function tpRenderPlan(){
         ${TP.plan.staged.length?`<button class="btn sm ghost" onclick="tpClear()">Clear all</button>`:""}
       </div>
       <div class="tp-stage">
-        ${existing.map(x=>`
-          <span class="tp-chip has" title="${tpEsc("Already on this day"
+        ${existing.map(x=>{
+          /* Same gate as the Calendar's ✕, for the same reason: the server
+             refuses a withdraw once a driver holds the stop, and
+             _cancel_stop_rows only deletes rows whose Status is exactly
+             'open'. Offering it anywhere else is a dead click that answers
+             409. Burlington Square in JIAN YUAN LOH's round gets no ✕. */
+          const rm = tpCanAssign() && !x.assignedTo
+                     && String(x.status||"").toLowerCase() === "open";
+          return `<span class="tp-chip has${rm?" rm":""}" title="${tpEsc("Already on this day"
               + (x.assignedTo ? " — " + tpDriverName(x.assignedTo) : " — unassigned")
               + " (DO-" + x.id + ")")}">${tpEsc(x.machineName||x.machineCode)}
             <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":x.shift===0?"DAY":"—"}</span>
             <span class="who">${tpEsc(x.assignedTo ? tpDriverName(x.assignedTo) : "unassigned")}</span>
-          </span>`).join("")}
+            ${rm?`<button class="x" title="${tpEsc("Take "+(x.machineName||x.machineCode)
+                  +" off "+d+". The stop is deleted and the site goes back to the request list.")}"
+                  onclick="tpWithdraw(${x.id})">✕</button>`:""}
+          </span>`;}).join("")}
         ${TP.plan.staged.map(x=>`
           <span class="tp-chip">${tpEsc(x.name)}
             <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":"DAY"}</span>
@@ -1091,12 +1184,26 @@ function tpRenderPlan(){
     </div>
 
     <div class="tp-pl">
+      <div class="tp-plcol">
+      <div class="tp-pcard" style="margin:0 0 12px">
+        <h3>Add a machine</h3>
+        <p class="sub">Anything not in the sales calendar — an urgent call, a site
+          that rang in. It lands on the date above like any other pick.</p>
+        <div class="tp-find">
+          <input id="tpFind" type="search" placeholder="Machine name or code…"
+                 value="${tpEsc(TP.plan.find)}" oninput="tpFind(this.value)"
+                 autocomplete="off" spellcheck="false">
+          ${TP.plan.find?`<button class="btn sm ghost" onclick="tpFindClear()">Clear</button>`:""}
+        </div>
+        ${tpMachineList()}
+      </div>
       <div class="tp-pcard">
         <h3>Sales requests — next 14 days</h3>
         <p class="sub">Each entry is a request from sales: the site wants a visit
           that week. You decide the day and the shift. Picking one places it on
           the date above — if it is already placed, that <b>moves</b> it.</p>
         ${tpGcalList()}
+      </div>
       </div>
       <div class="tp-rail">
         <div class="tp-pcard">
@@ -1169,6 +1276,11 @@ function tpAfterRender(){
     const y = TP.day.scrollY || 0;
     TP.day.restore = false;
     requestAnimationFrame(()=>window.scrollTo(0, y));
+  }
+  if(TP.plan.findFocus){
+    TP.plan.findFocus = false;
+    const el = document.getElementById("tpFind");
+    if(el){ el.focus(); const n = el.value.length; try{ el.setSelectionRange(n,n); }catch(e){} }
   }
   const cur = subActive("topups","calendar");
   if(cur==="calendar") tpCalEnsure();
