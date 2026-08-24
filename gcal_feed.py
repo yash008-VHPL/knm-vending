@@ -150,6 +150,32 @@ def enabled():
     return bool(FEED_URL and FEED_SECRET)
 
 
+def sync_enabled():
+    """The ONLY place the GCAL_SYNC setting is interpreted.
+
+    DEFAULT OFF, changed 2026-08-24. A sales calendar entry is a REQUEST for a
+    visit, not a stop: dispatch decides which day it happens on and confirms it
+    from Topups > Plan. gcal_sync.apply() creating a row per event made every
+    calendar entry look like confirmed, dispatched work — which is the thing the
+    business rule forbids. If the App Setting is ever lost on a redeploy, losing
+    it must fail towards "the calendar does not book itself", never back towards
+    materialising 28 days of stops nobody confirmed.
+
+    topups_api._gcal_sync_on() calls this rather than repeating the comparison.
+    The duplicated literal is what drifted three ways in review, every time in
+    the dangerous direction (see that function's docstring).
+
+    Stated as an ON-list, not an off-list. An off-list is "on unless it looks
+    like something I recognise", so None -> "none" -> ON, 2 -> ON, "null" and
+    "unset" -> ON — and "none"/"null" are plausible spellings of "I turned it
+    off". Every unrecognised value now means off, which is the safe direction:
+    off is a calendar that does not book itself. str() also makes an int
+    config.GCAL_SYNC = 0 read as off, closing the second drift named above.
+    """
+    return str(_cfg("GCAL_SYNC", "0")).strip().lower() in (
+        "1", "true", "on", "yes", "y", "enabled")
+
+
 def snapshot(frm=None, to=None):
     """Cache read only — never blocks, never raises."""
     with _lock:
@@ -235,8 +261,8 @@ def refresh_once(get_cursor):
 
     # One-way sync into WO_DeliveryOrders. Kept AFTER the cache update so a sync
     # fault can never cost us a good feed — the pane still renders, it just
-    # reports the sync error. Disable with GCAL_SYNC=0.
-    if _cfg("GCAL_SYNC", "1") not in ("0", "false", "False", "off"):
+    # reports the sync error. OFF by default — see sync_enabled().
+    if sync_enabled():
         try:
             import gcal_sync
             rep = gcal_sync.run(events, get_cursor)

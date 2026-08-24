@@ -60,6 +60,36 @@
 .tp-s.act{cursor:pointer}
 .tp-s.act:hover{border-color:var(--blue)}
 .tp-s .src{font-size:.58rem;color:var(--mut);flex:none}
+/* A stop row and its withdraw control are SIBLINGS, never nested. .tp-s already
+   carries an onclick; a nested button would bubble into it, so confirm() would
+   be followed by tpMoveOpen's prompt() while the POST was still in flight. */
+.tp-srow{display:flex;align-items:stretch;gap:3px;margin:0 0 3px}
+.tp-srow .tp-s{flex:1;min-width:0;margin:0}
+.tp-x{flex:0 0 auto;border:1px solid var(--line);background:#fff;color:var(--mut);
+  border-radius:6px;padding:0 6px;font-size:.8rem;line-height:1;cursor:pointer;
+  font-family:inherit}
+.tp-x:hover{border-color:var(--bad);color:var(--bad);background:var(--red-bg)}
+.tp-dh.act{cursor:pointer}
+.tp-dh.act:hover b,.tp-dh.act:hover span{color:var(--blue)}
+.tp-more{width:100%;text-align:left;border:0;background:transparent;color:var(--blue-d);
+  font-size:.68rem;font-weight:700;cursor:pointer;padding:2px 0;font-family:inherit}
+.tp-more:hover{text-decoration:underline}
+
+/* ── Day detail ─────────────────────────────────────────────────────────── */
+/* A page, not a modal: it renders inside <main> exactly like the assignment
+   drill-down, so the sub-nav, the crumb and the back button all behave the way
+   that screen already taught the dispatcher they behave. */
+.tp-dfull{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.tp-dsec{margin:0 0 16px}
+.tp-dsec:last-child{margin-bottom:0}
+.tp-dsec h4{margin:0 0 7px;font-size:.8rem;display:flex;gap:8px;align-items:center;
+  border-bottom:1px solid var(--line);padding-bottom:5px}
+.tp-dsec h4 .n{background:var(--chip);color:var(--blue-d);border-radius:8px;
+  padding:0 6px;font-size:.68rem}
+.tp-dsec h4 .sp{flex:1}
+/* Forty stops in one column is a scroll; in three it is a glance. */
+.tp-drows{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:0 12px}
+@media(max-width:640px){.tp-drows{grid-template-columns:1fr}}
 .tp-un{width:100%;text-align:left;border:1px dashed var(--warn);background:var(--amber-bg);
   color:var(--ink);border-radius:6px;padding:4px 6px;font-size:.72rem;font-weight:600;
   cursor:pointer;font-family:inherit}
@@ -180,6 +210,13 @@ const TP = {
   cal:   {anchor:null, weeks:3, stops:[], other:{}, today:null, loading:false,
           stale:true, err:null, syncOn:null},
   assign:{open:false, date:null, picked:new Set(), busy:false},
+  /* Day detail drill-down. Same nature as assign — not a sub-tab — and so it
+     carries the same three obligations: renderTopups closes it when the
+     sub-tab changes, the week navigation closes it (it renders from
+     TP.cal.stops, which those refetch for a DIFFERENT range, so a day left
+     open would silently render empty), and scrollY is kept because render()
+     rewrites #main wholesale and nothing in this app restores scroll. */
+  day:   {open:false, date:null, scrollY:0, restore:false},
   /* onDate = what is ALREADY scheduled for plan.date. Fetched whenever the
      date changes, so the composer answers "what is this day already carrying?"
      instead of always looking empty. */
@@ -248,10 +285,14 @@ async function tpCalLoad(){
   render();
 }
 function tpCalEnsure(){ if(TP.cal.stale && !TP.cal.loading) tpCalLoad(); }
-function tpCalShift(n){ TP.cal.anchor = tpAdd(tpMonday(TP.cal.anchor||tpToday()), n*7);
+/* Every one of these refetches a DIFFERENT date range. The day view reads
+   TP.cal.stops, so leaving it open across one of them lands the dispatcher on a
+   date that is no longer in the payload: an empty day with no explanation. */
+function tpCalShift(n){ TP.day.open = false;
+  TP.cal.anchor = tpAdd(tpMonday(TP.cal.anchor||tpToday()), n*7);
   TP.cal.stale = true; render(); }
-function tpCalThis(){ TP.cal.anchor = null; TP.cal.stale = true; render(); }
-function tpCalMore(){ TP.cal.weeks += 3; TP.cal.stale = true; render(); }
+function tpCalThis(){ TP.day.open = false; TP.cal.anchor = null; TP.cal.stale = true; render(); }
+function tpCalMore(){ TP.day.open = false; TP.cal.weeks += 3; TP.cal.stale = true; render(); }
 
 function tpStopRow(s, past, judgeable){
   /* An undated OPEN row is not a plan and not an outcome: it is a stop that is
@@ -285,7 +326,7 @@ function tpStopRow(s, past, judgeable){
   const act = !can ? "" : judgeable ? `onclick="tpOutcome(${s.id})"`
                                     : `onclick="tpMoveOpen(${s.id})"`;
   const sh  = s.shift===0 ? "DAY" : s.shift===1 ? "NIGHT" : "";
-  return `<div class="tp-s ${cls}${can?" act":""}" ${act}
+  const row = `<div class="tp-s ${cls}${can?" act":""}" ${act}
     title="${tpEsc((s.machineName||s.machineCode||"")+(s.why?" — "+s.why:"")
       + (s.undated?" — no planned date; filed on the day it was completed":"")
       + (can ? (judgeable ? " — click to set the outcome"
@@ -294,6 +335,54 @@ function tpStopRow(s, past, judgeable){
     ${sh?`<span class="sh">${sh}</span>`:""}
     ${s.colourSource==="dispatch"?'<span class="src" title="Set by dispatch">✎</span>':""}
   </div>`;
+
+  /* The ✕ is offered ONLY where the server will actually accept it, so it is
+     never a dead click that answers 409:
+       role      — /api/topups/move is DISPATCH_ROLES (topups_api.py:1105)
+       no driver — withdraw refuses once somebody holds the stop (:1159)
+       'open'    — _cancel_stop_rows filters on it exactly (workorders.py:3828),
+                   and this bucket can contain COMPLETED rows: the server files
+                   a completed undated stop against its completion day, so
+                   today's cell carries them too
+     Blocking (undated, open) rows are excluded on purpose: the fix for one is
+     to give it a date or close it, which is what clicking the row already does.
+     Deleting it would look like the same gesture and is not.
+
+     not past  — the grid does not even DRAW unassigned rows on a past day
+                   (see tpCalDay), because a past unassigned stop is not a plan:
+                   it is work nobody was ever given, and that is the record. The
+                   day view mirrors the grid, so it must not turn the one screen
+                   that lists them into a one-click delete for history. The
+                   server would accept it; that is exactly why the client must
+                   not offer it.
+     Gating here rather than in tpRenderDay keeps the two screens in step by
+     construction — they call this same function. */
+  const canX = can && !past && !s.blocking && !s.assignedTo
+               && String(s.status||"").toLowerCase() === "open";
+  if(!canX) return row;
+  return `<div class="tp-srow">${row}<button class="tp-x"
+    title="${tpEsc("Withdraw "+(s.machineName||s.machineCode||"this stop")
+      +" from "+(s.date||"the plan"))}"
+    onclick="tpWithdraw(${s.id})">✕</button></div>`;
+}
+
+/* How many rows one grid cell shows per group before it defers to the day view.
+   At ~40 stops a day an uncapped cell is ~900px tall inside a 140px-wide column
+   with every machine name ellipsised to nothing — .tp-day has no max-height and
+   no overflow, so the cell simply grows and the week strip stops being a week. */
+const TP_CELL_MAX = 4;
+
+/* Cap a list, but NEVER hide a blocking row. Those exist so the batch
+   endpoint's "open stop with no date" refusal points at something the
+   dispatcher can click; burying one behind a "+n more" re-creates the bug the
+   comment in tpStopRow says was just fixed. */
+function tpCapRows(list, iso, past, judgeable){
+  const block = list.filter(s=>s.blocking);
+  const rest  = list.filter(s=>!s.blocking);
+  const shown = rest.slice(0, Math.max(1, TP_CELL_MAX - block.length));
+  const hid   = rest.length - shown.length;
+  return block.concat(shown).map(s=>tpStopRow(s,past,judgeable)).join("")
+    + (hid>0 ? `<button class="tp-more" onclick="tpDayOpen(${tpJ(iso)})">+${hid} more →</button>` : "");
 }
 
 function tpCalDay(iso, byDay, todayIso){
@@ -315,7 +404,7 @@ function tpCalDay(iso, byDay, todayIso){
     <div class="tp-drv">
       <div class="tp-drvh"><span>${tpEsc(tpDriverName(em))}</span>
         <span class="n">${groups[em].length}</span></div>
-      ${groups[em].map(s=>tpStopRow(s,past,judgeable)).join("")}
+      ${tpCapRows(groups[em], iso, past, judgeable)}
     </div>`).join("");
 
   let un = "";
@@ -323,10 +412,12 @@ function tpCalDay(iso, byDay, todayIso){
     /* Past days keep the same word. An unassigned stop on a past day is not a
        plan any more — it is work nobody was ever given, which is precisely
        what a dispatcher looking backwards needs to see. */
+    /* The Unassigned button is the ONLY entry point to the assignment screen,
+       so it is never capped away — only the rows beneath it are. */
     un = tpCanAssign()
       ? `<button class="tp-un" onclick="tpAssignOpen(${tpJ(iso)})">Unassigned (${unassigned.length}) →</button>`
       : `<div class="tp-un" style="cursor:default">Unassigned (${unassigned.length})</div>`;
-    if(!past) un += unassigned.map(s=>tpStopRow(s,false,judgeable)).join("");
+    if(!past) un += tpCapRows(unassigned, iso, false, judgeable);
   }
 
   const o = TP.cal.other[iso];
@@ -336,7 +427,10 @@ function tpCalDay(iso, byDay, todayIso){
     : "";
 
   return `<div class="tp-day${iso===todayIso?" today":""}${iso<todayIso?" past":""}">
-    <div class="tp-dh"><b>${TP_DOW[tpDow(iso)]}</b><span>${tpLabel(iso)}</span></div>
+    <div class="tp-dh act" onclick="tpDayOpen(${tpJ(iso)})"
+      title="${tpEsc("Open "+iso+" in full — "+stops.length+" stop"+(stops.length===1?"":"s"))}">
+      <b>${TP_DOW[tpDow(iso)]}</b>
+      <span>${tpLabel(iso)}${stops.length?` · ${stops.length}`:""}</span></div>
     ${drivers}${un}
     ${(!drivers && !un) ? `<p class="tp-empty">${past?"—":"Nothing planned"}</p>` : ""}
     ${other}
@@ -344,7 +438,10 @@ function tpCalDay(iso, byDay, todayIso){
 }
 
 function tpRenderCalendar(){
+  /* Assign stays FIRST. It is reachable from inside the day view, and a day
+     left flagged open underneath it is the state tpAssignClose returns to. */
   if(TP.assign.open) return tpRenderAssign();
+  if(TP.day.open)    return tpRenderDay();
 
   const today = TP.cal.today || tpToday();
   const byDay = {};
@@ -381,7 +478,9 @@ function tpRenderCalendar(){
       <span><i style="background:var(--warn)"></i>Faulty service</span>
       <span><i style="background:var(--bad)"></i>Unable</span>
       <span><i style="background:var(--blue)"></i>Planned</span>
-      ${tpCanAssign()?'<span style="color:var(--mut)">Click a past stop to set its colour · click a planned stop to move or withdraw it.</span>':""}
+      ${tpCanAssign()
+        ? '<span style="color:var(--mut)">Click a past stop to set its colour · click a planned stop to move or withdraw it · click a day header to open it in full.</span>'
+        : '<span style="color:var(--mut)">Click a day header to open that day in full.</span>'}
     </div>
     ${TP.cal.loading && !TP.cal.stops.length ? '<p class="tp-empty">Loading…</p>' : weeks.join("")}
     <button class="btn sm ghost" onclick="tpCalMore()">Show 3 more weeks</button>
@@ -417,6 +516,120 @@ async function tpOutcome(id){
   TP.cal.stale = true; toast("Saved."); render();
 }
 
+/* ── Withdraw ──────────────────────────────────────────────────────────────
+   ONE implementation. Both callers land here — the ✕ on an unassigned row and
+   tpMoveOpen's "withdraw" keyword — so the confirmation wording, the
+   pre-checks and (the part that actually bit) the invalidation set can never
+   drift apart between them. */
+const TP_BUSY = new Set();
+async function tpWithdraw(id){
+  const s = TP.cal.stops.find(x=>x.id===id);
+  /* The row is gone from under the click — a concurrent tpCalLoad dropped it.
+     Doing nothing at all looks like a broken button; resync instead. */
+  if(!s){ TP.cal.stale = true; render(); return; }
+  /* A one-click ✕ on a tablet is a double-tap waiting to happen, and the second
+     POST answers 404 "That stop no longer exists" as a toast. */
+  if(TP_BUSY.has(id)) return;
+  if(s.assignedTo){
+    toast(`${s.machineName||s.machineCode} is assigned to ${tpDriverName(s.assignedTo)} — unassign it first.`);
+    return; }
+  if(!confirm(`Withdraw ${s.machineName||s.machineCode} from ${s.date||"the plan"}?\n\n`
+            + `The stop is deleted. It is snapshotted to the deletion log, and `
+            + `the sales request stays in the list so it can be placed again.`)) return;
+
+  TP_BUSY.add(id);
+  const r = await api("/api/topups/move", {method:"POST", body:{id, action:"withdraw"}});
+  TP_BUSY.delete(id);
+  /* api() has already toasted. Refetch anyway: a 409 means this client's idea
+     of the row is out of date, which is exactly when showing it again is wrong. */
+  if(!r){ TP.cal.stale = true; render(); return; }
+
+  /* Drop it optimistically. TP.cal.stops still holds the row until tpCalLoad
+     answers, and until then it is on screen with a live ✕. */
+  TP.cal.stops = TP.cal.stops.filter(x=>x.id!==id);
+
+  /* Everything that reads WO_DeliveryOrders for this day.
+     onDate.date = null is NOT optional: the Plan composer and the vend rail
+     carry this stop's id as a move target, and /batch silently SKIPS an item
+     whose stop has gone ("that request's stop no longer exists") — the
+     dispatcher believes they planned a machine and they did not.
+     SC / RAIL / DONE belong to the main script, not to TP, so they are
+     typeof-guarded: this file must still stand alone if it is ever loaded
+     without alpha_preview.html around it. */
+  TP.cal.stale = true; TP.plan.gcal.stale = true; TP.plan.onDate.date = null;
+  if(typeof SC   !== "undefined" && SC)   SC.stale   = true;
+  if(typeof RAIL !== "undefined" && RAIL) RAIL.stale = true;
+  if(typeof doneInvalidate === "function") doneInvalidate();
+  toast(`${r.name} withdrawn.`);
+  render();
+}
+
+/* ── Day detail ────────────────────────────────────────────────────────────
+   Rendered from TP.cal.stops. No new endpoint and no second source of truth
+   for what a day contains — the grid cell and this page are the same data,
+   shown at two densities. */
+function tpDayOpen(iso){
+  if(!iso) return;
+  TP.day = {open:true, date:iso, scrollY:(window.scrollY||0), restore:false};
+  window.scrollTo(0,0);
+  render();
+}
+function tpDayClose(){ TP.day.open = false; TP.day.restore = true; render(); }
+
+function tpRenderDay(){
+  const iso   = TP.day.date;
+  const today = TP.cal.today || tpToday();
+  const past  = iso < today;          // same rule as tpCalDay: STRICTLY earlier
+  const judgeable = iso <= today;
+  const stops = TP.cal.stops.filter(s=>s.date===iso);
+
+  const groups = {};
+  stops.forEach(s => { const k = s.assignedTo || ""; (groups[k]=groups[k]||[]).push(s); });
+  const unassigned = groups[""] || [];
+  delete groups[""];
+
+  /* head, then the count, then any action — so "Unassigned 20 [Assign…]"
+     reads in that order rather than putting the button between the two. */
+  const sec = (head, n, rows, action) => `<div class="tp-dsec">
+      <h4>${head}<span class="n">${n}</span>${action||""}<span class="sp"></span></h4>
+      <div class="tp-drows">${rows}</div></div>`;
+
+  const drivers = Object.keys(groups).sort().map(em =>
+    sec(tpEsc(tpDriverName(em)), groups[em].length,
+        groups[em].map(s=>tpStopRow(s,past,judgeable)).join(""))).join("");
+
+  const un = unassigned.length
+    ? sec("Unassigned", unassigned.length,
+          unassigned.map(s=>tpStopRow(s,past,judgeable)).join(""),
+          tpCanAssign()
+            ? `<button class="btn sm ghost" onclick="tpAssignOpen(${tpJ(iso)})">Assign…</button>`
+            : "")
+    : "";
+
+  const o = TP.cal.other[iso];
+
+  return `<div class="tp-bar">
+      <button class="btn sm ghost" onclick="tpDayClose()">‹ Back to calendar</button>
+      <span class="sp"><b>${TP_DOW[tpDow(iso)]} ${tpLabel(iso)}</b> —
+        ${stops.length} stop${stops.length===1?"":"s"} ·
+        ${unassigned.length} unassigned · ${stops.length-unassigned.length} assigned</span>
+      <button class="btn sm ghost" onclick="TP.cal.stale=true;render()">Refresh</button>
+    </div>
+    ${TP.cal.err?`<div class="tp-warn"><b>${tpEsc(TP.cal.err)}</b></div>`:""}
+    <div class="tp-dfull">
+      ${drivers}${un}
+      ${!stops.length?`<p class="tp-empty">${past
+        ? "Nothing was recorded on this day."
+        : "Nothing planned for this day yet — place stops on Topups ▸ Plan."}</p>`:""}
+      ${o && (o.joborders||o.movements) ? `<p class="tp-note">Also on this day:
+        ${o.joborders||0} service · ${o.movements||0} movement. Those are not
+        top-ups; they live on Service ▸ Day board.</p>` : ""}
+    </div>
+    <p class="tp-note">${tpCanAssign()
+      ? "Click a stop to set its outcome, or to move it. ✕ withdraws an unassigned stop outright."
+      : "Read-only — dispatch owns this day."}</p>`;
+}
+
 /* Dispatch moves a planned stop to another day, or withdraws it.
 
    Sales says which sites want a visit; dispatch says which day. This is that
@@ -438,18 +651,8 @@ async function tpMoveOpen(id){
   const t = v.trim().toLowerCase();
   if(!t) return;
 
-  if(t==="withdraw"){
-    if(s.assignedTo){
-      toast(`${s.machineName} is assigned to ${tpDriverName(s.assignedTo)} — unassign it first.`);
-      return; }
-    if(!confirm(`Withdraw ${s.machineName||s.machineCode} from ${cur}?\n\n`
-              + `The stop is deleted. It is snapshotted to the deletion log, and `
-              + `the sales request stays in the list so it can be placed again.`)) return;
-    const r = await api("/api/topups/move", {method:"POST", body:{id, action:"withdraw"}});
-    if(!r) return;
-    TP.cal.stale = true; TP.plan.gcal.stale = true; TP.plan.onDate.date = null;
-    toast(`${r.name} withdrawn.`); render(); return;
-  }
+  /* One withdraw implementation, not two — see tpWithdraw. */
+  if(t==="withdraw") return tpWithdraw(id);
 
   const m = t.match(/^(\d{4}-\d{2}-\d{2})(?:\s+(day|night))?$/);
   if(!m){ toast('Use YYYY-MM-DD, optionally followed by "day" or "night".'); return; }
@@ -499,7 +702,9 @@ async function tpAssignTo(email){
 
 function tpRenderAssign(){
   const iso = TP.assign.date;
-  const un  = TP.cal.stops.filter(s=>s.date===iso && !s.assignedTo);
+  /* !s.blocking to match tpAssignAll: an undated open row is not work anyone
+     can be given, and assigning one just moves the jam to a driver. */
+  const un  = TP.cal.stops.filter(s=>s.date===iso && !s.assignedTo && !s.blocking);
   const already = TP.cal.stops.filter(s=>s.date===iso && s.assignedTo);
   const counts = {};
   already.forEach(s=>{counts[s.assignedTo]=(counts[s.assignedTo]||0)+1;});
@@ -512,7 +717,8 @@ function tpRenderAssign(){
     ...Object.keys(counts)])].filter(Boolean).sort();
 
   return `<div class="tp-bar">
-      <button class="btn sm ghost" onclick="tpAssignClose()">‹ Back to calendar</button>
+      <button class="btn sm ghost" onclick="tpAssignClose()">‹ Back to ${
+        TP.day.open ? "the day" : "calendar"}</button>
       <span class="sp"><b>${TP_DOW[tpDow(iso)]} ${tpLabel(iso)}</b> —
         ${un.length} unassigned · ${already.length} already assigned</span>
       <button class="btn sm ghost" onclick="tpAssignAll()">Select all</button>
@@ -937,6 +1143,7 @@ function renderTopups(){
      open let a click land the user on Plan with the assignment page still
      flagged open underneath. */
   if(TP.assign.open && cur !== "calendar"){ TP.assign.open = false; }
+  if(TP.day.open    && cur !== "calendar"){ TP.day.open    = false; }
 
   const nav = `<div class="subnav">${modes.map(([k,l])=>
     `<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>`;
@@ -955,6 +1162,14 @@ function renderTopups(){
    never fires from inside a function whose return value is being written into
    innerHTML. */
 function tpAfterRender(){
+  /* render() rewrites #main wholesale and this app restores scroll nowhere, so
+     closing a day opened from week 3 of the grid otherwise dumps the
+     dispatcher back at the top of the page. Restored after paint. */
+  if(TP.day.restore){
+    const y = TP.day.scrollY || 0;
+    TP.day.restore = false;
+    requestAnimationFrame(()=>window.scrollTo(0, y));
+  }
   const cur = subActive("topups","calendar");
   if(cur==="calendar") tpCalEnsure();
   else if(cur==="plan") tpPlanEnsure();

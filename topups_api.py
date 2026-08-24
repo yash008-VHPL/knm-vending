@@ -146,6 +146,12 @@ def _gcal_sync_on():
         it as off — the exact state the 409 exists to prevent, inverted;
       * GCAL_SYNC = "" was ON here and fell through to config there.
 
+    2026-08-24: the comparison itself now lives in gcal_feed.sync_enabled(), so
+    there is exactly one copy of it, and its default is OFF. An AttributeError
+    here (an older gcal_feed.py redeployed from one of the .bak copies in the
+    repo) falls through to the except below and returns True, which refuses
+    loudly rather than planning against a live sync.
+
     gcal_feed.enabled() is the other half: the sync only ever runs inside
     refresh_once(), which only runs if start() succeeded, which needs
     GCAL_FEED_URL and GCAL_FEED_SECRET. Without them nothing can be created or
@@ -158,7 +164,20 @@ def _gcal_sync_on():
     try:
         if not gcal_feed.enabled():
             return False
-        return gcal_feed._cfg("GCAL_SYNC", "1") not in ("0", "false", "False", "off")
+        fn = getattr(gcal_feed, "sync_enabled", None)
+        if fn is None:
+            # A pre-2026-08-24 gcal_feed.py is deployed under a newer
+            # topups_api.py — there are nine .bak copies of these modules in the
+            # repo, so a stray redeploy is a real state. Refuse (that old module
+            # also defaults GCAL_SYNC to ON), but say WHICH thing is wrong: the
+            # 409 below tells the operator to set the app setting to 0, which
+            # they will already have done, and nothing else distinguishes the
+            # two causes.
+            print("[topups_api] gcal_feed has no sync_enabled(): a pre-2026-08-24 "
+                  "gcal_feed.py is deployed. Redeploy the matching version — the "
+                  "GCAL_SYNC app setting is not the problem.")
+            return True
+        return fn()
     except Exception:
         # Unreadable state is not proof of safety. Assume it is live and let
         # /batch refuse loudly rather than let it double-book silently.

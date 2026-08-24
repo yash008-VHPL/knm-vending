@@ -1787,12 +1787,17 @@ function scMore(){ SC.weeks += 4; SC.stale = true; render(); }
 function scReload(){ SC.stale = true; render(); }
 
 /* ── FROM GOOGLE CALENDAR ────────────────────────────────────────────────────
-   The sales coordinator's calendar IS the schedule. gcal_sync.py turns every
-   resolvable event into a real WO_DeliveryOrders row server-side, 28 days
-   rolling, with no confirmation step on this end. So this pane deliberately
-   has NO Create button — it is a mirror plus the two lists a human must act
-   on: events that could not be resolved to an exact machine set, and stops a
-   driver already holds whose calendar entry has since been removed.
+   The sales coordinator's calendar is a list of REQUESTS, not the schedule.
+   gcal_sync.py used to turn every resolvable event into a real
+   WO_DeliveryOrders row server-side with no confirmation step; that is off as
+   of 2026-08-24 (gcal_feed.sync_enabled defaults to off) because it made every
+   request look like confirmed, dispatched work. Only the dispatcher confirms a
+   stop, and the one place that happens is Topups > Plan.
+
+   So this pane deliberately has NO Create button — it is a mirror, plus the
+   lists a human must act on: events that could not be resolved to an exact
+   machine set, and (while the sync was live) stops a driver already holds
+   whose calendar entry has since been removed.
    The whole 63-day cache is fetched once and filtered client side, so paging
    weeks with scShift/scMore needs no refetch. */
 let GC = {stops:[], stale:true, ok:false, error:null, enabled:true,
@@ -1886,12 +1891,13 @@ function renderGcalPane(){
     <button class="btn sm ghost" style="margin-top:8px" onclick="gcFull()">${
       GC.full ? "Hide" : "Show"} the calendar as sales keyed it</button>
     <button class="btn sm ghost" style="margin-top:8px" onclick="gcReload()">Refresh</button>
-    <p class="note" style="margin:6px 0 0">${(window.TP && TP.plan.gcal.syncOn === false)
-      ? `This calendar no longer books itself. Turn an entry into a stop on
-         <b>Topups &#9656; Plan</b>, where you also choose the day and the shift.`
-      : `Stops are created automatically from this calendar, 28 days ahead. Remove an
+    <p class="note" style="margin:6px 0 0">${(window.TP && TP.plan.gcal.syncOn === true)
+      ? `Stops are created automatically from this calendar, 28 days ahead. Remove an
          event in Google and its stop is withdrawn — unless a driver already has it,
-         in which case it is listed above instead.`}</p></div>`;
+         in which case it is listed above instead.`
+      : `Every entry here is a <b>request</b>, not a stop. Turn one into a stop on
+         <b>Topups &#9656; Plan</b>, where you also choose the day and the shift.
+         Nothing on this calendar books itself.`}</p></div>`;
 }
 
 function gcItem(e){
