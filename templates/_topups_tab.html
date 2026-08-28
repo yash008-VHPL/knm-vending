@@ -917,7 +917,18 @@ function tpVendRail(){
   const stale = m.staleAsOf ? new Date(m.staleAsOf) : null;
   const hrs = (stale && !isNaN(stale)) ? Math.round((Date.now()-stale.getTime())/3600000) : null;
   const times = m.pullTimes || "05:00 and 17:00 SGT";
-  const ago = hrs==null ? "unknown" : hrs+"h ago";
+  /* Absolute time first, relative second. "3h ago" alone cannot be checked
+     against the schedule: at 18:00 it is consistent with the 17:00 run having
+     landed AND with it having been missed while an earlier manual run stood in.
+     Pinned to SGT rather than the viewer's locale so the figure can be compared
+     to "05:00 and 17:00 SGT" on the same line without a timezone conversion. */
+  const when = (stale && !isNaN(stale))
+    ? stale.toLocaleString("en-GB", { timeZone: "Asia/Singapore", day: "2-digit",
+        month: "short", hour: "2-digit", minute: "2-digit", hour12: false })
+      .replace(",", "") + " SGT"
+    : null;
+  const ago = hrs==null ? "unknown"
+            : when + " (" + hrs + "h ago)";
   const freshWarn = (m.feedOk===false)
     ? `<div class="tp-warn tp-bad"><b>The Auresys feed has stopped.</b>
        Last successful pull ${ago} — past the point where a missed run is the only
