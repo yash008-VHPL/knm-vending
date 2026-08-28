@@ -68,6 +68,15 @@ STATUS_SUCCESS, STATUS_STLM, STATUS_FAIL = 0, 1, 2
 STATUS_MAP = {
     "success": STATUS_SUCCESS, "\u6210\u529f": STATUS_SUCCESS,
     "stlm": STATUS_STLM, "\u7d50\u7b97": STATUS_STLM, "\u7ed3\u7b97": STATUS_STLM,
+    # 2026-08-26 10:33:31, SGKN_M0019. Probed before mapping (see
+    # probe_manual_stlm.py): amount 0, isSettled 0, skuNo null, paymentType
+    # "Unknown" - the same shape as the 68 plain "STLM" rows that day, which
+    # also summed to 0.00. Not a dispense, whatever else it is: cardNo was not
+    # inspected, so "settlement marker" vs "manual card tap" is not settled -
+    # both belong in this bucket, and the dispense count excludes it either way.
+    # Exact key, not a substring test, so "STLM Reversal" still aborts. Note
+    # "Fail STLM" does NOT reach this map - FAIL_PREFIXES catches it first.
+    "manual stlm": STATUS_STLM,
 }
 FAIL_PREFIXES = ("fail", "\u5931\u6557", "\u5931\u8d25")
 
@@ -212,10 +221,28 @@ def parse_rows(raw_rows, pepper, day):
             unknown.setdefault(str(r["dispenseStatus"]).strip(), 0)
             unknown[str(r["dispenseStatus"]).strip()] += 1
             continue
-        ts = dt.datetime.strptime(str(r["time"]).strip(), "%Y-%m-%d %H:%M:%S")
-        amt = decimal.Decimal(str(r["amount"])).quantize(ZERO)
+        # Raised as Abort, not left to propagate: a bare ValueError or
+        # InvalidOperation escapes the handler in main() and kills the job with
+        # a traceback and no Teams alert. Newly reachable now that a status
+        # class which used to be skipped is parsed.
+        try:
+            ts = dt.datetime.strptime(str(r["time"]).strip(), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            raise Abort("ABORTED_PARSE",
+                        "unparseable time %r on a %s row (terminal %r)"
+                        % (r.get("time"), r.get("dispenseStatus"), r.get("vmsID")))
+        try:
+            amt = decimal.Decimal(str(r["amount"])).quantize(ZERO)
+        except (decimal.InvalidOperation, ValueError):
+            raise Abort("ABORTED_PARSE",
+                        "unparseable amount %r on a %s row (terminal %r)"
+                        % (r.get("amount"), r.get("dispenseStatus"), r.get("vmsID")))
         if not amt.is_finite():
-            raise Abort("ABORTED_PARSE", "non-finite amount in %r" % r)
+            # Redacted like the two handlers above: this message goes to the
+            # Teams webhook and the Actions log, and the raw row carries cardNo.
+            raise Abort("ABORTED_PARSE",
+                        "non-finite amount %r on a %s row (terminal %r)"
+                        % (r.get("amount"), r.get("dispenseStatus"), r.get("vmsID")))
         if ts.date() != day:
             raise Abort("ABORTED_PARSE",
                         "row dated %s came back for the %s query - the date filter is "
