@@ -1,0 +1,52 @@
+name: Auresys Status Probe (manual, read-only)
+
+# One-off diagnostic. Logs into Auresys, fetches a single day, prints every
+# row whose dispenseStatus is not in auresys_pull.STATUS_MAP, and reports
+# whether the API's totalAmount includes those rows.
+#
+# No database credentials are passed to this job and nothing is written.
+# Separate from auresys-daily.yml on purpose: the production pull must not be
+# edited to answer a question about it.
+on:
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Day to probe, YYYY-MM-DD'
+        required: true
+        default: '2026-08-26'
+
+permissions: {}
+
+concurrency:
+  # Shares the production pull's group deliberately. Auresys may allow only one
+  # session per account, so a probe logging in mid-pull could invalidate the
+  # pull's session. This queues behind it instead.
+  group: auresys-pull
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b   # v5.3.0
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        # pymssql is deliberately not installed: this job has no DB access.
+        run: pip install --quiet requests
+
+      - name: Probe
+        env:
+          AURESYS_USER:     ${{ secrets.AURESYS_USER }}
+          AURESYS_PASSWORD: ${{ secrets.AURESYS_PASSWORD }}
+          # Via env, not inline ${{ }}: an inline expression is substituted into
+          # the shell before bash runs and would be injectable.
+          PROBE_DATE:       ${{ inputs.date }}
+        run: python probe_manual_stlm.py "$PROBE_DATE"
