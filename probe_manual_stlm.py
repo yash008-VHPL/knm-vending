@@ -15,6 +15,7 @@ listed without their values.
 import datetime as dt
 import decimal
 import os
+import re
 import sys
 from collections import Counter, defaultdict
 
@@ -26,8 +27,14 @@ ZERO = decimal.Decimal("0.00")
 # Printed verbatim. Everything else is reported by name only - the server
 # returns whatever it returns, not just what COLUMNS asked for, and a
 # settlement row is exactly the kind that carries an extra name or reference.
-SHOW = ("vmsID", "outletNo", "time", "dispenseStatus", "paymentType",
-        "amount", "isSettled", "skuNo", "skuName", "errorCode", "errorMsg")
+SHOW = ("vmsID", "outletNo", "outletName", "time", "dispenseStatus",
+        "paymentType", "amount", "isSettled", "skuNo", "skuName",
+        "errorCode", "errorMsg")
+
+# Never printed as a value - only whether one is present and its shape. A blank
+# or all-asterisk cardNo hashes to NULL (auresys_pull.card_hash); a real one
+# does not, and would let the row register as a flag-card tap.
+CARD_KEYS = ("cardNo", "cardNumber", "cardno")
 
 
 def amt(r):
@@ -77,7 +84,19 @@ def main():
         for k in SHOW:
             if k in r:
                 print("   %-14s = %r" % (k, r[k]))
-        rest = sorted(k for k in r if k not in SHOW)
+        for k in CARD_KEYS:
+            if k in r:
+                v = r[k]
+                if v is None or str(v).strip() == "":
+                    shape = "absent/empty -> hashes to NULL"
+                elif set(str(v).strip()) <= {"*"}:
+                    shape = "all-asterisk -> hashes to NULL"
+                else:
+                    shape = ("PRESENT, %d chars, shape %s -> WILL be hashed"
+                             % (len(str(v).strip()),
+                                re.sub(r"[0-9A-Za-z]", "#", str(v).strip())))
+                print("   %-14s = %s" % (k, shape))
+        rest = sorted(k for k in r if k not in SHOW and k not in CARD_KEYS)
         if rest:
             print("   other field NAMES only (values withheld - CI log): %s" % rest)
 
