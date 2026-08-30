@@ -1,0 +1,43 @@
+name: Vend Counter Diagnostic (manual, read-only)
+
+# Compares the Auresys API against the database for a few terminals and shows
+# exactly what the vend counter query returns. Every statement is a SELECT.
+on:
+  workflow_dispatch:
+    inputs:
+      terminals:
+        description: 'Comma-separated NETS terminal IDs'
+        required: true
+        default: 'SGKN_M0005,SGKN_M0028'
+      days:
+        description: 'How many days back (including today)'
+        required: true
+        default: '7'
+
+permissions: {}
+
+concurrency:
+  group: auresys-pull
+  cancel-in-progress: false
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683   # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b   # v5.3.0
+        with:
+          python-version: '3.12'
+      - run: pip install --quiet requests pymssql
+      - name: Diagnose
+        env:
+          AURESYS_USER:     ${{ secrets.AURESYS_USER }}
+          AURESYS_PASSWORD: ${{ secrets.AURESYS_PASSWORD }}
+          DB_SERVER:        machineserver.database.windows.net
+          DB_NAME:          "Machine DispensedDrink"
+          NETS_DB_USER:     ${{ secrets.NETS_DB_USER || secrets.DB_USER }}
+          NETS_DB_PASSWORD: ${{ secrets.NETS_DB_PASSWORD || secrets.DB_PASSWORD }}
+          TERMS:            ${{ inputs.terminals }}
+          DAYS:             ${{ inputs.days }}
+        run: python diag_vend_counter.py "$TERMS" "$DAYS"
