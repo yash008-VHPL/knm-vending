@@ -916,12 +916,12 @@ function tpVendRail(){
 
   const stale = m.staleAsOf ? new Date(m.staleAsOf) : null;
   const hrs = (stale && !isNaN(stale)) ? Math.round((Date.now()-stale.getTime())/3600000) : null;
-  const times = m.pullTimes || "05:00 and 17:00 SGT";
   /* Absolute time first, relative second. "3h ago" alone cannot be checked
-     against the schedule: at 18:00 it is consistent with the 17:00 run having
-     landed AND with it having been missed while an earlier manual run stood in.
+     against the schedule: an evening reading is equally consistent with the
+     day-shift run having landed AND with it having been missed while an
+     earlier manual run stood in.
      Pinned to SGT rather than the viewer's locale so the figure can be compared
-     to "05:00 and 17:00 SGT" on the same line without a timezone conversion. */
+     to the published pull times on the same line without a timezone conversion. */
   const when = (stale && !isNaN(stale))
     ? stale.toLocaleString("en-GB", { timeZone: "Asia/Singapore", day: "2-digit",
         month: "short", hour: "2-digit", minute: "2-digit", hour12: false })
@@ -929,20 +929,28 @@ function tpVendRail(){
     : null;
   const ago = hrs==null ? "unknown"
             : when + " (" + hrs + "h ago)";
+  /* Healthy state gets the timestamp and nothing else. The schedule and the
+     reason for it are documented in auresys-daily.yml; repeating them on the
+     card every render buried the one number anyone reads. The exception
+     banners below still explain themselves - that is when the words earn
+     their place. */
+  const stamp = (stale && !isNaN(stale))
+    ? stale.toLocaleString("en-GB", { timeZone: "Asia/Singapore", hour: "2-digit",
+        minute: "2-digit", hour12: false }) + " "
+      + stale.toLocaleDateString("en-CA", { timeZone: "Asia/Singapore" })
+    : "unknown";
   const freshWarn = (m.feedOk===false)
     ? `<div class="tp-warn tp-bad"><b>The Auresys feed has stopped.</b>
        Last successful pull ${ago} — past the point where a missed run is the only
        explanation. Every number below is frozen there.</div>`
     : (m.feedFresh===false)
-    /* Amber, not red. The 17:00 run is the optional one; missing it makes the
+    /* Amber, not red. The 18:00 run is the optional one; missing it makes the
        counter a day old, which is worth saying, but the feed is not broken and
        the red banner would cry wolf every time that run was skipped. */
     ? `<div class="tp-warn"><b>Counter is behind.</b>
        A scheduled pull has not landed — last pull ${ago}. Anything topped up
        since then is not reflected below.</div>`
-    : `<p class="tp-note">Pulled ${tpEsc(times)} — last pull ${ago}. The 05:00 run
-       picks up the night shift, the 17:00 run the day shift, so a top-up is
-       reflected here within hours rather than the next morning.</p>`;
+    : `<p class="tp-note">Last pulled: ${stamp} SGT</p>`;
 
   const dead = m.deadReader || [];
   /* Named, not hidden. A machine whose reader has been silent for 30 days is

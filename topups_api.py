@@ -95,9 +95,9 @@ VEND_CACHE_SECONDS = 300
 # TWO different questions, deliberately two thresholds.
 #
 #   DEAD  - has the feed stopped? 26h, unchanged: that is the dead-man's switch
-#           the Auresys handoff defines, measured against the 05:00
+#           the Auresys handoff defines, measured against the 06:00
 #           RECONCILIATION run, which is the run that must never be missed.
-#   STALE - are the numbers current? 15h, i.e. the 17:00 freshness run did not
+#   STALE - are the numbers current? 15h, i.e. the 18:00 freshness run did not
 #           land. Worth saying, but it is not a broken feed, and painting it red
 #           would light the alarm every time the optional run was skipped while
 #           the pipeline was perfectly healthy.
@@ -438,7 +438,7 @@ def api_topups_vendcounter():
     FOUR HONESTIES THIS ENDPOINT OWES THE SCREEN, all returned as fields rather
     than swallowed:
 
-      staleAsOf   The feed is a BATCH, pulled at 05:00 and 17:00 SGT - the
+      staleAsOf   The feed is a BATCH, pulled at 06:00 and 18:00 SGT - the
                   first catching the night shift, the second the day shift. It
                   is not live. Without this the machine just topped up an hour
                   ago still sorts to the top and invites a second visit.
@@ -601,7 +601,7 @@ def api_topups_vendcounter():
             "rows": rows, "ready": True,
             "cards": n_cards,
             "staleAsOf": stale_as_of, "feedOk": feed_ok, "feedFresh": feed_fresh,
-            "pullTimes": "05:00 and 17:00 SGT",
+            "pullTimes": "06:00 and 18:00 SGT",
             "nullCoded": null_coded,
             "noTerminal": no_terminal,
             "deadReader": dead_reader,

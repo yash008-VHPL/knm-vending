@@ -369,10 +369,10 @@ def load(conn, rows, window, args, last_full=None):
                 #
                 # --include-today is the deliberate exception, and BOTH
                 # scheduled runs carry it:
-                #   05:00 SGT - "today" is 00:00-05:00, which is precisely where
+                #   06:00 SGT - "today" is 00:00-06:00, which is precisely where
                 #               a night shift's work lands. Without this, a top-up
                 #               finished at 01:00 stayed invisible until 17:00.
-                #   17:00 SGT - "today" is the day so far, for the day shift.
+                #   18:00 SGT - "today" is the day so far, for the day shift.
                 # Each pass replaces the last (staged > before -> LOADED), and
                 # D-1 is force-rewritten complete by the last_full rule below.
                 # Tomorrow is never loaded under any flag.
@@ -548,8 +548,8 @@ def main():
     ap.add_argument("--force", action="store_true", help="override the shrink guard")
     ap.add_argument("--include-today", action="store_true", dest="include_today",
                     help="also load TODAY, partial. Both scheduled runs use it: "
-                         "at 05:00 SGT 'today' is the small hours, which is where "
-                         "a night shift's work lands; at 17:00 it is the day so "
+                         "at 06:00 SGT 'today' is the small hours, which is where "
+                         "a night shift's work lands; at 18:00 it is the day so "
                          "far. D-1 is always rewritten complete afterwards, so "
                          "the reconciliation still only ever reads whole days.")
     a = ap.parse_args()

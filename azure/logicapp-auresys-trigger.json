@@ -1,0 +1,175 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logicAppName": {
+      "type": "string",
+      "defaultValue": "knm-auresys-trigger",
+      "metadata": {
+        "description": "Name of the Logic App."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "southeastasia"
+    },
+    "githubOwner": {
+      "type": "string",
+      "defaultValue": "yash008-VHPL"
+    },
+    "githubRepo": {
+      "type": "string",
+      "defaultValue": "knm-vending"
+    },
+    "workflowFile": {
+      "type": "string",
+      "defaultValue": "auresys-daily.yml"
+    },
+    "gitRef": {
+      "type": "string",
+      "defaultValue": "main"
+    },
+    "githubToken": {
+      "type": "securestring",
+      "metadata": {
+        "description": "GitHub fine-grained PAT. Repository access: this repo only. Permissions: Actions = Read and write. Nothing else."
+      }
+    }
+  },
+  "variables": {
+    "dispatchUrl": "[concat('https://api.github.com/repos/', parameters('githubOwner'), '/', parameters('githubRepo'), '/actions/workflows/', parameters('workflowFile'), '/dispatches')]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2019-05-01",
+      "name": "[parameters('logicAppName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "githubToken": {
+              "type": "securestring"
+            },
+            "dispatchUrl": {
+              "type": "string"
+            },
+            "gitRef": {
+              "type": "string"
+            }
+          },
+          "triggers": {
+            "SixAmAndSixPmSGT": {
+              "type": "Recurrence",
+              "recurrence": {
+                "frequency": "Day",
+                "interval": 1,
+                "timeZone": "Singapore Standard Time",
+                "schedule": {
+                  "hours": [
+                    "6",
+                    "18"
+                  ],
+                  "minutes": [
+                    0
+                  ]
+                },
+                "startTime": "2026-09-01T06:00:00"
+              }
+            }
+          },
+          "actions": {
+            "DispatchAuresysPull": {
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "@parameters('dispatchUrl')",
+                "headers": {
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": "@concat('Bearer ', parameters('githubToken'))",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "User-Agent": "knm-auresys-trigger"
+                },
+                "body": {
+                  "ref": "@parameters('gitRef')",
+                  "inputs": {
+                    "days": "10",
+                    "dry_run": "false",
+                    "include_today": "true"
+                  }
+                },
+                "retryPolicy": {
+                  "type": "exponential",
+                  "count": 4,
+                  "interval": "PT1M",
+                  "minimumInterval": "PT1M",
+                  "maximumInterval": "PT10M"
+                }
+              },
+              "runAfter": {},
+              "runtimeConfiguration": {
+                "secureData": {
+                  "properties": [
+                    "inputs"
+                  ]
+                }
+              }
+            },
+            "FailIfNotAccepted": {
+              "type": "If",
+              "runAfter": {
+                "DispatchAuresysPull": [
+                  "Succeeded"
+                ]
+              },
+              "expression": {
+                "not": {
+                  "equals": [
+                    "@outputs('DispatchAuresysPull')['statusCode']",
+                    204
+                  ]
+                }
+              },
+              "actions": {
+                "MarkFailed": {
+                  "type": "Terminate",
+                  "inputs": {
+                    "runStatus": "Failed",
+                    "runError": {
+                      "code": "DispatchNotAccepted",
+                      "message": "GitHub did not return 204. The run history holds the response."
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "githubToken": {
+            "value": "[parameters('githubToken')]"
+          },
+          "dispatchUrl": {
+            "value": "[variables('dispatchUrl')]"
+          },
+          "gitRef": {
+            "value": "[parameters('gitRef')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppResourceId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Logic/workflows', parameters('logicAppName'))]"
+    }
+  }
+}
