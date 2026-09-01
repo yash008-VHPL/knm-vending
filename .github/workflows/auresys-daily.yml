@@ -1,28 +1,16 @@
-name: Auresys Transaction Pull (06:00 and 18:00 SGT)
+name: Auresys Transaction Pull (06:30 and 18:30 SGT)
 
 # GitHub cron is always UTC.
 #
-# Times moved from 05:00/17:00 to 06:00/18:00 on 2026-08-30 at the field team's
-# request. The 05:00 rationale still holds at 06:00: the machines settle around
-# 02:30 SGT, so D-1 is complete either way.
-#
-# These schedule entries are now the BACKSTOP, not the primary trigger. GitHub
-# `schedule:` is best-effort - observed 0.4-2.2h late here, and dropped outright
-# on 2026-08-28 and 2026-08-30, which is how a 13h gap appeared between pulls.
-# The guaranteed trigger dispatches this same workflow on time; these crons stay
-# so that a failure of that trigger still yields a pull. A duplicate run is
-# nearly free: the NO_CHANGE short-circuit writes nothing, and the concurrency
-# group below serialises them.
-#
-#   22:00 UTC  ->  06:00 SGT next day   NIGHT SHIFT + RECONCILIATION
+#   21:00 UTC  ->  05:00 SGT next day   NIGHT SHIFT + RECONCILIATION
 #                  Runs after the machines settle (~02:30 SGT), so D-1 is
 #                  complete: this is the pass the D-1 telemetry comparison
 #                  depends on. It also carries --include-today, where "today"
-#                  is only 00:00-06:00 - which is exactly where a NIGHT SHIFT's
+#                  is only 00:00-05:00 - which is exactly where a NIGHT SHIFT's
 #                  work lands. Without that, a top-up finished at 01:00 stayed
-#                  invisible until 18:00.
+#                  invisible until 17:00.
 #
-#   10:00 UTC  ->  18:00 SGT same day    DAY SHIFT
+#   09:00 UTC  ->  17:00 SGT same day    DAY SHIFT
 #                  --include-today loads the day so far, so a flag card tapped
 #                  in the morning shows up the same evening.
 #
@@ -34,9 +22,7 @@ name: Auresys Transaction Pull (06:00 and 18:00 SGT)
 # today regardless, so partial rows never reach it on the day itself.
 on:
   schedule:
-    # :30, not :00 - the Logic App fires on the hour. Same instant would
-    # mean one of the two shows as concurrency-cancelled every time, and a
-    # cancelled run in the history reads as a failure to whoever looks.
+    # 06:30 / 18:30 SGT. 22:30 and 10:30 UTC.
     - cron: '30 22 * * *'
     - cron: '30 10 * * *'
   workflow_dispatch:
@@ -94,28 +80,19 @@ jobs:
           NETS_DB_PASSWORD:  ${{ secrets.NETS_DB_PASSWORD || secrets.DB_PASSWORD }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           HEARTBEAT_URL:     ${{ secrets.HEARTBEAT_URL }}
-          IN_DAYS:           ${{ inputs.days }}
-          IN_FROM:           ${{ inputs.from }}
-          IN_TO:             ${{ inputs.to }}
-          IN_DRY_RUN:        ${{ inputs.dry_run }}
-          IN_INCLUDE_TODAY:  ${{ inputs.include_today }}
-          EVT_SCHEDULE:      ${{ github.event.schedule }}
         run: |
-          # Inputs arrive as env vars, never interpolated into the script text.
-          # A ${{ }} expression is substituted before bash parses the line, so a
-          # value containing a quote would run arbitrary commands in a job that
-          # holds AURESYS_PASSWORD, NETS_CARD_PEPPER and the DB credentials.
-          ARGS="--days ${IN_DAYS:-10}"
-          if [ -n "$IN_FROM" ]; then
-            ARGS="--from $IN_FROM"
-            [ -n "$IN_TO" ] && ARGS="$ARGS --to $IN_TO"
+          ARGS="--days ${{ github.event.inputs.days || '10' }}"
+          if [ -n "${{ github.event.inputs.from }}" ]; then
+            ARGS="--from ${{ github.event.inputs.from }}"
+            [ -n "${{ github.event.inputs.to }}" ] && ARGS="$ARGS --to ${{ github.event.inputs.to }}"
           fi
-          if [ "$IN_DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
           # Every SCHEDULED run loads today; github.event.schedule is non-empty
           # only on a scheduled run and empty on a manual dispatch. A manual run
           # stays D-1-only unless asked, so investigating a historical window
           # never drags today's partial rows in with it.
-          if [ -n "$EVT_SCHEDULE" ] || [ "$IN_INCLUDE_TODAY" = "true" ]; then
+          if [ -n "${{ github.event.schedule }}" ] \
+             || [ "${{ github.event.inputs.include_today }}" = "true" ]; then
             ARGS="$ARGS --include-today"
           fi
           echo "auresys_pull.py $ARGS"
