@@ -209,7 +209,61 @@ def fetch_day(session, token, terminals, day):
 
 
 def parse_rows(raw_rows, pepper, day):
-    out, unknown = [], {}
+    """Returns (good_rows, quarantined).
+
+    A row this function cannot classify is set aside, not raised on. Aborting
+    the whole run over one row is what took the feed down on 2026-08-26:
+    parse_rows runs before load(), so a single unmapped status string stopped
+    all ten days of the rolling window from loading, on every run, until a
+    human patched STATUS_MAP.
+
+    Quarantined rows never enter NETS_Transaction, so no dispense count, amount
+    or flag-card query can see them. They are listed in NETS_Unmapped_Row and on
+    the dashboard instead, and the day reloads clean once the cause is fixed.
+
+    Still fatal, because these mean the pull itself is wrong rather than one row
+    being odd: a missing field (the response shape changed) and a row dated
+    outside the day queried (the date filter is not doing what we think).
+    """
+    out, bad = [], []
+
+    def quarantine(r, reason, ts=None):
+        # Best-effort amount even on a quarantined row: the day's cent-exact
+        # reconciliation adds these back in, so a row set aside for an unknown
+        # STATUS must still contribute its amount. Only a genuinely unparseable
+        # amount stays None, and that is what makes the caller refuse to load
+        # the day rather than load it with its only integrity check skipped.
+        try:
+            amt = decimal.Decimal(str(r.get("amount"))).quantize(ZERO)
+            # DECIMAL(12,2) on NETS_Unmapped_Row. A garbage-but-parseable value
+            # like 1e20 quantizes fine and then overflows on INSERT - after the
+            # transaction data has committed, with no Abort and so no alert.
+            # This table receives exactly the population most likely to contain
+            # such a value.
+            if not amt.is_finite() or abs(amt) >= decimal.Decimal("10000000000"):
+                amt = None
+        except (decimal.InvalidOperation, ValueError, TypeError):
+            amt = None
+        bad.append({
+            # Truncated to the NETS_Unmapped_Row column widths. Without this a
+            # long outlet name throws on INSERT *after* the transaction data has
+            # already been committed for the day.
+            "terminal": str(r.get("vmsID") or "").strip()[:50],
+            "outlet": ((r.get("outletName") or "").strip() or None),
+            "date": day,
+            "ts": ts,
+            "raw_time": str(r.get("time"))[:64] if r.get("time") is not None else None,
+            "raw_status": str(r.get("dispenseStatus"))[:128],
+            "raw_scheme": (str(r.get("paymentType"))[:64]
+                           if r.get("paymentType") is not None else None),
+            "raw_amount": (str(r.get("amount"))[:64]
+                           if r.get("amount") is not None else None),
+            "amount": amt,
+            "reason": reason,
+        })
+        if bad[-1]["outlet"]:
+            bad[-1]["outlet"] = bad[-1]["outlet"][:200]
+
     for r in raw_rows:
         for k in ("vmsID", "time", "dispenseStatus", "amount"):
             if k not in r:
@@ -218,31 +272,21 @@ def parse_rows(raw_rows, pepper, day):
                             "Run with --probe. Row keys: %s" % (k, sorted(r)))
         code = status_code(r["dispenseStatus"])
         if code is None:
-            unknown.setdefault(str(r["dispenseStatus"]).strip(), 0)
-            unknown[str(r["dispenseStatus"]).strip()] += 1
+            quarantine(r, "UNMAPPED_STATUS")
             continue
-        # Raised as Abort, not left to propagate: a bare ValueError or
-        # InvalidOperation escapes the handler in main() and kills the job with
-        # a traceback and no Teams alert. Newly reachable now that a status
-        # class which used to be skipped is parsed.
         try:
             ts = dt.datetime.strptime(str(r["time"]).strip(), "%Y-%m-%d %H:%M:%S")
         except ValueError:
-            raise Abort("ABORTED_PARSE",
-                        "unparseable time %r on a %s row (terminal %r)"
-                        % (r.get("time"), r.get("dispenseStatus"), r.get("vmsID")))
+            quarantine(r, "BAD_TIME")
+            continue
         try:
             amt = decimal.Decimal(str(r["amount"])).quantize(ZERO)
         except (decimal.InvalidOperation, ValueError):
-            raise Abort("ABORTED_PARSE",
-                        "unparseable amount %r on a %s row (terminal %r)"
-                        % (r.get("amount"), r.get("dispenseStatus"), r.get("vmsID")))
+            quarantine(r, "BAD_AMOUNT", ts=ts)
+            continue
         if not amt.is_finite():
-            # Redacted like the two handlers above: this message goes to the
-            # Teams webhook and the Actions log, and the raw row carries cardNo.
-            raise Abort("ABORTED_PARSE",
-                        "non-finite amount %r on a %s row (terminal %r)"
-                        % (r.get("amount"), r.get("dispenseStatus"), r.get("vmsID")))
+            quarantine(r, "BAD_AMOUNT", ts=ts)
+            continue
         if ts.date() != day:
             raise Abort("ABORTED_PARSE",
                         "row dated %s came back for the %s query - the date filter is "
@@ -257,11 +301,7 @@ def parse_rows(raw_rows, pepper, day):
             "amount": amt,
             "card_hash": card_hash(r.get("cardNo"), pepper),
         })
-    if unknown:
-        raise Abort("ABORTED_PARSE",
-                    "unrecognised Status values - refusing to guess. Send Claude this "
-                    "whole line: %s" % sorted(unknown.items(), key=lambda kv: -kv[1]))
-    return out
+    return out, bad
 
 
 # --------------------------------------------------------------------------- #
@@ -294,6 +334,18 @@ SQL_SEEN = """MERGE dbo.NETS_Terminal_Outlet_Seen WITH (HOLDLOCK) AS t
               WHEN NOT MATCHED THEN
                    INSERT (NETS_Terminal_No, Location_Name, First_Seen, Last_Seen, Txn_Count)
                    VALUES (s.Term, s.Loc, s.Lo, s.Hi, 0);"""
+# Quarantine list. Each run clears and rewrites only the dates it queried, so
+# the rows for the current window are always a live picture. Rows for a day that
+# has aged OUT of the rolling window are never revisited and therefore never
+# removed - deliberately: that day is no longer fetched, so its record here is
+# the only remaining evidence that something was set aside. Clear an old range
+# by re-running over it (--from/--to). See migration_2026-08-28_unmapped_rows.sql.
+SQL_UNMAPPED_INSERT = (
+    "INSERT INTO dbo.NETS_Unmapped_Row "
+    "(Run_Seq, NETS_Terminal_No, Machine_Code, Location_Name, Txn_Date, "
+    " Txn_DateTime, Raw_Time, Raw_Status, Raw_Payment_Type, Raw_Amount, "
+    " Amount, Reason) VALUES ")
+UNMAPPED_CHUNK = 150
 SQL_SEEN_RECOUNT = """UPDATE s SET Txn_Count = x.c
                       FROM dbo.NETS_Terminal_Outlet_Seen AS s
                       CROSS APPLY (SELECT COUNT(*) AS c FROM dbo.NETS_Transaction AS t
@@ -318,19 +370,44 @@ def connect():
     return conn
 
 
-def load(conn, rows, window, args, last_full=None):
+def load(conn, rows, window, args, last_full=None, bad=None,
+         full_window=None, degraded=False):
     """last_full = the newest day that is certainly complete, i.e. D-1.
 
     That day is always rewritten rather than short-circuited by NO_CHANGE, so a
     day first written partially is guaranteed to be replaced by a complete one.
     Independent of --include-today - see the comment on the NO_CHANGE branch."""
+    bad = bad or []
+    # What was queried, vs what is loadable. They differ when a day failed its
+    # reconciliation and was skipped.
+    full_window = full_window or window
+
     cur = conn.cursor()
+
+    # Checked BEFORE anything is written. The quarantine write is unconditional,
+    # so a missing table would otherwise raise a bare pymssql error partway
+    # through - which is not an Abort, so main()'s handler never fires: no Teams
+    # alert, no heartbeat, and the transaction data already committed. Apply
+    # migration_2026-08-28_unmapped_rows.sql before deploying this loader.
+    cur.execute("SELECT OBJECT_ID('dbo.NETS_Unmapped_Row', 'U')")
+    if cur.fetchone()[0] is None:
+        raise Abort("FAILED",
+                    "dbo.NETS_Unmapped_Row does not exist - run "
+                    "migration_2026-08-28_unmapped_rows.sql before this version "
+                    "of auresys_pull.py. Nothing has been written.")
+
+    # Machine-days holding a quarantined row. Used only to keep them off the
+    # PURGED_VANISHED path below; NO_CHANGE needs no exception, because once a
+    # status is mapped the staged count rises and NO_CHANGE cannot fire anyway.
+    quarantined_days = {(b["terminal"], b["date"]) for b in bad}
+
     cur.execute("INSERT INTO dbo.NETS_Pull_Run "
                 "(Run_Id, Window_From, Window_To, Source_File, Csv_Line_Count, "
                 " Rows_Parsed, Header_Signature, Status) "
                 "OUTPUT INSERTED.Run_Id, INSERTED.Run_Seq "
                 "VALUES (NEWID(), %s, %s, 'api:getTransaction', %s, %s, %s, 'RUNNING')",
-                (window[0], window[-1], len(rows), len(rows), "|".join(COLUMNS)))
+                (full_window[0], full_window[-1], len(rows), len(rows),
+                 "|".join(COLUMNS)))
     # NETS_Load_Audit still keys on the GUID; NETS_Transaction uses the compact
     # Run_Seq. Both come from the same row, so carry both.
     run_id, run_seq = cur.fetchone()
@@ -391,10 +468,15 @@ def load(conn, rows, window, args, last_full=None):
                 # against today was inert (SKIPPED_TODAY caught it first), so
                 # this flag is what would have turned a harmless command into a
                 # destructive one.
-                note = ("terminal absent from the whole pull - feed may be broken"
-                        if term not in alive else
-                        "partial reload of today staged %d < stored %d"
-                        % (staged, before))
+                if (term, date) in quarantined_days:
+                    note = ("staged %d < stored %d because row(s) were quarantined "
+                            "- see dbo.NETS_Unmapped_Row, not a partial feed"
+                            % (staged, before))
+                elif term not in alive:
+                    note = "terminal absent from the whole pull - feed may be broken"
+                else:
+                    note = ("partial reload of today staged %d < stored %d"
+                            % (staged, before))
                 audits.append((run_id, term, date, before, staged, 0, 0,
                                sum_before, sum_before, "SKIPPED_SHRINK", note))
                 log("  SHRINK  %s %s stored=%d staged=%d SKIPPED (today)"
@@ -430,12 +512,31 @@ def load(conn, rows, window, args, last_full=None):
                 counts["NO_CHANGE"] += 1
                 continue
             if staged == 0 and before > 0:
-                if term in alive:
+                if (term, date) in quarantined_days:
+                    # Every row for this machine-day was unclassifiable. That is
+                    # NOT the API dropping the data, so it must never reach
+                    # PURGED_VANISHED, which deletes the stored rows and puts
+                    # nothing back. A status-string rename would otherwise
+                    # destroy good history one machine-day at a time.
+                    action, note = ("SKIPPED_SHRINK",
+                                    "all rows for this machine-day quarantined - "
+                                    "see dbo.NETS_Unmapped_Row")
+                elif term in alive:
                     action, note = "PURGED_VANISHED", "terminal reported other dates, none for this one"
                 else:
                     action, note = "SKIPPED_SHRINK", "terminal absent from the whole pull - feed may be broken"
             elif staged < before and not args.force:
-                action, note = "SKIPPED_SHRINK", "staged %d < stored %d - possible partial pull" % (staged, before)
+                if (term, date) in quarantined_days:
+                    # NOT a partial pull, and --force here would delete the
+                    # stored rows and reinsert only the good ones, permanently
+                    # losing the quarantined transactions for this machine-day.
+                    note = ("staged %d < stored %d because row(s) were "
+                            "quarantined - fix the status mapping, do NOT --force"
+                            % (staged, before))
+                else:
+                    note = ("staged %d < stored %d - possible partial pull"
+                            % (staged, before))
+                action = "SKIPPED_SHRINK"
             else:
                 action = "FORCED" if staged < before else "LOADED"
                 note = None
@@ -501,6 +602,38 @@ def load(conn, rows, window, args, last_full=None):
                 + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(chunk)),
                 tuple(v for row in chunk for v in row))
 
+        # ---- quarantine list ----
+        # Own transaction, like the per-date writes above. Without it a failure
+        # between the DELETE and the INSERTs leaves the list empty while the
+        # transaction data is already committed, and the dashboard under-reports.
+        cur.execute("BEGIN TRANSACTION")
+        try:
+            # Bounded to the window this run actually queried. An unbounded
+            # delete would let `--days 1` wipe the list for the other nine days
+            # it never looked at; an upper bound of the LOADABLE window would
+            # leave a skipped last day's rows behind to duplicate every run.
+            cur.execute("DELETE FROM dbo.NETS_Unmapped_Row "
+                        "WHERE Txn_Date BETWEEN %s AND %s",
+                        (full_window[0], full_window[-1]))
+            vals = []
+            for b in bad:
+                code, _ = nets_mapping.resolve(b["terminal"])
+                vals.append((run_seq, b["terminal"], code, b["outlet"], b["date"],
+                             b["ts"], b["raw_time"], b["raw_status"], b["raw_scheme"],
+                             b["raw_amount"], b["amount"], b["reason"]))
+            for i in range(0, len(vals), UNMAPPED_CHUNK):
+                chunk = vals[i:i + UNMAPPED_CHUNK]
+                cur.execute(
+                    SQL_UNMAPPED_INSERT
+                    + ",".join(["(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"] * len(chunk)),
+                    tuple(v for row in chunk for v in row))
+            cur.execute("COMMIT TRANSACTION")
+        except Exception:
+            cur.execute("IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION")
+            raise
+        if bad:
+            counts["QUARANTINED"] = len(bad)
+
         seen = {}
         for r in rows:
             k = (r["terminal"], r["outlet"])
@@ -511,8 +644,23 @@ def load(conn, rows, window, args, last_full=None):
             cur.execute(SQL_SEEN, (term, outlet, lo, hi))
         cur.execute(SQL_SEEN_RECOUNT)
 
+        # DEGRADED, not SUCCESS: rows were set aside or a day was refused, so
+        # the run did not load everything it fetched. Without this the database
+        # is the one observer that says nothing went wrong.
+        # Status stays SUCCESS. dbo.NETS_Pull_Run carries a CHECK constraint
+        # (CK_NETS_Pull_Run_Status) enumerating RUNNING / SUCCESS / FAILED /
+        # ABORTED_*, so writing 'DEGRADED' would be rejected - and the rejection
+        # would land AFTER every transaction had committed, as a bare pymssql
+        # error rather than an Abort: no Teams alert, no heartbeat, a traceback
+        # on a run whose data actually loaded. Degradation is recorded in
+        # Error_Text (the column the FAILED path already writes), and carried by
+        # the Teams alert, the non-zero exit and dbo.NETS_Unmapped_Row.
+        # Adding 'DEGRADED' to the constraint is a separate change.
         cur.execute("UPDATE dbo.NETS_Pull_Run SET Status='SUCCESS', "
-                    "Finished_At_UTC=SYSUTCDATETIME() WHERE Run_Seq=%s", (run_seq,))
+                    "Error_Text=%s, Finished_At_UTC=SYSUTCDATETIME() "
+                    "WHERE Run_Seq=%s",
+                    (("DEGRADED: %d row(s) quarantined; see dbo.NETS_Unmapped_Row"
+                      % len(bad)) if degraded else None, run_seq))
         return run_seq, counts, unmapped
     except Exception as e:
         try:
@@ -598,7 +746,7 @@ def main():
         if new_terms:
             log("NEW TERMINALS on the portal, absent from nets_mapping: %s" % ", ".join(new_terms))
 
-        all_rows = []
+        all_rows, all_bad, skipped_days = [], [], []
         for day in window:
             raw, expected, expected_amt = fetch_day(session, token, terminals, day)
             if len(raw) != expected:
@@ -612,17 +760,68 @@ def main():
                     log("PROBE field names: %s" % sorted(raw[0]))
                     log("PROBE first row: %s" % json.dumps(raw[0], indent=1)[:1500])
                 return
-            parsed = parse_rows(raw, pepper, day)
+            parsed, bad = parse_rows(raw, pepper, day)
             got_amt = sum((r["amount"] for r in parsed), ZERO)
-            if expected_amt is not None and got_amt != expected_amt:
-                raise Abort("ABORTED_PARSE",
-                            "%s: parsed amount %s does not match the API total %s"
-                            % (day, got_amt, expected_amt))
+            # Quarantined rows are excluded from the load but NOT from the
+            # reconciliation: the API totals every row it returned, so dropping
+            # their amounts here would turn the cent-exact check into a
+            # guaranteed mismatch and cost the guard entirely.
+            bad_amt = sum((b["amount"] for b in bad if b["amount"] is not None), ZERO)
+            unpriced = [b for b in bad if b["amount"] is None]
+
+            # A day that cannot be reconciled is NOT loaded - but it no longer
+            # takes the other nine days with it. Loading a day whose only
+            # end-to-end integrity check was skipped is worse than both the old
+            # behaviour (abort everything) and skipping just this day.
+            skip = None
+            if expected_amt is None:
+                pass                      # API gave no total; nothing to check
+            elif unpriced:
+                skip = ("%d row(s) have an unparseable amount, so the day cannot "
+                        "be reconciled against the API total %s"
+                        % (len(unpriced), expected_amt))
+            elif got_amt + bad_amt != expected_amt and got_amt != expected_amt:
+                # Either interpretation of totalAmount is accepted, because
+                # which one Auresys uses has never been established: the
+                # 2026-08-26 probe was INCONCLUSIVE (the odd rows summed to
+                # 0.00, so both fit). Assuming "includes" and being wrong would
+                # skip every day holding an unmapped row with a non-zero
+                # amount - the whole window down, which is the outage this
+                # change exists to prevent. The two tests are identical when
+                # bad_amt is 0, so no guard strength is lost.
+                skip = ("parsed %s (quarantined %s) matches neither the API total "
+                        "%s with nor without the quarantined rows"
+                        % (got_amt, bad_amt, expected_amt))
+
             st = Counter(r["status"] for r in parsed)
-            log("  %s  rows=%-5d dispenses=%-5d stlm=%-3d fail=%-3d amount=%s"
+            log("  %s  rows=%-5d dispenses=%-5d stlm=%-3d fail=%-3d amount=%s%s"
                 % (day, len(parsed), st[STATUS_SUCCESS], st[STATUS_STLM],
-                   st[STATUS_FAIL], got_amt))
+                   st[STATUS_FAIL], got_amt,
+                   ("  QUARANTINED=%d" % len(bad)) if bad else ""))
+            for b in bad:
+                log("    QUARANTINE %s %s status=%r reason=%s"
+                    % (b["terminal"], b["raw_time"], b["raw_status"], b["reason"]))
+
+            # Quarantined rows are recorded for EVERY day, including a skipped
+            # one - that list is how anyone finds out why the day was skipped.
+            all_bad.extend(bad)
+            if skip:
+                log("  %s  NOT LOADED - %s" % (day, skip))
+                skipped_days.append((day, skip))
+                continue
             all_rows.extend(parsed)
+
+        # A skipped day must also leave the window handed to load(). The delete
+        # scope is seeded from window x the whole roster, so a date left in with
+        # no staged rows would send every terminal-day for it down the
+        # staged==0/before>0 path and delete a day of good history.
+        # full_window is what was QUERIED; window is what is loadable. The
+        # NETS_Pull_Run row and the quarantine DELETE must use the queried
+        # window, or the database records a run as having covered less than it
+        # did and the quarantine list is cleared for days this run never saw.
+        bad_dates = {d for d, _ in skipped_days}
+        full_window = list(window)
+        window = [d for d in window if d not in bad_dates]
 
         # terminals reporting more than one outlet in the window = moved
         by_term = {}
@@ -631,16 +830,33 @@ def main():
         moved = {t: o for t, o in by_term.items() if len(o) > 1}
 
         if a.dry_run:
+            # Deliberately ahead of the empty-window Abort below: --dry-run is
+            # the command an operator runs to find out WHY everything failed,
+            # so it must print the per-day reasons rather than one line.
             log("\ndry run - nothing written")
+            if all_bad:
+                log("would quarantine %d row(s)" % len(all_bad))
+            for d, why in skipped_days:
+                log("would NOT load %s - %s" % (d, why))
+            if not window:
+                log("NOTHING would be loaded - every day failed its reconciliation.")
             if moved:
                 for t, o in moved.items():
                     log("REASSIGNED %s -> %s" % (t, " | ".join(sorted(o))))
             return
 
+        if not window:
+            raise Abort("FAILED",
+                        "every day in the window failed its reconciliation - "
+                        "nothing can be loaded. Re-run with --dry-run for the "
+                        "per-day reasons.")
+
         conn = connect()
         try:
             run_seq, counts, unmapped = load(
-                conn, all_rows, window, a, last_full=today - dt.timedelta(days=1))
+                conn, all_rows, window, a, last_full=today - dt.timedelta(days=1),
+                bad=all_bad, full_window=full_window,
+                degraded=bool(all_bad or skipped_days))
         finally:
             conn.close()
 
@@ -656,6 +872,18 @@ def main():
                                                         for t, o in moved.items()))
         if new_terms:
             alerts.append("New terminals on the portal: %s" % ", ".join(new_terms))
+        if skipped_days:
+            alerts.append(
+                "%d day(s) NOT loaded - failed reconciliation: %s"
+                % (len(skipped_days),
+                   "; ".join("%s (%s)" % (d, why) for d, why in skipped_days)))
+        if all_bad:
+            by_reason = Counter((b["reason"], b["raw_status"]) for b in all_bad)
+            alerts.append(
+                "%d row(s) quarantined and NOT loaded - see dbo.NETS_Unmapped_Row: %s"
+                % (len(all_bad),
+                   "; ".join("%s %r x%d" % (rsn, st, n)
+                             for (rsn, st), n in by_reason.most_common())))
         if counts.get("SKIPPED_SHRINK"):
             alerts.append("%d machine-days skipped by the shrink guard - see NETS_Load_Audit"
                           % counts["SKIPPED_SHRINK"])
@@ -663,6 +891,13 @@ def main():
             for x in alerts:
                 log("ALERT: " + x)
             notify("**Auresys daily pull needs attention**\n\n- " + "\n- ".join(alerts))
+
+        # The heartbeat answers ONE question: did the pull run to completion?
+        # It is pinged whenever it did. Degradation is reported through Teams,
+        # the DEGRADED row in NETS_Pull_Run and the exit code - using the
+        # liveness monitor as a data-quality channel would mean one unmapped
+        # row makes the feed look dead for days, and a muted alert after that.
+        degraded = bool(all_bad or skipped_days)
 
         hb = os.environ.get("HEARTBEAT_URL")
         if hb:
@@ -672,6 +907,14 @@ def main():
                 requests.get(hb, timeout=30)
             except Exception as e:
                 log("heartbeat ping failed: %s" % e)
+
+        if degraded:
+            # Data landed, but not all of it. Exit non-zero so the run is red
+            # in the Actions history: a green tick on a run that refused a day
+            # is how a problem goes unnoticed for a week.
+            log("DEGRADED: %d row(s) quarantined, %d day(s) not loaded. "
+                "The rest loaded normally." % (len(all_bad), len(skipped_days)))
+            sys.exit(1)
 
     except Abort as e:
         log("ABORT [%s] %s" % (e.status, e.msg))
