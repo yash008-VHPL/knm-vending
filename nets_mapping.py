@@ -94,6 +94,30 @@ TERMINAL_TO_MACHINE = {
     'SGKN_M0071'    : (None, None, 'HARBOURFRONT CRUISE CENTRE DEPARTURE 2'),   # NO MATCH
     'SGKN_M0072'    : (None, None, 'GEMINI@SIMS'),   # NO MATCH
     'SGKN_M0075'    : (None, None, '33 GREENWICH DRIVE DSV'),   # NO MATCH
+
+    # ---- COFFEERUSH franchisee (roster 2026-09-03). MachineCode is synthetic:
+    # 9 + terminal number, see auresys_pull.synthetic_machine_code. Names as
+    # shown on the Auresys portal, URL-decoded. ----
+    'SGEE_M0001'    : ('900000001', 'RWS Office', 'RWS Office'),
+    'SGEE_M0002'    : ('900000002', 'Prive', 'Prive'),
+    'SGEE_M0003'    : ('900000003', 'Medtronic', 'Medtronic'),
+    'SGEE_M0004'    : ('900000004', 'Affinity', 'Affinity'),
+    'SGEE_M0005'    : ('900000005', 'Rio Vista', 'Rio Vista'),
+    'SGEE_M0006'    : ('900000006', 'Bishan Sheng Siong', 'Bishan Sheng Siong'),
+    'SGEE_M0007'    : ('900000007', 'NV Residences', 'NV Residences'),
+    'SGEE_M0008'    : ('900000008', 'SGEE_M0008', ''),   # NO NAME on portal 2026-09-03 - not in MachineLookup yet
+    'SGEE_M0009'    : ('900000009', 'Genting Centre', 'Genting Centre'),
+    'SGEE_M0010'    : ('900000010', 'SGEE_M0010', ''),   # NO NAME on portal 2026-09-03 - not in MachineLookup yet
+    'SGEE_M0011'    : ('900000011', 'Mount Alvernia Main Lobby L4', 'Mount Alvernia Main Lobby L4'),
+    'SGEE_M0012'    : ('900000012', 'Changi East Project Office Level 1 Pantry', 'Changi East Project Office Level 1 Pantry'),
+    'SGEE_M0013'    : ('900000013', 'Bishan North Mall', 'Bishan North Mall'),
+    'SGEE_M0014'    : ('900000014', 'Tresalveo', 'Tresalveo'),
+    'SGEE_M0015'    : ('900000015', 'The Palette', 'The Palette'),
+    'SGEE_M0016'    : ('900000016', 'SGEE_M0016', ''),   # NO NAME on portal 2026-09-03 - not in MachineLookup yet
+    'SGEE_M0017'    : ('900000017', 'SGEE_M0017', ''),   # NO NAME on portal 2026-09-03 - not in MachineLookup yet
+    'SGEE_M0018'    : ('900000018', 'SGEE_M0018', ''),   # NO NAME on portal 2026-09-03 - not in MachineLookup yet
+    'SGEE_M0019'    : ('900000019', 'SGEE_M0019', ''),   # NO NAME on portal 2026-09-03 - not in MachineLookup yet
+    'SGEE_M0020'    : ('900000020', 'SGEE_M0020', ''),   # NO NAME on portal 2026-09-03 - not in MachineLookup yet
 }
 
 
@@ -117,7 +141,26 @@ ACCOUNTS = {
 # loader alerts when a terminal shows up on a different account's roster than
 # the one recorded here (a terminal moved between accounts - fix this file).
 TERMINAL_ACCOUNT = {
-    # 'SGKN_M0080': 'AUVION',
+    'SGEE_M0001': 'COFFEERUSH',
+    'SGEE_M0002': 'COFFEERUSH',
+    'SGEE_M0003': 'COFFEERUSH',
+    'SGEE_M0004': 'COFFEERUSH',
+    'SGEE_M0005': 'COFFEERUSH',
+    'SGEE_M0006': 'COFFEERUSH',
+    'SGEE_M0007': 'COFFEERUSH',
+    'SGEE_M0008': 'COFFEERUSH',
+    'SGEE_M0009': 'COFFEERUSH',
+    'SGEE_M0010': 'COFFEERUSH',
+    'SGEE_M0011': 'COFFEERUSH',
+    'SGEE_M0012': 'COFFEERUSH',
+    'SGEE_M0013': 'COFFEERUSH',
+    'SGEE_M0014': 'COFFEERUSH',
+    'SGEE_M0015': 'COFFEERUSH',
+    'SGEE_M0016': 'COFFEERUSH',
+    'SGEE_M0017': 'COFFEERUSH',
+    'SGEE_M0018': 'COFFEERUSH',
+    'SGEE_M0019': 'COFFEERUSH',
+    'SGEE_M0020': 'COFFEERUSH',
 }
 
 

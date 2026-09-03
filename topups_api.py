@@ -54,6 +54,7 @@ THREE THINGS THAT LOOK LIKE MISTAKES AND ARE NOT
     losing a dispatcher's work at 05:00.
 """
 
+import re
 from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
@@ -64,6 +65,16 @@ from workorders import (
     DISPATCH_ROLES, SALES_ROLES,
     _log_activity, _next_route_seq, _has_col, _sgt_today,
 )
+
+# Franchisee labels and colours. nets_mapping.py sits at the repo root and is
+# the single source of truth for accounts (the pull refuses a key it cannot
+# find there), so the dashboard reads the same dict rather than keeping a
+# second copy. Guarded: a missing module must not take the blueprint down.
+try:
+    from nets_mapping import ACCOUNTS as _ACCOUNTS, MAIN_ACCOUNT as _MAIN_ACCOUNT
+except Exception as _e:                      # pragma: no cover
+    print("[topups_api] nets_mapping unavailable, franchisee stripes off: %s" % _e)
+    _ACCOUNTS, _MAIN_ACCOUNT = {}, "MAIN"
 
 topups_bp = Blueprint("topups_api", __name__)
 
@@ -450,6 +461,19 @@ def api_topups_vendcounter():
       nullCoded   Dispenses in the window with Machine_Code IS NULL (~16%).
                   Unattributable. The handoff requires this figure on screen or
                   the totals do not reconcile.
+
+    FRANCHISEES (2026-09-03). The feed now covers the KNM Main account plus
+    each franchisee's own Auresys account, and every row carries Account_Key.
+    A machine's franchisee is the Account_Key of its LATEST transaction - not
+    MAX(Account_Key), which is alphabetical and wrong for a machine that has
+    changed hands. NULL / 'MAIN' = KNM's own machine, no stripe. Two more
+    fields carry the honesty this adds:
+      franchisees   [{key,label,color}] for the legend - only accounts that
+                    actually have a machine on screen.
+      skippedAccounts  accounts the last pull could NOT log in to / load. Their
+                    machines' numbers are frozen at the previous run, so the
+                    screen must say so per franchisee rather than let the
+                    global "last pulled" stamp vouch for them.
     """
     force = request.args.get("refresh") == "1"
     now = datetime.utcnow()
@@ -489,6 +513,7 @@ def api_topups_vendcounter():
         # older than ~26h means the feed has stopped and every number below is
         # quietly frozen.
         stale_as_of, feed_ok, feed_fresh = None, True, True
+        skipped_accounts = []
         try:
             cur.execute("SELECT MAX(Finished_At_UTC) FROM dbo.NETS_Pull_Run "
                         "WHERE Status = 'SUCCESS'")
@@ -499,6 +524,32 @@ def api_topups_vendcounter():
                 age = (now - r[0]).total_seconds()
                 feed_ok = age < FEED_DEAD_SECONDS
                 feed_fresh = age < FEED_STALE_SECONDS
+        except Exception:
+            pass
+        # A SUCCESS run can still have skipped a whole account (login failed,
+        # MFA, network). auresys_pull prefixes Error_Text with a fixed token
+        # "[SKIPPED_ACCOUNTS=KEY,KEY]" for exactly this read - a token, not
+        # free text, so an Abort message containing ';' cannot confuse it and
+        # the 4000-char truncation cannot chop it. Only the newest SUCCESS run
+        # counts: an account that was back on the next run is no longer behind.
+        # MAIN is included: if KNM's own account was the one skipped while a
+        # franchisee loaded, the global stamp would otherwise vouch for frozen
+        # numbers on every KNM machine - so it also demotes feedFresh.
+        try:
+            cur.execute("SELECT TOP 1 Error_Text FROM dbo.NETS_Pull_Run "
+                        "WHERE Status = 'SUCCESS' ORDER BY Finished_At_UTC DESC")
+            r = cur.fetchone()
+            txt = (r[0] if r else None) or ""
+            mm = re.match(r"\s*\[SKIPPED_ACCOUNTS=([A-Z0-9_,]+)\]", txt)
+            for key in (mm.group(1).split(",") if mm else []):
+                key = key.strip()
+                if not key:
+                    continue
+                skipped_accounts.append({
+                    "key": key,
+                    "label": (_ACCOUNTS.get(key) or {}).get("label") or key})
+                if key == _MAIN_ACCOUNT:
+                    feed_fresh = False
         except Exception:
             pass
 
@@ -567,6 +618,32 @@ def api_topups_vendcounter():
         last_seen = {str(r[0]): r[1] for r in cur.fetchall()}
         cutoff = (now + timedelta(hours=8)).date() - timedelta(days=30)
 
+        # Franchisee = Account_Key of the machine's newest row. Guarded so a
+        # database that has not had migration_2026-09-03_franchisee.sql yet
+        # still serves the counter, just without stripes. 180-day floor keeps
+        # the window function off the whole history; a machine with nothing
+        # in 180 days is on the dead-reader list anyway. Filtered on
+        # Txn_DateTime, the index key - Txn_Date is not on
+        # IX_NETS_Txn_MachineTime and would force a lookup per row.
+        acct_of = {}
+        try:
+            cur.execute("""
+                SELECT Machine_Code, Account_Key FROM (
+                    SELECT Machine_Code, Account_Key,
+                           ROW_NUMBER() OVER (PARTITION BY Machine_Code
+                                              ORDER BY Txn_DateTime DESC) AS rn
+                    FROM dbo.NETS_Transaction
+                    WHERE Machine_Code IS NOT NULL
+                      AND Txn_DateTime >= DATEADD(day, -180, CAST(GETDATE() AS DATE))
+                ) x WHERE rn = 1
+            """)
+            for code, key in cur.fetchall():
+                key = (key or "").strip().upper() or _MAIN_ACCOUNT
+                if key != _MAIN_ACCOUNT:
+                    acct_of[str(code)] = key
+        except Exception as e:
+            print("[topups_api] Account_Key unavailable (migration not run?): %s" % e)
+
         cur.execute("SELECT MachineCode, MachineName FROM MachineLookup "
                     "WHERE ISNULL(IsActive,1) = 1 ORDER BY MachineName")
         machines = [(str(a), b) for a, b in cur.fetchall()]
@@ -590,6 +667,9 @@ def api_topups_vendcounter():
                 "dispenses": (n if lf is not None else None),
                 "lastFlag": lf.isoformat() if lf else None,
                 "everFlagged": lf is not None,
+                # account key or null. Label/colour come from `franchisees`
+                # below, once per payload, not repeated on every row.
+                "franchisee": acct_of.get(code),
             })
         # Flagged machines first, busiest at the top; never-flagged machines
         # after them, alphabetically. One list, two clearly separated blocks —
@@ -597,8 +677,24 @@ def api_topups_vendcounter():
         rows.sort(key=lambda x: (x["dispenses"] is None,
                                  -(x["dispenses"] or 0), x["name"] or ""))
 
+        # Legend: only the franchisees actually on screen, in nets_mapping
+        # order. An account with no machine listed gets no legend entry - a
+        # legend that names a colour nothing uses is noise. A key the mapping
+        # does not know (someone renamed ACCOUNTS) still gets a stripe, with
+        # the key as its label and a neutral colour, rather than vanishing.
+        present = {r["franchisee"] for r in rows if r["franchisee"]}
+        franchisees = []
+        for key, meta in _ACCOUNTS.items():
+            if key in present and key != _MAIN_ACCOUNT:
+                franchisees.append({"key": key, "label": meta.get("label") or key,
+                                    "color": meta.get("color") or "#6b7280"})
+        for key in sorted(present - set(_ACCOUNTS)):
+            franchisees.append({"key": key, "label": key, "color": "#6b7280"})
+
         payload = {
             "rows": rows, "ready": True,
+            "franchisees": franchisees,
+            "skippedAccounts": skipped_accounts,
             "cards": n_cards,
             "staleAsOf": stale_as_of, "feedOk": feed_ok, "feedFresh": feed_fresh,
             "pullTimes": "06:00 and 18:00 SGT",

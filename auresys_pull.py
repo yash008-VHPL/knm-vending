@@ -782,20 +782,38 @@ def print_roster(acct, terminals, session):
     r = session.get(REPORT_PAGE, timeout=60)
     mm = re.search(r"let machines\s*=\s*JSON\.parse\(`(.*?)`\)", r.text, re.S)
     roster = json.loads(mm.group(1)) if mm else []
-    names = {x.get("vmsID"): (x.get("outletName") or x.get("name") or "") for x in roster}
+    # The roster embedded in the page is URL-encoded ("RWS%20Office") and an
+    # unset outlet arrives as the string "null" (2026-09-03 run). Decode, and
+    # treat "null" / blank as NO NAME rather than inventing one: the stub
+    # falls back to the terminal id and is flagged for a human to replace.
+    from urllib.parse import unquote
+    names = {}
+    for x in roster:
+        raw = x.get("outletName") or x.get("name") or ""
+        nm = unquote(str(raw)).strip()
+        names[x.get("vmsID")] = "" if nm.lower() in ("", "null", "--") else nm
     log("  %-14s %-10s %s" % ("terminal", "mapped?", "outlet name (from portal)"))
-    stubs_ml, stubs_map = [], []
+    stubs_ml, stubs_map, unnamed = [], [], []
     for t in terminals:
         known = t in nets_mapping.TERMINAL_TO_MACHINE
-        log("  %-14s %-10s %s" % (t, "yes" if known else "NO", names.get(t, "")))
+        log("  %-14s %-10s %s" % (t, "yes" if known else "NO",
+                                 names.get(t) or "(no name on portal)"))
         if not known and acct != nets_mapping.MAIN_ACCOUNT:
             code = synthetic_machine_code(t)
+            if not names.get(t):
+                unnamed.append(t)
             # MachineLookup.MachineName is NVARCHAR(100) (checked 2026-09-03).
-            nm = (names.get(t, "") or t)[:100].replace("'", "''")
-            stubs_ml.append("    ('%s', N'%s'),   -- %s" % (code, nm, t))
-            stubs_map.append("    '%-14s: ('%s', %r, %r),   # %s"
-                             % ("%s'" % t, code, names.get(t, "") or t,
-                                names.get(t, ""), acct))
+            nm = (names.get(t) or t)[:100].replace("'", "''")
+            stubs_ml.append("    ('%s', N'%s'),   -- %s%s"
+                            % (code, nm, t, "  NAME MISSING - ask the franchisee"
+                               if not names.get(t) else ""))
+            stubs_map.append("    '%-14s: ('%s', %r, %r),   # %s%s"
+                             % ("%s'" % t, code, names.get(t) or t,
+                                names.get(t, ""), acct,
+                                "  NAME MISSING" if not names.get(t) else ""))
+    if unnamed:
+        log("  %d terminal(s) have no outlet name on the portal: %s"
+            % (len(unnamed), ", ".join(unnamed)))
     if stubs_ml:
         log("\n  -- MachineLookup rows for account %s (paste into "
             "migration_2026-09-03_franchisee.sql BLOCK 3, then REVIEW the names):" % acct)

@@ -171,6 +171,21 @@
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .tp-v.hot .ct{color:var(--bad)}
 .tp-v .noflag{font-size:.6rem;color:var(--warn);flex:none}
+/* Franchisee stripe: a diagonal corner in the top-left of the button, in the
+   franchisee's colour, carrying the account's initial so it survives
+   colour-blindness and monochrome print. .tp-v needs position:relative for
+   it and overflow:hidden so the triangle respects the 7px radius. The name
+   is nudged right so the stripe never sits on its first letter. */
+.tp-v{position:relative;overflow:hidden}
+.tp-v .fr{position:absolute;top:0;left:0;width:22px;height:22px;
+  clip-path:polygon(0 0,100% 0,0 100%);pointer-events:none}
+.tp-v .fr i{position:absolute;top:1px;left:2px;font-style:normal;font-size:.55rem;
+  font-weight:800;line-height:1;color:#fff;letter-spacing:0}
+.tp-v.frx .nm{padding-left:12px}
+.tp-frleg{display:flex;flex-wrap:wrap;gap:6px 14px;margin:6px 0 0;font-size:.68rem;color:var(--mut)}
+.tp-frleg span{display:inline-flex;align-items:center;gap:5px}
+.tp-frleg b{display:inline-block;width:12px;height:12px;border-radius:2px;
+  clip-path:polygon(0 0,100% 0,0 100%)}
 .tp-find{display:flex;gap:8px;align-items:center;margin:0 0 8px}
 .tp-find input{flex:1;min-width:0;border:1px solid var(--line);border-radius:7px;
   padding:6px 9px;font-size:.8rem;font-family:inherit;background:#fff;color:var(--ink)}
@@ -976,28 +991,54 @@ function tpVendRail(){
        adjusts that stop rather than colliding with it. */
     const ex = (TP.plan.onDate.stops||[]).find(
       x => String(x.machineCode)===String(r.code) && x.movable);
-    return `<button class="tp-v${on?" on":""}${(r.everFlagged && r.dispenses>=350)?" hot":""}"
+    /* Franchisee stripe. Colour and label come from the payload's legend, keyed
+       by the row's account key, so a row can never carry a colour the legend
+       does not explain. Unknown key = neutral grey, still striped. */
+    const fr = r.franchisee ? (frBy[r.franchisee] || {label:r.franchisee, color:"#6b7280"}) : null;
+    const stripe = fr
+      ? `<span class="fr" style="background:${tpEsc(fr.color)}" aria-hidden="true"><i>${tpEsc((fr.label||"?").slice(0,1).toUpperCase())}</i></span>`
+      : "";
+    return `<button class="tp-v${on?" on":""}${(r.everFlagged && r.dispenses>=350)?" hot":""}${fr?" frx":""}"
         onclick="tpShiftOpen(${tpJ(key)})" title="${tpEsc(
+          (fr ? "Franchisee: "+fr.label+" — " : "") +
           (ex ? "Already on this day (DO-"+ex.id+"). Picking it sets the shift. — " : "") +
           (r.everFlagged
             ? "Last flagged "+String(r.lastFlag||"").slice(0,16).replace("T"," ")
             : "No flag-card tap has ever been recorded at this machine, so there is no "
               +"'since' to count from. Tap a flag card there on the next visit."))}">
-        <span class="nm">${tpEsc(r.name||r.code)}</span>
+        ${stripe}<span class="nm">${tpEsc(r.name||r.code)}</span>
         ${ex?'<span class="tag done">on this day</span>':""}${cell}</button>
       ${open?tpShiftPicker(r.code, r.name, "planner", null, null, ex?ex.id:null):""}`;
   };
 
+  /* Per-franchisee freshness. The global "last pulled" stamp above is true
+     for KNM's own account; a franchisee account the last run could not log
+     in to has its machines frozen at the run before, and saying so here is
+     the only way the driver finds out. */
+  const skipped = m.skippedAccounts || [];
+  const skipWarn = skipped.length ? `<div class="tp-warn"><b>${skipped.length===1
+      ? tpEsc(skipped[0].label)+"'s"
+      : skipped.map(x=>tpEsc(x.label)).join(" and ")+"'s"} account was not
+      pulled last run.</b> Their machines below show the previous run's numbers
+      — anything sold or topped up there since is not reflected.</div>` : "";
+
+  const legend = (m.franchisees || []);
+  const frBy = Object.fromEntries(legend.map(f=>[f.key, f]));
+  const frLegend = legend.length ? `<div class="tp-frleg">
+      ${legend.map(f=>`<span><b style="background:${tpEsc(f.color)}"></b>${tpEsc(f.label)}</span>`).join("")}
+      <span>no stripe = KNM</span></div>` : "";
+
   const flagged  = v.rows.filter(r=>r.everFlagged);
   const unfl     = v.rows.filter(r=>!r.everFlagged);
 
-  return `${freshWarn}${deadWarn}
+  return `${freshWarn}${skipWarn}${deadWarn}
     <div class="tp-vlist">
       ${flagged.length ? flagged.map(row).join("")
                        : '<p class="tp-empty">No machine has been flagged yet.</p>'}
       ${unfl.length ? `<div class="tp-gday">Never flagged — no baseline</div>
                        ${unfl.map(row).join("")}` : ""}
     </div>
+    ${frLegend}
     <p class="tp-note">
       ${m.cards||0} flag card${m.cards===1?"":"s"} in use ·
       ${(m.noTerminal||[]).length} machine${(m.noTerminal||[]).length===1?"":"s"} have no
