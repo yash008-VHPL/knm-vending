@@ -140,6 +140,16 @@
   table.wo-t .c{text-align:center}
   table.wo-t input[type=checkbox]{width:17px;height:17px;accent-color:var(--blue)}
   .wo-ord{font-size:.68rem;color:#1d4ed8;font-weight:700}
+  .wo-req-star{font-weight:600;color:#b91c1c;font-size:.72rem;margin-left:6px}
+  .wo-sigmiss{background:#fef3c7;border:1px solid #f59e0b;color:#78350f;border-radius:8px;padding:8px 10px;font-size:.84rem;margin:0 0 12px}
+  .wo-photos{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  .wo-ph{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;min-height:110px;border:2px dashed #d1d5db;border-radius:10px;padding:8px;cursor:pointer;text-align:center;font-size:.82rem;color:#374151;background:#fafafa;overflow:hidden}
+  .wo-ph.ok{border-style:solid;border-color:#16a34a;background:#f0fdf4}
+  .wo-ph.busy{opacity:.5;pointer-events:none}
+  .wo-ph img{width:100%;height:110px;object-fit:cover;border-radius:6px}
+  .wo-ph .ph-ico{font-size:1.6rem}
+  .wo-ph .ph-l{font-weight:600}
+  .wo-ph input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer}
   .wo-cust{border:1px dashed #d1d5db;border-radius:9px;padding:10px 12px;margin-top:16px}
   .wo-cust.on{border-color:#f59e0b;background:#fffbeb}
   .wo-cust textarea{display:none;margin-top:8px}
@@ -503,6 +513,7 @@
 <div class="wo-sig" id="woSig"><div class="box">
   <h3>Receiving Personnel signature</h3>
   <p class="note" style="margin:0 0 12px">The customer's representative confirms services rendered and goods delivered are in good order.</p>
+  <div id="woSigMiss" class="wo-sigmiss" hidden></div>
   <div class="field"><label>Name (typed signature)</label><input id="woSigName" placeholder="Full name"></div>
   <div class="field"><label>Date</label><input type="text" class="isodate" id="woSigDate" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"></div>
   <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:6px">
@@ -610,7 +621,8 @@ const MYROLES = ({{ (roles or []) | tojson }}).map(r=>String(r||"").toLowerCase(
    Service, manager-only, rather than being dropped. */
 const AREAS={fleet:"Fleet",service:"Service",topups:"Topups",admin:"Admin"};
 const ROLE_NAV={
-  operator:["service","fleet"], customer_service:["service","fleet"],
+  /* 2026-09-03 — field team: drivers do not need Fleet. Service only. */
+  operator:["service"], customer_service:["service","fleet"],
   field_manager:["topups","service","fleet"],
   /* Sales lands on Schedule: keying the week's top-ups is the job. She reaches
      the same /api/wo/schedule routes dispatch does, but the server refuses her
@@ -831,7 +843,9 @@ function renderService(){const r=state.role;let modes;
      Knowledge Base is manager-only because the embedded screen is the CAR
      EDITOR — it has no internal role gating, it relied on index.html hiding the
      tab, and every one of its Save/Delete buttons 403s for anyone else. */
-  if(r==="operator")modes=[["myjobs","My Jobs"],["movements","Movements"]];
+  /* 2026-09-03 — field team did not understand "Movements"; relabelled and
+     explained below, screen unchanged. */
+  if(r==="operator")modes=[["myjobs","My Jobs"],["movements","Machine moves"]];
   /* 2026-08-23 — board / routes / logtopup arrive from the retired Plan tab.
      Manager-only, deliberately: the routes and logtopup panes come from
      _legacy_tabs.html with no role gating of their own. */
@@ -843,9 +857,14 @@ function renderService(){const r=state.role;let modes;
      button for — that rendered a blank screen with no way back. */
   if(!modes.some(([k])=>k===cur)){cur=modes[0][0];state.sub.service=cur;}
   if(EMBEDS["service:"+cur])pendingEmbed="service:"+cur;
-  const body=pendingEmbed?"":({report:svcReport,mine:svcMine,triage:svcTriage,myjobs:svcMyJobs,kb:svcKB,faults:renderFaults,board:renderPlanBoard}[cur]||(()=>""))();
+  const body=pendingEmbed
+    ?(r==="operator"&&cur==="movements"
+        ?'<p class="note" style="margin:0 0 10px"><b>Machine moves</b> — jobs where a machine is taken out of one site and installed at another (or brought back to the workshop). Completing one updates the machine\'s location. Moves assigned to you also appear in My Jobs.</p>'
+        :"")
+    :({report:svcReport,mine:svcMine,triage:svcTriage,myjobs:svcMyJobs,kb:svcKB,faults:renderFaults,board:renderPlanBoard}[cur]||(()=>""))();
   return `<div class="screen-h"><div><h2>Service</h2><div class="crumb">Report · Triage · Do — one work record across roles</div></div></div>
-   <div class="legacy-note">One work record across roles — Fault Reports, Triage, Tech Support, Movements and the KB in one place.</div>
+   ${r==="operator"?'<div class="legacy-note">Your stops for today — service, top-ups and machine moves in one list. Open a stop to fill in the Work Order.</div>'
+     :'<div class="legacy-note">One work record across roles — Fault Reports, Triage, Tech Support, Movements and the KB in one place.</div>'}
    <div class="subnav">${modes.map(([k,l])=>`<button data-sub="${k}" class="${k===cur?'on':''}">${l}</button>`).join("")}</div>${body}`;}
 function svcReport(){const opts=machines.filter(m=>m.active).map(m=>`<option value="${woEsc(m.code)}">${woEsc(m.name)}</option>`).join("");
   return `<div class="card" style="max-width:560px">
@@ -906,13 +925,41 @@ async function assign(id){const w=work.find(x=>x.id===id);const d=($("#as_"+cssI
   else{toast("This item cannot be assigned directly.");return;}
   if(!r)return; await reload(); toast(w.id+" assigned to "+driverName(d));}
 function svcMyJobs(){const me=(ME||"").toLowerCase();const today=sgtToday();
-  const mine=work.filter(w=>(w.assignedTo||"").toLowerCase()===me&&w.status==="assigned"
+  const isMine=w=>(w.assignedTo||"").toLowerCase()===me;
+  const mine=work.filter(w=>isMine(w)&&w.status==="assigned"
     &&(!w.scheduledDate||w.scheduledDate<=today));
-  return `<p class="note" style="margin:0 0 10px">Stops assigned to <b>${ME||"you"}</b>. Service, delivery &amp; movement in one list.</p>
-   ${mine.length?`<div class="rows">${mine.map(jobRow).join("")}</div>`:'<p class="empty">No open stops assigned to you.</p>'}`;}
-function jobRow(w){const m=mByCode(w.machine);
-  return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${woEsc(wName(w))}</b><div class="meta">${woEsc(w.desc)} · ${woEsc(w.id)}</div></div>
-    <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span><button class="btn sm ghost" onclick="openJob('${w.id}')">Open</button></div>`;}
+  /* 2026-09-03 — field team asked to see what they have finished. Today only:
+     bootstrap's work[] carries done rows (30-day guard, capped) and a driver's
+     question is "did that one go through", not history. Dated by scheduledDate
+     — the only date these rows carry. */
+  /* /alpha/api/board/completed is date-keyed (ScheduledDate = day OR undated
+     and completed on that SGT day), so an overdue stop finished today, or an
+     unplanned one, is not lost the way a scheduledDate===today filter loses it. */
+  if(MJ.date!==today){ MJ={date:today,rows:null,loading:false,partial:false}; }
+  if(MJ.rows===null&&!MJ.loading){ MJ.loading=true;
+    api(`/alpha/api/board/completed?date=${encodeURIComponent(today)}`).then(d=>{
+      MJ.loading=false; MJ.rows=(d&&d.stops)||[]; MJ.partial=!!(d&&d.partial);
+      if(state.area==="service"&&subActive("service","myjobs")==="myjobs")render(); }); }
+  const done=(MJ.rows||[]).filter(w=>isMine(w)).map(w=>({...w,status:"done"}));
+  return `<p class="note" style="margin:0 0 10px">Stops assigned to <b>${ME||"you"}</b>. Service, delivery &amp; machine moves in one list.
+     <span class="dot y" style="display:inline-block;vertical-align:-1px;margin-left:6px"></span> open
+     <span class="dot r" style="display:inline-block;vertical-align:-1px;margin-left:6px"></span> overdue
+     <span class="dot g" style="display:inline-block;vertical-align:-1px;margin-left:6px"></span> completed</p>
+   ${mine.length?`<div class="rows">${mine.map(w=>jobRow(w,today)).join("")}</div>`:'<p class="empty">No open stops assigned to you.</p>'}
+   <h3 style="margin:18px 0 8px;font-size:.95rem">Completed today <span class="tag done">${done.length}</span></h3>
+   ${MJ.rows===null?'<p class="empty">Loading…</p>'
+     :done.length?`<div class="rows">${done.map(w=>jobRow(w,today)).join("")}</div>`:'<p class="empty">Nothing completed yet today.</p>'}
+   ${MJ.partial?'<p class="note">Some completed stops could not be loaded — pull to refresh.</p>':""}`;}
+let MJ={date:null,rows:null,loading:false,partial:false};
+/* Dot = the JOB's state, not the machine's live status (that confused the
+   drivers): green completed, red open and scheduled before today, amber open. */
+function jobDot(w,today){
+  if(w.status==="done")return w.state==="submitted"?"y":"g";
+  if(w.scheduledDate&&w.scheduledDate<today)return "r";
+  return "y";}
+function jobRow(w,today){const isDone=w.status==="done";
+  return `<div class="row"><span class="dot ${jobDot(w,today||sgtToday())}"></span><div class="grow"><b>${woEsc(wName(w))}</b><div class="meta">${woEsc(w.desc)} · ${woEsc(w.id)}${w.scheduledDate?" · "+woEsc(w.scheduledDate):""}${isDone&&w.why?"<br>"+woEsc(w.why):""}</div></div>
+    <span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>${isDone?'<span class="tag done">DONE</span>':`<button class="btn sm ghost" onclick="openJob('${w.id}')">Open</button>`}</div>`;}
 /* ── Opening a job ──────────────────────────────────────────────────────────
    Service + delivery stops open the STANDARD Work Order sheet (one sheet per
    machine visit, exactly like the paper form). Movements have no paper form —
@@ -992,7 +1039,7 @@ function renderWorkOrder(){
     <div class="field"><label>Date</label><input type="text" class="isodate" value="${woEsc(v.visit_date||woToday())}" disabled placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"></div></div>
   <div class="grid2">
     <div class="field"><label>Machine Code</label><input type="text" readonly value="${woEsc(mc.code)}"></div>
-    <div class="field"><label>Dispense Counter</label><input type="number" id="woCounter" placeholder="Read from machine display" value="${v.dispense_counter!=null?v.dispense_counter:""}"></div></div>`;
+    <div class="field"><label>Dispense Counter <span class="wo-req-star">* required</span></label><input type="number" id="woCounter" inputmode="numeric" placeholder="Read from machine display" required value="${v.dispense_counter!=null?v.dispense_counter:""}"></div></div>`;
 
   // Machine properties used to be five dropdowns here, gated on submit. They
   // are Sales' job now (Machines > Properties) — a driver at the machine is
@@ -1020,21 +1067,67 @@ function renderWorkOrder(){
   h+=`</tbody></table>
    <p class="note">The Receiving Personnel checks and verifies that services rendered and goods delivered are in good order.</p>`;
 
-  h+=`<div class="wo-cust" id="woCustBox">
-      <label><input type="checkbox" id="woCustChk" onchange="document.getElementById('woCustBox').classList.toggle('on',this.checked)">
-        Customer unavailable at site — PDF will be sent for sign-off and the manager flagged</label>
-      <textarea id="woCustReason" placeholder="Reason (e.g. shop closed, no staff present)"></textarea></div>
-    <div class="wo-sec">Service Personnel (you)</div>
+  /* 2026-09-03 — completion photos (field team). One slot per stage; the
+     upload lands on the visit immediately, so a lost signal after this point
+     costs nothing. The list of stages comes from the server (VISIT_PHOTO_STAGES)
+     so the sheet and the finalize gate can never disagree. */
+  h+=`<div class="wo-sec">Photos of completed work <span>— all four required to sign</span></div>
+    <div class="wo-photos" id="woPhotos">${woPhotoSlots()}</div>
+    <p class="note">Take each photo after the work is done. Retaking replaces the earlier one.</p>`;
+
+  /* The customer-unavailable tick used to live here AND as a button on the
+     signature popup. Drivers found two copies confusing; the button stays, the
+     box goes (2026-09-03). */
+  h+=`<div class="wo-sec">Service Personnel (you)</div>
     <div class="grid2">
       <div class="field"><label>Your name (typed signature)</label><input type="text" id="woSvcName" value="${woEsc(v.service_name||ME||"")}"></div>
       <div class="field"><label>Date</label><input type="text" class="isodate" id="woSvcDate" value="${woEsc(v.service_date||woToday())}" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"></div></div>
     <div class="wo-act">
       <button class="btn ghost" onclick="closeWorkOrder()">Close</button>
       <button class="btn ghost" onclick="woSave(true)">Save draft</button>
-      <button class="btn" onclick="woSubmit()">Submit &amp; sign</button></div></div>`;
+      <button class="btn" onclick="woSubmit()">Submit</button></div></div>`;
   $("#woSheet").innerHTML=h;
   $("#woBg").scrollTop=0;
 }
+
+/* ── Completion photos ─────────────────────────────────────────────────── */
+function woPhotoStages(){return (WO.visit&&WO.visit.photo_stages)||[];}
+function woPhotoFor(stage){return ((WO.visit&&WO.visit.photos)||[]).find(p=>p.stage===stage)||null;}
+function woPhotosMissing(){return woPhotoStages().filter(s=>!woPhotoFor(s.stage)).map(s=>s.label);}
+function woPhotoSlots(){
+  /* Thumbnail = the shrunk data URL we just uploaded, when we have it; the
+     SharePoint proxy is only hit for photos that arrived with a reopened draft. */
+  return woPhotoStages().map(s=>{const p=woPhotoFor(s.stage);
+    return `<label class="wo-ph ${p?"ok":""}" id="woPh_${s.stage}">
+      ${p?`<img src="${p.preview||("/api/wo/images/"+p.id)}" alt="">`:`<span class="ph-ico">📷</span>`}
+      <span class="ph-l">${p?"✓ ":""}${woEsc(s.label)}</span>
+      <input type="file" accept="image/*" capture="environment" onchange="woPhotoPick('${s.stage}',this)"></label>`;}).join("");}
+/* Downscale on the phone before upload: a 12 MP frame is 4–6 MB and the API
+   takes a data: URL in JSON. 1280 px / q0.8 is ~200–350 KB and still readable. */
+function woShrink(file){return new Promise((res,rej)=>{
+  const url=URL.createObjectURL(file), im=new Image();
+  im.onload=()=>{URL.revokeObjectURL(url);
+    const M=1280, sc=Math.min(1,M/Math.max(im.width,im.height));
+    const c=document.createElement("canvas"); c.width=Math.round(im.width*sc); c.height=Math.round(im.height*sc);
+    c.getContext("2d").drawImage(im,0,0,c.width,c.height);
+    res(c.toDataURL("image/jpeg",0.8));};
+  im.onerror=()=>{URL.revokeObjectURL(url);rej(new Error("Could not read the photo."));};
+  im.src=url;});}
+async function woPhotoPick(stage,input){
+  const f=input.files&&input.files[0]; if(!f||!WO.visit)return;
+  const vid=WO.visit.id;            // the sheet may be closed while we await
+  const slot=$("#woPh_"+stage); if(slot)slot.classList.add("busy");
+  try{
+    const dataUrl=await woShrink(f);
+    const r=await api("/api/wo/images",{method:"POST",body:{parent_type:"visit",parent_id:vid,stage,
+      file_name:stage+".jpg",image_data_url:dataUrl}});
+    if(!r)return;
+    if(!WO.visit||WO.visit.id!==vid)return;   // saved server-side; nothing left to paint
+    WO.visit.photos=((WO.visit.photos)||[]).filter(p=>p.stage!==stage).concat([{id:r.id,stage,preview:dataUrl}]);
+    const box=$("#woPhotos"); if(box)box.innerHTML=woPhotoSlots();
+    toast("Photo saved.");
+  }catch(e){toast(String(e.message||e));}
+  finally{ if(slot)slot.classList.remove("busy"); input.value=""; }}
 
 function woBody(){
   const svc={};
@@ -1052,8 +1145,10 @@ function woBody(){
   return {dispense_counter:ctr!==""?parseInt(ctr,10):null,services:svc,delivery_lines:lines,
     service_name:($("#woSvcName").value||"").trim()||null,
     service_date:$("#woSvcDate").value||null,
-    customer_unavailable:$("#woCustChk").checked,
-    customer_unavailable_reason:($("#woCustReason").value||"").trim()||null};}
+    /* No sheet-level box any more; the unavailable path is decided on the
+       signature popup and sent by woSigUnavailable. Drafts stay neutral. */
+    customer_unavailable:false,
+    customer_unavailable_reason:null};}
 
 /* The SERVICES ticks, read straight from the DOM rather than from WO.det, so
    the gate always reflects what the driver can actually see on the sheet.
@@ -1085,14 +1180,26 @@ async function woSubmit(){
      "customer unavailable" for a visit where the customer was standing there.
      So: say what to tick, and let the exemption through only when the reason
      is actually filled in, not merely when the box is ticked. */
-  if(!woAnyService()){
-    const excused = $("#woCustChk").checked && ($("#woCustReason").value||"").trim();
-    if(!excused){
-      toast("Tick the service you performed before signing.");
-      return;}}
+  /* 2026-09-03 — the sheet no longer has an unavailable box, so an untucked
+     sheet may legitimately be heading for "Customer unavailable". Do not block
+     here; list what "Sign & submit" will need, and let the popup decide. */
+  const miss=woMissing();
   if(!(await woSave(false)))return;
+  /* Shown INSIDE the popup, not as a toast under it: the driver has to read
+     it with the popup open to decide between signing and "unavailable". */
+  const mb=$("#woSigMiss");
+  if(mb){ mb.hidden=!miss.length;
+    mb.innerHTML=miss.length?`<b>Sign &amp; submit still needs:</b> ${woEsc(miss.join(", "))}.<br>Cancel to go back and add them — or, if the site was closed, choose <b>Customer unavailable</b>.`:""; }
   $("#woSigName").value=""; $("#woSigDate").value=woToday();
   $("#woSig").classList.add("show");}
+/* Everything the SIGNED path requires, in the order the sheet shows it. The
+   server enforces the same list in api_visit_finalize. */
+function woMissing(){
+  const miss=[];
+  if(!woAnyService())miss.push("a service tick");
+  if($("#woCounter").value==="")miss.push("dispense counter");
+  const ph=woPhotosMissing(); if(ph.length)miss.push("photo: "+ph.join(", "));
+  return miss;}
 function woSigClose(){$("#woSig").classList.remove("show");}
 
 function woSigConfirm(){
@@ -1106,17 +1213,14 @@ function woSigConfirm(){
   /* Do NOT close the modal: woSubmit blanks #woSigName on reopen, so closing
      here would make the customer type their name a second time with the driver
      standing next to them. */
-  if(!woAnyService()){
-    toast("Tick the service you performed, then sign.");
-    return;}
+  const miss=woMissing();
+  if(miss.length){toast("Still needed before signing: "+miss.join(", ")+".");return;}
   woFinalize({receiving_name:nm,receiving_date:dt,customer_unavailable:false,
     service_name:($("#woSvcName").value||"").trim(),service_date:$("#woSvcDate").value});}
 
 function woSigUnavailable(){
-  let rsn=($("#woCustReason").value||"").trim();
-  if(!rsn){rsn=(prompt("Customer unavailable — brief reason (flagged to manager):")||"").trim();
-    if(!rsn){toast("Reason required.");return;}
-    $("#woCustReason").value=rsn; $("#woCustChk").checked=true; $("#woCustBox").classList.add("on");}
+  const rsn=(prompt("Customer unavailable — brief reason (flagged to manager):")||"").trim();
+  if(!rsn){toast("Reason required.");return;}
   woFinalize({customer_unavailable:true,customer_unavailable_reason:rsn,
     service_name:($("#woSvcName").value||"").trim(),service_date:$("#woSvcDate").value});}
 
@@ -1130,7 +1234,7 @@ async function woFinalize(body){
   finally{ woSubmitting=false;
     document.querySelectorAll("#woSig .btn").forEach(b=>b.disabled=false); }
   if(!r)return;
-  woSigClose(); closeWorkOrder(); await reload();
+  woSigClose(); closeWorkOrder(); MJ.rows=null; await reload();
   const skipped=(r.skipped_job_orders||[]).length;
   toast((r.status==="pending_email_signature"
       ? "Submitted — customer unavailable; manager flagged for sign-off."

@@ -506,6 +506,16 @@ def allocate_display_id(cursor, kind: str) -> str:
 
 # ── Image upload helpers (SP-backed) ──────────────────────────────────────────
 
+# 2026-09-03 — completion photos the field team asked for on every signed Work
+# Order. Stage names are the contract with alpha_preview.html's photo slots and
+# the finalize gate below; change them in both places or not at all.
+VISIT_PHOTO_STAGES = (
+    ("photo_brewer",   "Brewer"),
+    ("photo_mixbowl",  "Mixing bowl"),
+    ("photo_internal", "Internal (trash bag and pail)"),
+    ("photo_external", "External (general cleanliness)"),
+)
+
 def _kind_for_parent(parent_type: str) -> str:
     """Map parent_type → SP folder kind."""
     if parent_type == "complaint":
@@ -526,6 +536,8 @@ def _display_for_parent(cursor, parent_type: str, parent_id: int) -> str:
             INNER JOIN WO_JobOrders j ON j.JobOrderID = t.JobOrderID
             WHERE t.TaskID = %s
         """, (parent_id,))
+    elif parent_type == "visit":
+        cursor.execute("SELECT DisplayID FROM WO_VisitSessions WHERE VisitID=%s", (parent_id,))
     else:
         return "UNKNOWN"
     row = cursor.fetchone()
@@ -2777,30 +2789,57 @@ def api_image_upload():
     Uploads to SP, inserts WO_Images row, returns the new image id."""
     data = request.get_json(silent=True) or {}
     parent_type = (data.get("parent_type") or "").strip().lower()
-    if parent_type not in ("complaint", "joborder", "task"):
-        return jsonify({"error": "parent_type must be complaint, joborder, or task."}), 400
+    if parent_type not in ("complaint", "joborder", "task", "visit"):
+        return jsonify({"error": "parent_type must be complaint, joborder, task or visit."}), 400
     try:
         parent_id = int(data.get("parent_id"))
     except (TypeError, ValueError):
         return jsonify({"error": "parent_id required."}), 400
     stage = (data.get("stage") or "before").strip().lower()
+    if parent_type == "visit" and stage not in dict(VISIT_PHOTO_STAGES):
+        return jsonify({"error": "Unknown visit photo stage."}), 400
     raw, ctype = _decode_data_url(data.get("image_data_url") or "")
     if not raw:
         return jsonify({"error": "image_data_url required (data: URL)."}), 400
 
     user = get_current_user()
+    conn = None
     try:
         conn = get_connection()
         cursor = conn.cursor()
+        if parent_type == "visit":
+            cursor.execute("SELECT OperatorEmail, Status FROM WO_VisitSessions WHERE VisitID=%s",
+                           (parent_id,))
+            vr = cursor.fetchone()
+            if not vr:
+                conn.close()
+                return jsonify({"error": "Visit not found."}), 404
+            if get_role(user) not in MANAGER_ROLES and (vr[0] or "").lower() != user.lower():
+                conn.close()
+                return jsonify({"error": "Not your visit."}), 403
+            if vr[1] in ("signed", "pending_email_signature"):
+                conn.close()
+                return jsonify({"error": "Already finalised."}), 400
         new_id = _save_image_to_sp(
             cursor, parent_type, parent_id, stage,
             file_name=data.get("file_name") or f"{stage}.jpg",
             content_type=ctype, raw_bytes=raw, uploaded_by=user,
         )
+        if parent_type == "visit":
+            # One photo per slot: a retake replaces the earlier row. Deleted
+            # AFTER the new upload succeeded, in the same transaction, so a
+            # failed retake can never cost the driver the photo he already had.
+            cursor.execute("DELETE FROM WO_Images WHERE ParentType='visit' AND ParentID=%s "
+                           "AND Stage=%s AND ImageID <> %s", (parent_id, stage, new_id))
         conn.commit()
         conn.close()
         return jsonify({"ok": True, "id": new_id})
     except Exception as e:
+        try:
+            if conn is not None:
+                conn.rollback(); conn.close()
+        except Exception:
+            pass
         return jsonify({"error": f"Upload failed: {str(e)}"}), 500
 
 
@@ -2831,7 +2870,10 @@ def api_image_get(image_id):
         else:
             return jsonify({"error": "Image has no content."}), 410
 
-        return Response(body, mimetype=ctype)
+        # Immutable content (a retake is a new ImageID): let the browser keep
+        # it, so re-rendering a sheet does not re-pull from SharePoint.
+        return Response(body, mimetype=ctype,
+                        headers={"Cache-Control": "private, max-age=86400"})
     except Exception as e:
         return jsonify({"error": f"Image read failed: {str(e)}"}), 500
 
@@ -5647,6 +5689,8 @@ def _visit_row_to_json(cursor, vrow):
         (vid,),
     )
     out["linked_job_order_ids"] = [int(r[0]) for r in cursor.fetchall()]
+    out["photos"] = _images_for(cursor, "visit", vid)
+    out["photo_stages"] = [{"stage": k, "label": v} for k, v in VISIT_PHOTO_STAGES]
     return out
 
 
@@ -6238,6 +6282,24 @@ def api_visit_finalize(vid):
                                          "If you could not service the machine at "
                                          "all, mark the customer unavailable "
                                          "instead."}), 400
+
+            # 2026-09-03 — field team: the dispense counter is a required
+            # entry, and every signed sheet carries four completion photos.
+            # Same exemption as the service tick: a customer-unavailable visit
+            # is one where the driver could not get at the machine.
+            if row[6] is None:
+                conn.close()
+                return jsonify({"error": "Dispense Counter is required — read it "
+                                         "from the machine display."}), 400
+            cursor.execute(
+                "SELECT DISTINCT Stage FROM WO_Images "
+                "WHERE ParentType='visit' AND ParentID=%s", (vid,))
+            _have = {r[0] for r in cursor.fetchall()}
+            _missing = [lbl for st, lbl in VISIT_PHOTO_STAGES if st not in _have]
+            if _missing:
+                conn.close()
+                return jsonify({"error": "Photos required before signing: "
+                                         + ", ".join(_missing) + "."}), 400
 
         new_status = "pending_email_signature" if cust_unavail else "signed"
 

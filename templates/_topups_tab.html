@@ -24,6 +24,16 @@
 .tp-empty{color:var(--mut);font-size:.8rem;margin:6px 0;font-style:italic}
 
 /* ── Calendar ───────────────────────────────────────────────────────────── */
+/* Day view: summary card + day picker (2026-09-03) */
+.tp-dsum{background:#fff;border:1px solid var(--line,#e5e7eb);border-radius:10px;padding:10px 14px;margin:8px 0 12px}
+.tp-dsum .h{font-size:1.05rem;margin-bottom:6px}
+.tp-dsum .k{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:.88rem;color:var(--mut,#6b7280)}
+.tp-dsum .k b{color:var(--ink,#111827);margin-left:2px}
+.tp-dsum .k.d{margin-top:6px;padding-top:6px;border-top:1px dashed var(--line,#e5e7eb)}
+.tp-dsum .k .warn b{color:var(--bad,#b91c1c)}
+.tp-todaytag{font-size:.72rem;font-weight:600;color:var(--blue,#1d4ed8);background:#dbeafe;border-radius:999px;padding:1px 8px;vertical-align:middle}
+.tp-daynav{display:inline-flex;gap:6px;align-items:center;flex:0 0 auto}
+.tp-daypick{font:inherit;font-size:.85rem;padding:4px 6px;border:1px solid var(--line,#d1d5db);border-radius:8px;background:#fff;width:9.5em;flex:0 0 auto}
 .tp-wk{margin:0 0 18px}
 .tp-wkh{display:flex;align-items:baseline;gap:10px;margin:0 0 8px;font-size:.8rem;
   font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.04em}
@@ -608,6 +618,19 @@ function tpDayOpen(iso){
   render();
 }
 function tpDayClose(){ TP.day.open = false; TP.day.restore = true; render(); }
+/* 2026-09-03 — step between days without going back to the grid. The day view
+   reads TP.cal.stops, so a target outside the loaded window re-anchors the
+   calendar on that week and refetches; the day stays open across the load. */
+function tpDayGo(iso){
+  if(!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return;
+  TP.day.date = iso;
+  const from = tpMonday(TP.cal.anchor || tpToday());
+  const to   = tpAdd(from, TP.cal.weeks*7 - 1);
+  if(iso < from || iso > to){ TP.cal.anchor = iso; TP.cal.stale = true; }
+  window.scrollTo(0,0);
+  render();
+}
+function tpDayStep(n){ tpDayGo(tpAdd(TP.day.date, n)); }
 
 function tpRenderDay(){
   const iso   = TP.day.date;
@@ -641,17 +664,34 @@ function tpRenderDay(){
 
   const o = TP.cal.other[iso];
 
+  const perDriver = Object.keys(groups).sort()
+    .map(em => `<span>${tpEsc(tpDriverName(em))} <b>${groups[em].length}</b></span>`).join("");
+  const loading = TP.cal.loading || TP.cal.stale;   // stale: fetch not yet started this tick
+
   return `<div class="tp-bar">
-      <button class="btn sm ghost" onclick="tpDayClose()">‹ Back to calendar</button>
-      <span class="sp"><b>${TP_DOW[tpDow(iso)]} ${tpLabel(iso)}</b> —
-        ${stops.length} stop${stops.length===1?"":"s"} ·
-        ${unassigned.length} unassigned · ${stops.length-unassigned.length} assigned</span>
+      <button class="btn sm ghost" onclick="tpDayClose()">‹ Calendar</button>
+      <span class="tp-daynav">
+        <button class="btn sm ghost" onclick="tpDayStep(-1)" title="Previous day">‹ Prev</button>
+        <input type="date" class="tp-daypick" value="${iso}" onchange="tpDayGo(this.value)" aria-label="Jump to date">
+        <button class="btn sm ghost" onclick="tpDayStep(1)" title="Next day">Next ›</button>
+      </span>
+      ${iso!==today?`<button class="btn sm ghost" onclick="tpDayGo(${tpJ(today)})">Today</button>`:""}
+      <span class="sp"></span>
       <button class="btn sm ghost" onclick="TP.cal.stale=true;render()">Refresh</button>
+    </div>
+    <div class="tp-dsum">
+      <div class="h"><b>${TP_DOW[tpDow(iso)]} ${tpLabel(iso)}</b>${iso===today?' <span class="tp-todaytag">today</span>':""}</div>
+      <div class="k"><span>Stops <b>${stops.length}</b></span>
+        <span>Assigned <b>${stops.length-unassigned.length}</b></span>
+        <span${unassigned.length&&!past?' class="warn"':""}>Unassigned <b>${unassigned.length}</b></span>
+        <span>Drivers <b>${Object.keys(groups).length}</b></span></div>
+      ${perDriver?`<div class="k d">${perDriver}</div>`:""}
     </div>
     ${TP.cal.err?`<div class="tp-warn"><b>${tpEsc(TP.cal.err)}</b></div>`:""}
     <div class="tp-dfull">
+      ${loading && !stops.length ? '<p class="tp-empty">Loading…</p>' : ""}
       ${drivers}${un}
-      ${!stops.length?`<p class="tp-empty">${past
+      ${!stops.length && !loading?`<p class="tp-empty">${past
         ? "Nothing was recorded on this day."
         : "Nothing planned for this day yet — place stops on Topups ▸ Plan."}</p>`:""}
       ${o && (o.joborders||o.movements) ? `<p class="tp-note">Also on this day:
