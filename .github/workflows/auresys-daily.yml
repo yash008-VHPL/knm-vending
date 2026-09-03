@@ -44,6 +44,10 @@ on:
         description: "true = also load today's partial data (both scheduled runs do)"
         required: false
         default: 'false'
+      roster:
+        description: 'true = log in to every account, print its terminal roster + MachineLookup/nets_mapping stubs, load nothing'
+        required: false
+        default: 'false'
 
 concurrency:
   # A second run must never overlap a DELETE-then-INSERT already in flight.
@@ -53,7 +57,9 @@ concurrency:
 jobs:
   pull:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Accounts run serially (MAIN, then each franchisee), so the ceiling
+    # scales with the account count.
+    timeout-minutes: 60
 
     steps:
       - name: Check out repository
@@ -73,6 +79,19 @@ jobs:
         env:
           AURESYS_USER:      ${{ secrets.AURESYS_USER }}
           AURESYS_PASSWORD:  ${{ secrets.AURESYS_PASSWORD }}
+          # Franchisee accounts. GitHub cannot look a secret up by a computed
+          # name, so every account is listed here explicitly; the script reads
+          # AURESYS_USER_<KEY> / AURESYS_PASSWORD_<KEY> for each key in
+          # AURESYS_FRANCHISEES. A key whose secret is missing arrives as ""
+          # and is reported + skipped for that run - the MAIN pull still loads.
+          # AURESYS_FRANCHISEES is a repository VARIABLE (Settings > Secrets and
+          # variables > Actions > Variables), e.g. AUVION,COFFEERUSH. Empty or
+          # unset = MAIN only, exactly the pre-2026-09-03 behaviour.
+          AURESYS_FRANCHISEES:          ${{ vars.AURESYS_FRANCHISEES }}
+          AURESYS_USER_AUVION:          ${{ secrets.AURESYS_USER_AUVION }}
+          AURESYS_PASSWORD_AUVION:      ${{ secrets.AURESYS_PASSWORD_AUVION }}
+          AURESYS_USER_COFFEERUSH:      ${{ secrets.AURESYS_USER_COFFEERUSH }}
+          AURESYS_PASSWORD_COFFEERUSH:  ${{ secrets.AURESYS_PASSWORD_COFFEERUSH }}
           NETS_CARD_PEPPER:  ${{ secrets.NETS_CARD_PEPPER }}
           DB_SERVER:         machineserver.database.windows.net
           DB_NAME:           "Machine DispensedDrink"
@@ -87,6 +106,7 @@ jobs:
             [ -n "${{ github.event.inputs.to }}" ] && ARGS="$ARGS --to ${{ github.event.inputs.to }}"
           fi
           [ "${{ github.event.inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ github.event.inputs.roster }}" = "true" ] && ARGS="$ARGS --roster"
           # Every SCHEDULED run loads today; github.event.schedule is non-empty
           # only on a scheduled run and empty on a manual dispatch. A manual run
           # stays D-1-only unless asked, so investigating a historical window

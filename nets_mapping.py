@@ -97,6 +97,34 @@ TERMINAL_TO_MACHINE = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# Accounts (2026-09-03). The pull logs in to every Auresys account listed in
+# the AURESYS_FRANCHISEES env var, plus MAIN. Each key MUST exist here: the
+# dashboard reads the label and colour from this dict, and the loader refuses
+# a key it cannot label. Keys are ^[A-Z0-9_]{1,16}$ - NETS_Transaction.
+# Account_Key is NVARCHAR(16). NULL in that column means MAIN (history
+# predates the column).
+# --------------------------------------------------------------------------- #
+MAIN_ACCOUNT = "MAIN"
+ACCOUNTS = {
+    "MAIN":       {"label": "KNM Main",   "color": None},        # never striped
+    "AUVION":     {"label": "Auvion",     "color": "#2563eb"},   # blue
+    "COFFEERUSH": {"label": "CoffeeRush", "color": "#d97706"},   # amber
+}
+
+# terminal_id -> account key, for terminals NOT on the MAIN roster. Anything
+# absent here is assumed MAIN. Populated from `auresys_pull.py --roster`; the
+# loader alerts when a terminal shows up on a different account's roster than
+# the one recorded here (a terminal moved between accounts - fix this file).
+TERMINAL_ACCOUNT = {
+    # 'SGKN_M0080': 'AUVION',
+}
+
+
+def account_of(terminal_id):
+    return TERMINAL_ACCOUNT.get(terminal_id, MAIN_ACCOUNT)
+
+
 def resolve(terminal_id):
     """Return (machine_code, machine_name) or (None, None)."""
     e = TERMINAL_TO_MACHINE.get(terminal_id)
@@ -104,7 +132,7 @@ def resolve(terminal_id):
 
 
 def known_terminals():
-    return set(TERMINAL_TO_MACHINE)
+    return set(TERMINAL_TO_MACHINE) | set(TERMINAL_ACCOUNT)
 
 
 def unmapped_terminals():
