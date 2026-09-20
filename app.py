@@ -779,6 +779,10 @@ def get_dispenses():
     end_str   = request.args.get("end",      "").strip()
     machine   = request.args.get("machine",  "").strip()
     location  = request.args.get("location", "").strip()
+    # group=sku (default, legacy dashboard) | location (alpha Fleet > Sales)
+    group     = request.args.get("group",    "sku").strip().lower()
+    if group not in ("sku", "location"):
+        return jsonify({"error": "group must be 'sku' or 'location'."}), 400
 
     if not start_str or not end_str:
         return jsonify({"error": "Please provide both a start and end datetime."}), 400
@@ -802,7 +806,7 @@ def get_dispenses():
         params.append(machine)
     location_join   = ""
     location_filter = ""
-    if location:
+    if location or group == "location":
         location_join = """
         LEFT JOIN MachineLookup ml
             ON CAST(ml.MachineCode AS NVARCHAR(50)) = CAST(mdt.[Machine Code] AS NVARCHAR(50))
@@ -817,14 +821,29 @@ def get_dispenses():
         # Fall back to the CURRENT MachineLookup name when no history interval
         # covers the vend (machine added without a history row) — otherwise those
         # machines silently vanish from location-filtered views.
+    if location:
         location_filter = "AND COALESCE(loc.LocationName, ml.MachineName) = %s"
         params.append(location)
 
-    query = f"""
-        SELECT
+    if group == "location":
+        # Same per-vend location resolution as /api/transactions: a machine that
+        # moved inside the window is split across both locations at the move.
+        select_cols = """
+            COALESCE(loc.LocationName, ml.MachineName,
+                     CAST(mdt.[Machine Code] AS NVARCHAR(50)))      AS LocationName,
+            COUNT(DISTINCT CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineCount,
+            COUNT(*)                                               AS DispenseCount"""
+        group_by = """GROUP BY COALESCE(loc.LocationName, ml.MachineName,
+                          CAST(mdt.[Machine Code] AS NVARCHAR(50)))"""
+    else:
+        select_cols = """
             mdt.[Event Code]    AS EventCode,
             mc.EventName        AS SKUName,
-            COUNT(*)            AS DispenseCount
+            COUNT(*)            AS DispenseCount"""
+        group_by = "GROUP BY mdt.[Event Code], mc.EventName"
+
+    query = f"""
+        SELECT {select_cols}
         FROM (
             SELECT [Machine Code], [Event Code], [Date Time]
             FROM (
@@ -855,7 +874,7 @@ def get_dispenses():
           AND CAST(mdt.[Date Time] AS float) <= {end_ole}
           {machine_filter}
           {location_filter}
-        GROUP BY mdt.[Event Code], mc.EventName
+        {group_by}
         ORDER BY DispenseCount DESC
     """
 
@@ -867,13 +886,21 @@ def get_dispenses():
         cursor.execute(query, params)
         rows = cursor.fetchall()
         conn.close()
-        results = [{"code": int(row[0]), "sku": row[1], "count": int(row[2])} for row in rows]
-        return jsonify({"results": results, "total": sum(r["count"] for r in results)})
+        if group == "location":
+            results = [{"location": row[0], "machines": int(row[1]), "count": int(row[2])}
+                       for row in rows]
+        else:
+            results = [{"code": int(row[0]), "sku": row[1], "count": int(row[2])} for row in rows]
+        return jsonify({"results": results, "group": group,
+                        "total": sum(r["count"] for r in results)})
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
 # ── Transaction log ────────────────────────────────────────────────────────────
+
+TXN_DEFAULT_LIMIT = 2000     # legacy /legacy dashboard behaviour
+TXN_MAX_LIMIT     = 50000    # ceiling for any caller (alpha Fleet > Sales)
 
 @app.route("/api/transactions")
 @login_required
@@ -888,6 +915,13 @@ def get_transactions():
     end_str   = request.args.get("end",      "").strip()
     machine   = request.args.get("machine",  "").strip()
     location  = request.args.get("location", "").strip()
+    # Row cap. Default 2000 keeps the legacy dashboard (whose copy says 2,000)
+    # unchanged; alpha asks for more. Hard ceiling protects the worker/JSON size.
+    try:
+        limit = int(request.args.get("limit", TXN_DEFAULT_LIMIT))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer."}), 400
+    limit = max(1, min(limit, TXN_MAX_LIMIT))
 
     if not start_str or not end_str:
         return jsonify({"error": "Please provide both a start and end datetime."}), 400
@@ -918,7 +952,7 @@ def get_transactions():
         params.append(location)
 
     query = f"""
-        SELECT TOP 2000
+        SELECT TOP {limit + 1}
             CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
             mc.EventName                   AS ItemName,
             COALESCE(loc.LocationName, ml.MachineName,
@@ -973,6 +1007,10 @@ def get_transactions():
         cursor.execute(query, params)
         rows   = cursor.fetchall()
         conn.close()
+        # fetched limit+1: an extra row proves there is more, so a result of
+        # exactly `limit` rows is not falsely flagged as capped
+        capped = len(rows) > limit
+        rows   = rows[:limit]
         results = []
         for row in rows:
             dt = from_ole_date(row[0])
@@ -983,7 +1021,8 @@ def get_transactions():
                     "item":    row[1],
                     "machine": row[2],
                 })
-        return jsonify({"results": results, "capped": len(results) == 2000})
+        return jsonify({"results": results, "capped": capped,
+                        "limit": limit})
     except Exception as e:
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 

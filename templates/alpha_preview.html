@@ -2901,38 +2901,47 @@ const cssId=s=>String(s).replace(/[^a-zA-Z0-9_-]/g,"_");
 
 /* ── SALES SEARCH ── */
 let _salesView='summary';
+let _salesGroup='location';           // summary grouping: 'location' (default) | 'sku'
+const SAL_TXN_LIMIT=50000;            // server ceiling is TXN_MAX_LIMIT in app.py
+const SAL_TXN_PAGE=2000;              // rows added to the DOM per "Show more"
+let _salTxn=[],_salTxnShown=0;        // full result set kept in memory for CSV
 
 function renderSalesUI(){
+  const sv=_salesView==="summary",lg=_salesGroup==="location";
   return `<div class="card">
     <div class="sales-controls">
       <div class="field"><label>Location</label><select id="sal_loc"><option value="">All Locations</option></select></div>
       <div class="field"><label>Start</label><div class="datetime-row"><input type="text" class="isodate" id="sal_s0" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_s1" value="00:00" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
       <div class="field"><label>End</label><div class="datetime-row"><input type="text" class="isodate" id="sal_e0" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_e1" value="23:59" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
-      <div class="view-toggle"><button id="sal_vsum" class="on" onclick="setSalesView('summary')">Summary</button><button id="sal_vtxn" onclick="setSalesView('transactions')">Transactions</button></div>
+      <div class="view-toggle"><button id="sal_vsum" class="${sv?"on":""}" onclick="setSalesView('summary')">Summary</button><button id="sal_vtxn" class="${sv?"":"on"}" onclick="setSalesView('transactions')">Transactions</button></div>
       <button class="btn" id="sal_btn" onclick="runSalesSearch()">Search</button>
     </div>
     <div id="sal_status" style="display:none"></div>
   </div>
   <div id="sal_results" style="display:none"><div class="card">
-    <div style="display:flex;justify-content:flex-end;margin-bottom:10px"><button class="btn sm success" onclick="exportSalesCSV('summary')">⬇ Export CSV</button></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <div class="view-toggle"><button id="sal_glo" class="${lg?"on":""}" onclick="setSalesGroup('location')">By location</button><button id="sal_gsk" class="${lg?"":"on"}" onclick="setSalesGroup('sku')">By SKU</button></div>
+      <button class="btn sm success" onclick="exportSalesCSV('summary')">⬇ Export CSV</button>
+    </div>
     <div class="sales-summary-row">
       <div class="sales-stat"><div class="val" id="sal_total">0</div><small>Total Dispenses</small></div>
-      <div class="sales-stat"><div class="val" id="sal_skus">0</div><small>Unique SKUs</small></div>
+      <div class="sales-stat"><div class="val" id="sal_skus">0</div><small id="sal_nlbl">Locations</small></div>
     </div>
     <table class="sales-table">
-      <thead><tr><th style="width:36px">#</th><th>SKU</th><th style="width:80px;color:#9ca3af;font-weight:500">Code</th><th class="right" style="width:90px">Count</th><th class="right" style="width:80px">%</th><th style="min-width:80px"></th></tr></thead>
+      <thead id="sal_thead"></thead>
       <tbody id="sal_tbody"></tbody>
       <tfoot><tr><td colspan="3">Total</td><td class="right" id="sal_foot"></td><td class="right">100%</td><td></td></tr></tfoot>
     </table>
   </div></div>
   <div id="sal_txns" style="display:none"><div class="card">
     <div style="display:flex;justify-content:flex-end;margin-bottom:10px"><button class="btn sm success" onclick="exportSalesCSV('transactions')">⬇ Export CSV</button></div>
-    <div id="sal_cap" class="cap-note" style="display:none">⚠️ Results capped at 2,000 rows. Narrow your date range.</div>
+    <div id="sal_cap" class="cap-note" style="display:none"></div>
     <div id="sal_cnt" style="font-size:.78rem;color:var(--mut);margin-bottom:10px"></div>
     <table class="sales-table">
       <thead><tr><th style="width:100px">Date</th><th style="width:80px">Time</th><th>Item</th><th>Machine</th></tr></thead>
       <tbody id="sal_tbodytxn"></tbody>
     </table>
+    <div id="sal_more" style="display:none;text-align:center;margin-top:12px"><button class="btn sm" onclick="salesShowMore()">Show more</button></div>
   </div></div>`;
 }
 
@@ -2963,6 +2972,16 @@ function setSalesView(v){
   if(txn)txn.classList.toggle("on",v==="transactions");
 }
 
+/* Switching grouping re-queries only if a summary is already on screen. */
+function setSalesGroup(g){
+  _salesGroup=g;
+  const lo=$("#sal_glo"),sk=$("#sal_gsk");
+  if(lo)lo.classList.toggle("on",g==="location");
+  if(sk)sk.classList.toggle("on",g==="sku");
+  const r=$("#sal_results");
+  if(r&&r.style.display!=="none")searchSalesSummary();
+}
+
 function runSalesSearch(){
   if(_salesView==="transactions")searchSalesTxns();else searchSalesSummary();
 }
@@ -2975,24 +2994,37 @@ async function searchSalesSummary(){
   setSalesStatus("Querying…","loading");
   $("#sal_results").style.display="none";$("#sal_txns").style.display="none";
   try{
-    let url=`/api/dispenses?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+    let url=`/api/dispenses?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&group=${_salesGroup}`;
     if(loc&&loc.value)url+=`&location=${encodeURIComponent(loc.value)}`;
     const d=await(await fetch(url)).json();
     if(d.error){setSalesStatus("Error: "+d.error,"error");return;}
-    setSalesStatus("","");renderSalesSummary(d.results,d.total);
+    setSalesStatus("","");renderSalesSummary(d.results,d.total,d.group||"sku");
   }catch(e){setSalesStatus("Could not reach the server.","error");}
   finally{btn.disabled=false;}
 }
 
-function renderSalesSummary(results,total){
+function renderSalesSummary(results,total,group){
+  const byLoc=group==="location";
+  _salesGroup=group;   // a toggle clicked mid-query must not outlive the response
+  const lo=$("#sal_glo"),sk=$("#sal_gsk");
+  if(lo)lo.classList.toggle("on",byLoc);
+  if(sk)sk.classList.toggle("on",!byLoc);
   $("#sal_total").textContent=total.toLocaleString();
   $("#sal_skus").textContent=results.length;
+  $("#sal_nlbl").textContent=byLoc?"Locations":"Unique SKUs";
+  $("#sal_thead").innerHTML=byLoc
+    ?`<tr><th style="width:36px">#</th><th>Location</th><th class="right" style="width:80px">Machines</th><th class="right" style="width:90px">Count</th><th class="right" style="width:80px">%</th><th style="min-width:80px"></th></tr>`
+    :`<tr><th style="width:36px">#</th><th>SKU</th><th style="width:80px;color:#9ca3af;font-weight:500">Code</th><th class="right" style="width:90px">Count</th><th class="right" style="width:80px">%</th><th style="min-width:80px"></th></tr>`;
   $("#sal_foot").textContent=total.toLocaleString();
   const max=results.length>0?results[0].count:1;
   $("#sal_tbody").innerHTML=results.length
     ?results.map((r,i)=>{const pct=total>0?((r.count/total)*100).toFixed(1):"0.0";const bar=((r.count/max)*100).toFixed(1);
-      return `<tr><td>${i+1}</td><td>${esc(r.sku)}</td><td style="color:var(--mut);font-size:.78rem">${r.code}</td><td class="right">${r.count.toLocaleString()}</td><td class="right">${pct}%</td><td><div class="bar-bg"><div class="bar-fill" style="width:${bar}%"></div></div></td></tr>`;}).join("")
+      const mid=byLoc
+        ?`<td>${esc(r.location)}</td><td class="right" style="color:var(--mut)">${r.machines}</td>`
+        :`<td>${esc(r.sku)}</td><td style="color:var(--mut);font-size:.78rem">${r.code}</td>`;
+      return `<tr><td>${i+1}</td>${mid}<td class="right">${r.count.toLocaleString()}</td><td class="right">${pct}%</td><td><div class="bar-bg"><div class="bar-fill" style="width:${bar}%"></div></div></td></tr>`;}).join("")
     :`<tr><td colspan="6" style="text-align:center;color:var(--mut);padding:28px">No dispenses found.</td></tr>`;
+  $("#sal_results").dataset.group=group;
   $("#sal_results").style.display="block";
 }
 
@@ -3004,23 +3036,41 @@ async function searchSalesTxns(){
   setSalesStatus("Querying…","loading");
   $("#sal_results").style.display="none";$("#sal_txns").style.display="none";
   try{
-    let url=`/api/transactions?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+    let url=`/api/transactions?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}&limit=${SAL_TXN_LIMIT}`;
     if(loc&&loc.value)url+=`&location=${encodeURIComponent(loc.value)}`;
     const d=await(await fetch(url)).json();
     if(d.error){setSalesStatus("Error: "+d.error,"error");return;}
-    setSalesStatus("","");renderSalesTxns(d.results,d.capped);
+    setSalesStatus("","");renderSalesTxns(d.results,d.capped,d.limit||SAL_TXN_LIMIT);
   }catch(e){setSalesStatus("Could not reach the server.","error");}
   finally{btn.disabled=false;}
 }
 
-function renderSalesTxns(results,capped){
-  const cap=$("#sal_cap"),cnt=$("#sal_cnt");
-  if(cap)cap.style.display=capped?"block":"none";
-  if(cnt)cnt.textContent=results.length?`${results.length.toLocaleString()} transaction${results.length!==1?"s":""}${capped?" (capped)":""}`:""
-  $("#sal_tbodytxn").innerHTML=results.length
-    ?results.map(r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.time)}</td><td>${esc(r.item)}</td><td>${esc(r.machine)}</td></tr>`).join("")
-    :`<tr><td colspan="4" style="text-align:center;color:var(--mut);padding:28px">No transactions found.</td></tr>`;
+const salTxnRow=r=>`<tr><td>${esc(r.date)}</td><td>${esc(r.time)}</td><td>${esc(r.item)}</td><td>${esc(r.machine)}</td></tr>`;
+
+/* All rows stay in memory (CSV exports every one); the DOM gets them in
+   SAL_TXN_PAGE chunks so 50k rows never land in the table at once. */
+function renderSalesTxns(results,capped,limit){
+  _salTxn=results||[];_salTxnShown=0;
+  const cap=$("#sal_cap");
+  if(cap){cap.style.display=capped?"block":"none";
+    cap.textContent=`⚠️ Results capped at ${Number(limit).toLocaleString()} rows. Narrow your date range to see all transactions.`;}
+  $("#sal_tbodytxn").innerHTML=_salTxn.length?"":`<tr><td colspan="4" style="text-align:center;color:var(--mut);padding:28px">No transactions found.</td></tr>`;
+  salesShowMore(capped);
   $("#sal_txns").style.display="block";
+}
+
+function salesShowMore(capped){
+  const tb=$("#sal_tbodytxn");if(!tb)return;
+  const next=_salTxn.slice(_salTxnShown,_salTxnShown+SAL_TXN_PAGE);
+  if(next.length)tb.insertAdjacentHTML("beforeend",next.map(salTxnRow).join(""));
+  _salTxnShown+=next.length;
+  const n=_salTxn.length,rest=n-_salTxnShown,cnt=$("#sal_cnt"),more=$("#sal_more");
+  if(typeof capped==="boolean")$("#sal_txns").dataset.capped=capped?"1":"";
+  const cp=$("#sal_txns").dataset.capped==="1";
+  if(cnt)cnt.textContent=n?`${n.toLocaleString()} transaction${n!==1?"s":""}${cp?" (capped)":""}`
+    +(rest>0?` · showing ${_salTxnShown.toLocaleString()} — Export CSV includes all`:""):"";
+  if(more){more.style.display=rest>0?"block":"none";
+    const b=more.querySelector("button");if(b)b.textContent=`Show next ${Math.min(rest,SAL_TXN_PAGE).toLocaleString()} (${rest.toLocaleString()} more)`;}
 }
 
 function setSalesStatus(msg,type){
@@ -3037,14 +3087,14 @@ function exportSalesCSV(view){
   const csvEsc=v=>{const s=String(v??"");return(s.includes(",")||s.includes('"')||s.includes("\n"))?`"${s.replace(/"/g,'""')}"`:`${s}`;};
   let rows,filename;
   if(view==="summary"){
-    rows=[["#","SKU","Item Code","Count","% of Total"]];
+    const byLoc=($("#sal_results")||{}).dataset?.group==="location";
+    rows=[byLoc?["#","Location","Machines","Count","% of Total"]:["#","SKU","Item Code","Count","% of Total"]];
     document.querySelectorAll("#sal_tbody tr").forEach(tr=>{const tds=tr.querySelectorAll("td");
       if(tds.length>=5)rows.push([tds[0].textContent,tds[1].textContent,tds[2].textContent,tds[3].textContent,tds[4].textContent]);});
-    filename=`sales_summary_${locLabel}_${start}_to_${end}.csv`;
+    filename=`sales_summary_by_${byLoc?"location":"sku"}_${locLabel}_${start}_to_${end}.csv`;
   }else{
     rows=[["Date","Time","Item Dispensed","Machine"]];
-    document.querySelectorAll("#sal_tbodytxn tr").forEach(tr=>{const tds=tr.querySelectorAll("td");
-      if(tds.length>=4)rows.push([tds[0].textContent,tds[1].textContent,tds[2].textContent,tds[3].textContent]);});
+    _salTxn.forEach(r=>rows.push([r.date,r.time,r.item,r.machine]));
     filename=`transactions_${locLabel}_${start}_to_${end}.csv`;
   }
   const csv=rows.map(r=>r.map(csvEsc).join(",")).join("\r\n");
