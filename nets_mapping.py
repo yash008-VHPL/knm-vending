@@ -79,10 +79,20 @@ TERMINAL_TO_MACHINE = {
     'SGKN_M0066'    : ('55120532', 'SATS Seletar Camp', 'SELETAR CAMP'),
     'SGKN_M0067'    : ('54020504', 'CNB CC2C', 'CHANGI NAVAL BASE CC2C'),
 
-    # ---- unresolved: trading, but no machine assigned yet ----
-    'SGKN_M0012'    : (None, None, 'SP PASIR PANJANG'),   # NO MATCH
+    # ---- mapped 2026-09-21: exact name match, portal roster vs MachineLookup ----
+    'SGKN_M0012'    : ('44520636', 'SP Pasir Panjang', 'SP PASIR PANJANG'),
+    'SGKN_M0035'    : ('61821166', '28 Ayer Rajah', '28 AYER RAJAH CRESENT'),
+    'SGKN_M0071'    : ('61821197', 'Harbourfront Cruise Centre Departure 2', 'HARBOURFRONT CRUISE CENTRE DEPARTURE 2'),
+    'SGKN_M0072'    : ('61821182', 'Gemini @ Sims', 'GEMINI@SIMS'),
+    'SGKN_M0073'    : ('61821194', 'Tee Yih Jia L3', 'TEE YIH JIA LEVEL 3'),
+    'SGKN_M0075'    : ('61821193', '33 Greenwich Drive', '33 GREENWICH DRIVE DSV'),
+    'SGKN_M0076'    : ('61821195', 'Jewel @ Buangkok', 'JEWEL@BUANGKOK'),
+    'SGKN_M0078'    : ('61821187', 'Apple @ Innovis', 'APPLE INNOVIS'),
+    'SGKN_M0079'    : ('61821180', "St Andrew's Nursing Home (Taman Jurong)", 'TAMAN JURONG ST ANDREW NURSING'),
+    'SGKN_M0080'    : ('61821181', 'PSA Marine', 'PSA MARINE'),
+
+    # ---- unresolved: trading, but no machine assigned yet (with ops 2026-09-21) ----
     'SGKN_M0033'    : (None, None, 'KAKI BUKIT CAMP'),   # NO MATCH
-    'SGKN_M0035'    : (None, None, '28 AYER RAJAH CRESENT'),   # NO MATCH
     'SGKN_M0039'    : (None, None, 'KRANJI CAMP 604'),   # AMBIGUOUS
     'SGKN_M0044'    : (None, None, 'CHANGI GENERAL HOSPITAL A&E'),   # AMBIGUOUS
     'SGKN_M0051'    : (None, None, 'KRANJI CAMP BLK 808'),   # AMBIGUOUS
@@ -91,9 +101,8 @@ TERMINAL_TO_MACHINE = {
     'SGKN_M0068'    : (None, None, '--'),   # NOT CONFIGURED
     'SGKN_M0069'    : (None, None, 'MANDAI HILL CAMP'),   # NO MATCH
     'SGKN_M0070'    : (None, None, '--'),   # NOT CONFIGURED
-    'SGKN_M0071'    : (None, None, 'HARBOURFRONT CRUISE CENTRE DEPARTURE 2'),   # NO MATCH
-    'SGKN_M0072'    : (None, None, 'GEMINI@SIMS'),   # NO MATCH
-    'SGKN_M0075'    : (None, None, '33 GREENWICH DRIVE DSV'),   # NO MATCH
+    'SGKN_M0074'    : (None, None, 'CHANGI GENERAL HOSPITAL MEDICAL BLOCK'),   # AMBIGUOUS
+    'SGKN_M0077'    : (None, None, '55 AYER RAJAH'),   # NO MATCH
 
     # ---- COFFEERUSH franchisee (roster 2026-09-03). MachineCode is synthetic:
     # 9 + terminal number, see auresys_pull.synthetic_machine_code. Names as
