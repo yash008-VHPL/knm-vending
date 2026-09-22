@@ -30,7 +30,7 @@ from flask import Blueprint, request, jsonify, Response
 # Reuse helpers from the existing vending app so auth and DB stay consistent.
 from app import (
     get_current_user, get_role, get_connection,
-    to_ole_date, from_ole_date, log_deletion,
+    to_ole_date, from_ole_date, log_deletion, mlh_record_change,
 )
 import json
 
@@ -796,6 +796,9 @@ def api_location_decommission(code):
                 DecommissionReason = %s
             WHERE MachineCode = %s
         """, (reason, code))
+        # 2026-09-21: close the open location-history interval, so vends after
+        # decommission are not credited to the old site.
+        mlh_record_change(cursor, code, None, None, None, "decommission", decommission=True)
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -814,6 +817,14 @@ def api_location_recommission(code):
             SET IsActive = 1, DecommissionedAt = NULL, DecommissionReason = NULL
             WHERE MachineCode = %s
         """, (code,))
+        # 2026-09-21: reopen the location-history interval closed by the
+        # decommission/delete, so vends after recommission resolve to its site.
+        cursor.execute(
+            "SELECT MachineName, Latitude, Longitude FROM MachineLookup WHERE MachineCode = %s",
+            (code,))
+        _r = cursor.fetchone()
+        if _r:
+            mlh_record_change(cursor, code, _r[0], _r[1], _r[2], "recommission")
         conn.commit()
         conn.close()
         return jsonify({"ok": True})
@@ -4381,6 +4392,7 @@ def api_assign_delivery_candidates():
             ) v ON v.code = CAST(ml.MachineCode AS NVARCHAR(50))
                AND (ml.LastTopupTimestamp IS NULL OR v.t >= ml.LastTopupTimestamp)
             WHERE ml.MachineCode IS NOT NULL
+              AND ISNULL(ml.IsActive, 1) = 1
             GROUP BY ml.MachineName, ml.MachineCode, ml.LastTopupTimestamp
         """)
         rows = cursor.fetchall()
@@ -4417,6 +4429,7 @@ def api_assign_joborder_candidates():
                          )
                    ), 0) AS OpenComplaints
             FROM MachineLookup ml
+            WHERE ISNULL(ml.IsActive, 1) = 1
         """)
         rows = cursor.fetchall()
         conn.close()
