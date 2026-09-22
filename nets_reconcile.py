@@ -196,7 +196,7 @@ def fetch_db_counts(year: int, month: int) -> dict:
     # MachineLocationHistory) so a machine that moved mid-month splits its count
     # across the correct locations — matching NETS, which is physical-site based.
     cursor.execute(f"""
-        SELECT COALESCE(loc.LocationName, ml.MachineName) AS LocationName,
+        SELECT COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END) AS LocationName,
                COUNT(*) AS VendCount
         FROM (
             SELECT [Machine Code], [Event Code], [Date Time]
@@ -226,8 +226,8 @@ def fetch_db_counts(year: int, month: int) -> dict:
         ) loc
         WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
           AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
-          AND COALESCE(loc.LocationName, ml.MachineName) IS NOT NULL
-        GROUP BY COALESCE(loc.LocationName, ml.MachineName)
+          AND COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END) IS NOT NULL
+        GROUP BY COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END)
     """)
     rows = cursor.fetchall()
     conn.close()
