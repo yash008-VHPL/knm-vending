@@ -822,18 +822,18 @@ def get_dispenses():
         # covers the vend (machine added without a history row) — otherwise those
         # machines silently vanish from location-filtered views.
     if location:
-        location_filter = "AND COALESCE(loc.LocationName, ml.MachineName) = %s"
+        location_filter = "AND COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END) = %s"
         params.append(location)
 
     if group == "location":
         # Same per-vend location resolution as /api/transactions: a machine that
         # moved inside the window is split across both locations at the move.
         select_cols = """
-            COALESCE(loc.LocationName, ml.MachineName,
+            COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END,
                      CAST(mdt.[Machine Code] AS NVARCHAR(50)))      AS LocationName,
             COUNT(DISTINCT CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineCount,
             COUNT(*)                                               AS DispenseCount"""
-        group_by = """GROUP BY COALESCE(loc.LocationName, ml.MachineName,
+        group_by = """GROUP BY COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END,
                           CAST(mdt.[Machine Code] AS NVARCHAR(50)))"""
     else:
         select_cols = """
@@ -948,14 +948,14 @@ def get_transactions():
     location_filter = ""
     if location:
         # filter on the RESOLVED location name (post per-vend resolution)
-        location_filter = "AND COALESCE(loc.LocationName, ml.MachineName) = %s"
+        location_filter = "AND COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END) = %s"
         params.append(location)
 
     query = f"""
         SELECT TOP {limit + 1}
             CAST(mdt.[Date Time] AS FLOAT) AS EventTime,
             mc.EventName                   AS ItemName,
-            COALESCE(loc.LocationName, ml.MachineName,
+            COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END,
                      CAST(mdt.[Machine Code] AS NVARCHAR(50))) AS MachineName
         FROM (
             SELECT [Machine Code], [Event Code], [Date Time]
@@ -1425,7 +1425,8 @@ def add_location():
         cursor.execute("SELECT COUNT(*) FROM MachineLookup WHERE MachineCode = %s", (code,))
         if cursor.fetchone()[0]:
             cursor.execute(
-                "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s, IsActive=1 WHERE MachineCode=%s",
+                "UPDATE MachineLookup SET MachineName=%s, Latitude=%s, Longitude=%s, IsActive=1, "
+                "DecommissionedAt=NULL, DecommissionReason=NULL WHERE MachineCode=%s",
                 (name, lat, lon, code),
             )
         else:
@@ -1558,10 +1559,16 @@ def delete_location(code):
         # Close the open history interval (preserve the historical record) BEFORE
         # removing the lookup row, so past vends still resolve to a location.
         mlh_record_change(cursor, code, None, None, None, "admin", decommission=True)
-        cursor.execute("DELETE FROM MachineLookup WHERE MachineCode = %s", (code,))
+        # 2026-09-21: never delete the row - the machine (serial) stays on record.
+        # Take it out of service instead; it then shows under Decommissioned.
+        cursor.execute(
+            "UPDATE MachineLookup SET IsActive = 0, DecommissionedAt = SYSUTCDATETIME(), "
+            "DecommissionReason = %s WHERE MachineCode = %s AND ISNULL(IsActive, 1) = 1",
+            ("Removed via Admin", code),
+        )
         if cursor.rowcount == 0:
             conn.close()
-            return jsonify({"error": "Location not found."}), 404
+            return jsonify({"error": "Machine not found, or already out of service."}), 404
         log_deletion(cursor, "location", code,
                      f"Location '{(snap or {}).get('MachineName') or code}' ({code})",
                      snap, False, get_current_user())
@@ -1603,7 +1610,7 @@ def internal_vend_counts():
         # that moved mid-month splits into one row per (code, location-at-vend-time).
         cursor.execute(f"""
             SELECT CAST(mdt.[Machine Code] AS NVARCHAR(50)) AS MachineCode,
-                   COALESCE(loc.LocationName, ml.MachineName) AS LocationName,
+                   COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END) AS LocationName,
                    COUNT(*) AS VendCount
             FROM (
                 SELECT [Machine Code], [Event Code], [Date Time]
@@ -1634,8 +1641,8 @@ def internal_vend_counts():
             WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
               AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
             GROUP BY CAST(mdt.[Machine Code] AS NVARCHAR(50)),
-                     COALESCE(loc.LocationName, ml.MachineName)
-            ORDER BY COALESCE(loc.LocationName, ml.MachineName)
+                     COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END)
+            ORDER BY COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END)
         """)
         rows = cursor.fetchall()
         conn.close()
@@ -1657,7 +1664,7 @@ def march2026_vends():
         cursor = conn.cursor()
         cursor.execute(f"""
             SELECT CAST(mdt.[Machine Code] AS NVARCHAR(50)) AS MachineCode,
-                   COALESCE(loc.LocationName, ml.MachineName) AS LocationName,
+                   COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END) AS LocationName,
                    COUNT(*) AS VendCount
             FROM (
                 SELECT [Machine Code], [Event Code], [Date Time]
@@ -1688,8 +1695,8 @@ def march2026_vends():
             WHERE CAST(mdt.[Date Time] AS FLOAT) >= {start_ole}
               AND CAST(mdt.[Date Time] AS FLOAT) <= {end_ole}
             GROUP BY CAST(mdt.[Machine Code] AS NVARCHAR(50)),
-                     COALESCE(loc.LocationName, ml.MachineName)
-            ORDER BY COALESCE(loc.LocationName, ml.MachineName)
+                     COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END)
+            ORDER BY COALESCE(loc.LocationName, CASE WHEN ISNULL(ml.IsActive, 1) = 1 THEN ml.MachineName END)
         """)
         rows = cursor.fetchall()
         conn.close()
