@@ -770,7 +770,7 @@
     }
 
     async function deleteLocation(code, name) {
-        if (!confirm(`Delete "${name}" (code: ${code})?\n\nThis cannot be undone and will remove the machine from all dashboards.`)) return;
+        if (!confirm(`Delete "${name}" (code: ${code})?\n\nIt will be taken out of service and hidden from all dashboards. The machine record is kept and can be restored from Decommissioned.`)) return;
         try {
             const resp = await fetch(`/api/admin/locations/${encodeURIComponent(code)}`, { method: 'DELETE' });
             const data = await resp.json();
