@@ -807,10 +807,8 @@ def print_roster(acct, terminals, session):
             stubs_ml.append("    ('%s', N'%s'),   -- %s%s"
                             % (code, nm, t, "  NAME MISSING - ask the franchisee"
                                if not names.get(t) else ""))
-            stubs_map.append("    '%-14s: ('%s', %r, %r),   # %s%s"
-                             % ("%s'" % t, code, names.get(t) or t,
-                                names.get(t, ""), acct,
-                                "  NAME MISSING" if not names.get(t) else ""))
+            stubs_map.append("    UPDATE MachineLookup SET NETS_Map = '%s' WHERE MachineCode = '%s';"
+                             % (t, code))
     if unnamed:
         log("  %d terminal(s) have no outlet name on the portal: %s"
             % (len(unnamed), ", ".join(unnamed)))
@@ -819,7 +817,7 @@ def print_roster(acct, terminals, session):
             "migration_2026-09-03_franchisee.sql BLOCK 3, then REVIEW the names):" % acct)
         for x in stubs_ml:
             log(x)
-        log("\n  # nets_mapping.TERMINAL_TO_MACHINE entries for %s:" % acct)
+        log("\n  -- MachineLookup.NETS_Map for account %s:" % acct)
         for x in stubs_map:
             log(x)
         log("  # nets_mapping.TERMINAL_ACCOUNT entries:")
@@ -878,6 +876,23 @@ def main():
         # Inside the try: a bad key is an Abort (Teams alert, exit 2), not a
         # bare sys.exit that takes the MAIN pull down silently.
         accounts = read_accounts()
+        # Terminal -> machine is MachineLookup.NETS_Map (2026-09-22). Read it
+        # once, before anything below consults nets_mapping. A pull that cannot
+        # read it must not load: every row would be stamped Machine_Code NULL.
+        # --roster / --probe / --dry-run write nothing, so they carry on with an
+        # empty map and say so.
+        try:
+            _mc = connect()
+            try:
+                ambiguous = nets_mapping.load_from_db(_mc)
+            finally:
+                _mc.close()
+        except (Exception, SystemExit) as e:
+            if not (a.roster or a.probe or a.dry_run):
+                raise Abort("FAILED", "cannot read MachineLookup.NETS_Map: %s" % e)
+            log("  MachineLookup.NETS_Map unreadable (%s) - every terminal shows as unmapped" % e)
+            nets_mapping.load_rows([])
+            ambiguous = {}
         # ------------------------------------------------------------------ #
         # one pass per account. Everything an account produces stays LOCAL to
         # its pass until the pass completes every day; only then is it merged.
@@ -1002,7 +1017,7 @@ def main():
                     excluded.add((t, day))
             for t in terminals:
                 if t not in nets_mapping.known_terminals():
-                    new_terms.append("%s (%s)" % (t, acct))
+                    new_terms.append((t, acct))
                 elif nets_mapping.account_of(t) != acct:
                     misfiled.append("%s on %s, nets_mapping says %s"
                                     % (t, acct, nets_mapping.account_of(t)))
@@ -1046,9 +1061,13 @@ def main():
         # are cleared per date like mapped ones. The MAIN roster is NOT: for a
         # MAIN-only installation the scope stays exactly known_terminals(),
         # i.e. the pre-2026-09-03 behaviour, byte for byte.
+        # Every completed roster, MAIN included. Until 2026-09-22 MAIN's
+        # unmapped terminals sat in nets_mapping.py as (None, None) entries and
+        # reached the scope through known_terminals(); the mapping now lives in
+        # MachineLookup.NETS_Map, which only lists mapped terminals, so the MAIN
+        # roster is added here to keep those terminals cleared per date.
         for acct, terms in rosters.items():
-            if acct != nets_mapping.MAIN_ACCOUNT:
-                roster.update(terms)
+            roster.update(terms)
         roster = {t for t in roster
                   if owner.get(t, nets_mapping.account_of(t)) not in failed_keys}
 
@@ -1101,7 +1120,8 @@ def main():
                 for t, o in moved.items():
                     log("REASSIGNED %s -> %s" % (t, " | ".join(sorted(o))))
             if new_terms:
-                log("NEW TERMINALS not in nets_mapping: %s" % ", ".join(new_terms))
+                log("TERMINALS with no machine in MachineLookup.NETS_Map: %s"
+                    % ", ".join("%s (%s)" % x for x in new_terms))
             if misfiled:
                 log("MISFILED: %s" % "; ".join(misfiled))
             log("delete scope: %d terminals; excluded terminal-days: %d"
@@ -1131,11 +1151,20 @@ def main():
             alerts.append("Unmapped terminals trading (rows loaded with no machine): %s"
                           % ", ".join(sorted(unmapped)))
         if moved:
-            alerts.append("Terminals reporting a new outlet - update nets_mapping.py and "
-                          "MachineLookup: " + "; ".join("%s -> %s" % (t, " | ".join(sorted(o)))
+            alerts.append("Terminals reporting a new outlet - check MachineLookup.NETS_Map: " + "; ".join("%s -> %s" % (t, " | ".join(sorted(o)))
                                                         for t, o in moved.items()))
-        if new_terms:
-            alerts.append("New terminals on the portal: %s" % ", ".join(new_terms))
+        # Roster terminals with no machine. Trading ones are alerted by the
+        # "Unmapped terminals trading" line above; quiet ones are logged only -
+        # they used to sit in nets_mapping.py as (None, None) and never alerted,
+        # and a daily Teams line for a terminal that sells nothing is noise.
+        quiet = [x for x in new_terms if x[0] not in unmapped]
+        if quiet:
+            log("  terminals with no machine in MachineLookup.NETS_Map (not trading): %s"
+                % ", ".join("%s (%s)" % x for x in quiet))
+        if ambiguous:
+            alerts.append("Terminal set on more than one active machine in MachineLookup.NETS_Map - "
+                          "rows load with no machine until fixed: "
+                          + "; ".join("%s -> %s" % (t, ", ".join(c)) for t, c in sorted(ambiguous.items())))
         if failed_accounts:
             alerts.append(
                 "%d account(s) SKIPPED - their machines did not update: %s"

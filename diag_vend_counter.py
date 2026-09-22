@@ -32,6 +32,11 @@ def main():
     days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
     today = dt.datetime.now(ap.SGT).date()
     window = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
+    _mc = ap.connect()
+    try:
+        nets_mapping.load_from_db(_mc)
+    finally:
+        _mc.close()
     codes = {}
     for t in terms:
         c, name = nets_mapping.resolve(t)
