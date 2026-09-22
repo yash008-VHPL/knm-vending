@@ -224,6 +224,13 @@
   .stp .x:hover{color:var(--bad)}
   .stp .ed{background:none;border:none;color:#94a3b8;cursor:pointer;font-size:.95rem;line-height:1;padding:0 2px}
   .stp .ed:hover{color:var(--blue)}
+  .stp .snote{display:block;font-size:.68rem;color:var(--ink);white-space:normal;cursor:pointer;
+              margin-top:2px;border-radius:4px;padding:1px 3px}
+  .stp .snote:hover{background:#f1f5f9}
+  .stp .snote.empty{color:#94a3b8;font-style:italic}
+  .stp .snote textarea{min-height:42px;font-size:.74rem;padding:5px 8px;margin:2px 0 4px;cursor:text}
+  .stp .snote .r{display:flex;gap:6px}
+  .row .pnote{margin-top:5px;height:28px;font-size:.74rem;padding:3px 8px;max-width:420px}
   .stp.carry{border-style:dashed;border-color:var(--amber-br);background:#fffbeb}
   /* Completed stops. Compound selectors (.stp.is-*), never a bare .done — the
      existing `.tag.done` rule already paints the DONE chip and the fleet
@@ -903,14 +910,21 @@ function triageRow(w){const m=mByCode(w.machine);
   // before someone silently pulls it forward.
   const _fd=w.scheduledDate&&w.scheduledDate!==boardDate?` · <b>for ${woEsc(w.scheduledDate)}</b>`:"";
   return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${woEsc(wName(w))} — ${woEsc(w.desc)}</b>
-    <div class="meta">${woEsc(w.id)} · ${woEsc(w.source)} · priority ${woEsc(w.priority)}${_fd}</div></div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
+    <div class="meta">${woEsc(w.id)} · ${woEsc(w.source)} · priority ${woEsc(w.priority)}${_fd}</div>
+    ${poolNoteOk(w)?`<input type="text" id="an_${cssId(w.id)}" class="pnote" value="${woEsc(w.note||"")}" data-orig="${woEsc(w.note||"")}" placeholder="Note for the driver (optional)" autocomplete="off">`:""}</div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
     ${w.kind==="complaint"&&!(state.role==="field_manager"||state.role==="admin")
         ? `<span class="pill" title="A complaint becomes assignable once a job order is raised for it">needs a job order first</span>`
       :drivers.length?`<select id="as_${cssId(w.id)}" class="btn sm ghost" style="width:auto">${drivers.map(d=>`<option value="${d}">${driverName(d)}</option>`).join("")}</select>
     <button class="btn sm" onclick="assign('${w.id}')">Assign</button>`
       :`<input id="as_${cssId(w.id)}" placeholder="operator@email" style="width:170px">
     <button class="btn sm" onclick="assign('${w.id}')">Assign</button>`}</div>`;}
+/* 2026-09-22 — dispatch feedback: the note must be editable at the moment a
+   pooled stop is given to a driver. Movements carry no note (stopKind null);
+   a complaint's note becomes the new job order's diagnosis. */
+const poolNoteOk=w=>w.kind==="complaint"||(!!stopKind(w)&&!w.fromComplaint);
 async function assign(id){const w=work.find(x=>x.id===id);const d=($("#as_"+cssId(id)).value||"").trim();
+  const _ne=$("#an_"+cssId(id)),_nt=_ne?(_ne.value||"").trim():null,
+        _nch=_ne!==null&&_nt!==(_ne.dataset.orig||"").trim();
   if(!d){toast("Pick or type an assignee first.");return;}
   if(!w.rid){toast("Demo row — not writable.");return;}
   // Date it onto the board's day, or it lands in the round as an undated
@@ -920,10 +934,16 @@ async function assign(id){const w=work.find(x=>x.id===id);const d=($("#as_"+cssI
   if(w.kind==="joborder")      r=await api(`/api/wo/joborders/${w.rid}/assign`,{method:"POST",body:_sd});
   else if(w.kind==="delivery") r=await api(`/api/wo/deliveryorders/${w.rid}/assign`,{method:"POST",body:_sd});
   else if(w.kind==="complaint")r=await api("/api/wo/joborders",{method:"POST",body:{complaint_id:w.rid,assigned_to:d,
-    diagnosis:(w.note||w.desc),machine_code:w.machine!=="?"?w.machine:null,machine_name:w.machineName||undefined}});
+    diagnosis:(_ne?(_nt||w.note||w.desc):(w.note||w.desc)),machine_code:w.machine!=="?"?w.machine:null,machine_name:w.machineName||undefined}});
   else if(w.kind==="movement") r=await api(`/api/wo/movementorders/${w.rid}/assign`,{method:"POST",body:_sd});
   else{toast("This item cannot be assigned directly.");return;}
-  if(!r)return; await reload(); toast(w.id+" assigned to "+driverName(d));}
+  if(!r)return;
+  // Assigned first, note second: a refused note (e.g. a complaint-born job
+  // order) must never block the assignment itself. api() shows the error.
+  let _nok=true;
+  if(_nch&&w.kind!=="complaint"&&stopKind(w))
+    _nok=!!(await api(`/api/wo/stops/${stopKind(w)}/${w.rid}`,{method:"PATCH",body:{note:_nt}}));
+  await reload(); if(_nok)toast(w.id+" assigned to "+driverName(d)+(_nch?" · note saved":""));}
 function svcMyJobs(){const me=(ME||"").toLowerCase();const today=sgtToday();
   const isMine=w=>(w.assignedTo||"").toLowerCase()===me;
   const mine=work.filter(w=>isMine(w)&&w.status==="assigned"
@@ -1833,6 +1853,11 @@ function pbStop(){ if (PB.timer){ clearInterval(PB.timer); PB.timer = null; } }
 async function pbPoll(){
   if (state.area !== "service" || subActive("service","board") !== "board"
       || DONE.loading) return;
+  // Never repaint under someone typing a note — render() would discard it.
+  const _ae = document.activeElement;
+  if (_ae && /^(TEXTAREA|INPUT|SELECT)$/.test(_ae.tagName) && _ae.closest("#main")) return;
+  if (document.querySelector(".snote[data-open]")) return;
+  if ([...document.querySelectorAll(".pnote")].some(i => (i.value || "").trim() !== (i.dataset.orig || "").trim())) return;
   const asked = boardDate, gen = DONE.gen;
   const d = await api(`/alpha/api/board/completed?date=${encodeURIComponent(asked)}`);
   if (!d || boardDate !== asked || gen !== DONE.gen) return;
@@ -2393,14 +2418,22 @@ function driverCard(email){
     const his = s.items.filter(w => (w.assignedTo || "").toLowerCase() === lc);
     const carried = his.every(w => !w.scheduledDate);
     const kinds = his.map(w => `<span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>`).join("");
-    const note = his.map(w => w.desc).filter(d => d && d !== "Refill / delivery")[0];
+    // One visible, directly editable note per editable order (2026-09-22).
+    // Movements have no note field; they keep their description line.
+    const notes = his.map(w => stopKind(w) && w.rid && !w.fromComplaint
+      ? `<span class="snote${w.note ? "" : " empty"}" data-rid="${woEsc(String(w.rid))}" data-kind="${woEsc(stopKind(w))}"
+           title="Click to edit the note for the driver" onclick="noteEdit(this)">${
+           w.note ? "📝 " + woEsc(w.note) : "+ note for driver"}</span>`
+      : (w.desc && w.desc !== "Refill / delivery" ? `<small${w.fromComplaint
+          ? ' title="From a customer complaint — edit the diagnosis in Tech Support"' : ""}>${woEsc(w.desc)}</small>` : "")).join("");
     return `<div class="stp${carried ? " carry" : ""}" data-code="${woEsc(s.code)}">
       <span class="n">${i + 1}</span>
       <span class="b"><b>${woEsc(s.name)}</b><span class="k">${kinds}${
         carried ? '<span class="tag" title="No scheduled date — carried over">UNDATED</span>' : ""}</span>
-        ${note ? `<small>${woEsc(note)}</small>` : ""}
+        ${notes}
         <span class="edit"></span></span>
-      <button class="ed" title="Edit this stop" onclick="editStop(this)">✎</button></div>`;
+      <button class="ed" title="Edit this stop" onclick="editStop(this)">✎</button>
+      <button class="x" title="Unassign — return to the Unassigned pool" onclick="unassignStop(this)">×</button></div>`;
   }).join("");
 
   /* Completed stops, grouped by machine, rendered BELOW the open ones and
@@ -2642,6 +2675,64 @@ async function removeStop(btn){
   }
   await reload();
   toast(`${site.name}: ${ok} order(s) removed` + (kept ? ` · ${kept} kept (already worked or not removable)` : ""));
+}
+
+/* × on a driver's stop (2026-09-22): take the site off this driver and put it
+   back in the Unassigned pool. Nothing is cancelled and the scheduled date is
+   kept, so it reappears in the pool for the same day. Only this driver's
+   orders at the site move. Completed stops render with no × at all.
+   Top-ups and service go through PATCH /stops (the same path as ✎ Edit's
+   "— unassign —"), NOT /assign: /joborders/<id>/assign forces StatusCode=0
+   and would silently drop a driver's "needs assistance" escalation. A
+   movement a driver has started is left with him — /movementorders/assign
+   would reset it and he could no longer complete a move already on his truck. */
+async function unassignStop(btn){
+  const row = btn.closest(".stp"), code = row.dataset.code, email = cardEmail(btn);
+  const site = BOARD_SITES.find(s => s.code === code);
+  if (!site || !email) return;
+  const his = site.items.filter(w => (w.assignedTo || "").toLowerCase() === email.toLowerCase());
+  if (!confirm(`Return ${site.name} to the Unassigned pool? It comes off ${driverName(email)}'s round; nothing is cancelled.`)) return;
+  btn.disabled = true;
+  let ok = 0, failed = 0, kept = 0;
+  for (const w of his){
+    let r = null;
+    if (!w.rid){ kept++; continue; }
+    if (stopKind(w))
+      r = await api(`/api/wo/stops/${stopKind(w)}/${w.rid}`, {method: "PATCH", body: {assigned_to: ""}});
+    else if (w.kind === "movement"){
+      if (w.started){ kept++; continue; }
+      r = await api(`/api/wo/movementorders/${w.rid}/assign`, {method: "POST", body: {assigned_to: ""}});
+    } else { kept++; continue; }
+    if (r) ok++; else failed++;
+  }
+  await reload();
+  if (failed) return;                      // leave the server's error on screen
+  toast(`${site.name}: ${ok} returned to pool` + (kept ? ` · ${kept} kept (move already started)` : ""));
+}
+
+/* Inline note editor on a driver's stop. Same PATCH as ✎ Edit, one order. */
+function noteEdit(el){
+  if (el.dataset.open) return;
+  el.dataset.open = "1";
+  const w = work.find(x => String(x.rid) === el.dataset.rid && stopKind(x) === el.dataset.kind);
+  const v = (w && w.note) || "";
+  el.onclick = null;
+  el.classList.remove("empty");
+  el.innerHTML = `<textarea class="note" placeholder="Note for the driver">${woEsc(v)}</textarea>
+    <span class="r"><button class="btn sm" onclick="noteSave(this)">Save</button>
+    <button class="btn sm ghost" onclick="render()">Cancel</button></span>`;
+  const ta = el.querySelector("textarea"); ta.dataset.orig = v; ta.focus();
+}
+async function noteSave(btn){
+  const el = btn.closest(".snote"), ta = el.querySelector("textarea");
+  const typed = (ta.value || "").trim();
+  if (typed === (ta.dataset.orig || "").trim()){ render(); return; }
+  btn.disabled = true;
+  const r = await api(`/api/wo/stops/${el.dataset.kind}/${el.dataset.rid}`, {method: "PATCH", body: {note: typed}});
+  btn.disabled = false;
+  if (!r) return;                          // keep the editor open with the server's error
+  await reload();
+  toast("Note saved");
 }
 
 /* One site -> one driver, for the Unassigned list's Assign control. */

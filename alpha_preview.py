@@ -314,9 +314,9 @@ def _fetch_work(cur, meta=None):
         pass
     try:
         cur.execute(f"""SELECT TOP 200 JobOrderID, DisplayID, MachineName, MachineCode,
-                       AssignedTo, PriorityCode, StatusCode, Diagnosis, {_sd_cols(cur, "WO_JobOrders")}
+                       AssignedTo, PriorityCode, StatusCode, Diagnosis, ComplaintID, {_sd_cols(cur, "WO_JobOrders")}
                        FROM WO_JobOrders ORDER BY CreatedAt DESC, JobOrderID DESC""")
-        for jid, disp, mname, mcode, asg, pc, sc, diag, sdate, rseq in cur.fetchall():
+        for jid, disp, mname, mcode, asg, pc, sc, diag, cmpid, sdate, rseq in cur.fetchall():
             lbl = JOBORDER_STATUS.get(int(sc) if sc is not None else 0, "assigned")
             # pending_review = operator finished; treat as done in this UI so a
             # completed job doesn't bounce back into My Jobs (manager still
@@ -332,6 +332,10 @@ def _fetch_work(cur, meta=None):
                          # stored text — the board edits this, so truncating it
                          # would destroy a manager's diagnosis on every save.
                          "note": diag,
+                         # 2026-09-22 — a complaint-born job order's diagnosis
+                         # is edited in Tech Support only (api_stop_update
+                         # refuses it), so the board must not offer an editor.
+                         "fromComplaint": bool(cmpid),
                          "scheduledDate": str(sdate)[:10] if sdate else None,
                          "routeSeq": int(rseq) if rseq is not None else None})
     except Exception:
@@ -396,6 +400,9 @@ def _fetch_work(cur, meta=None):
                          "desc": desc[:140], "priority": "normal",
                          "status": "done" if lbl == "completed" else ("assigned" if asg else "new"),
                          "assignedTo": asg, "source": "Movement",
+                         # A started move belongs to its driver: the board's ×
+                         # refuses it rather than strand a machine on a truck.
+                         "started": lbl == "in_progress",
                          "scheduledDate": str(sdate)[:10] if sdate else None,
                          "routeSeq": int(rseq) if rseq is not None else None})
     except Exception:
