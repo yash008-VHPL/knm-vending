@@ -1689,6 +1689,9 @@ def api_joborder_assign(jid):
             return jsonify({"error": "Job order is closed; it cannot be reassigned."}), 400
         sets, params = ["AssignedTo=%s", "StatusCode=0"], [assigned]
         _day = _parse_date(data.get("scheduled_date"))
+        for frag, val in _reseq_on_change(cursor, "WO_JobOrders", "JobOrderID", jid,
+                                          assigned, True, _day, bool(_day)):
+            sets.append(frag); params.append(val)
         if _day:
             sets.append("ScheduledDate=%s"); params.append(_day)
         params.append(jid)
@@ -3242,8 +3245,11 @@ def _next_route_seq(cursor, assigned, day):
     if not assigned or not day:
         return None
     top = 0
+    # Movements too: the Day board's manual reorder (2026-09-24) writes their
+    # RouteSeq, so a new stop must land after them, not tie with one.
     for tbl, idc in (("WO_DeliveryOrders", "DeliveryOrderID"),
-                     ("WO_JobOrders", "JobOrderID")):
+                     ("WO_JobOrders", "JobOrderID"),
+                     ("WO_MovementOrders", "MovementOrderID")):
         try:
             cursor.execute(
                 f"SELECT MAX(RouteSeq) FROM {tbl} WHERE AssignedTo=%s AND ScheduledDate=%s",
@@ -3255,6 +3261,34 @@ def _next_route_seq(cursor, assigned, day):
         except Exception:
             return None            # columns not migrated yet
     return top + 1
+
+
+def _reseq_on_change(cursor, table, idcol, rid, who, who_given, day, day_given):
+    """RouteSeq fragment for a row whose driver or day is about to change.
+
+    A position belongs to one driver's round on one day. Carried across a
+    reassign or re-date it would drop the stop into the new round at its OLD
+    slot — since the manual reorder (2026-09-24) that is usually a small
+    number, i.e. near the top. Returns [] when neither changes, so a no-op
+    save never shuffles a round. Must run BEFORE the UPDATE (reads old values).
+    """
+    try:
+        if not (_has_col(cursor, table, "RouteSeq") and _has_col(cursor, table, "ScheduledDate")):
+            return []
+        cursor.execute(f"SELECT AssignedTo, ScheduledDate FROM {table} WHERE {idcol} = %s", (rid,))
+        r = cursor.fetchone()
+    except Exception:
+        return []
+    if not r:
+        return []
+    old_who = (r[0] or "").strip().lower() or None
+    old_day = str(r[1])[:10] if r[1] else None
+    new_who = ((who or "").strip().lower() or None) if who_given else old_who
+    new_day = (str(day)[:10] if day else None) if day_given else old_day
+    if new_who == old_who and new_day == old_day:
+        return []
+    return [("RouteSeq = %s",
+             _next_route_seq(cursor, new_who, new_day) if new_who and new_day else None)]
 
 
 @workorders_bp.route("/stops", methods=["POST"])
@@ -3483,6 +3517,11 @@ def api_stop_update(kind, sid):
 
         if not sets:
             conn.close(); return jsonify({"ok": True, "changed": False})
+        for frag, val in _reseq_on_change(
+                cursor, table, idcol, sid,
+                data.get("assigned_to"), "assigned_to" in data,
+                day, "scheduled_date" in data and _has_col(cursor, table, "ScheduledDate")):
+            sets.append(frag); params.append(val)
         params.append(sid)
         cursor.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE {idcol} = %s", tuple(params))
         _log_activity(cursor, ptype, sid, "edited", "Dispatch board: " + ", ".join(log), user)
@@ -3573,6 +3612,91 @@ def api_stop_delete(kind, sid):
         if conn is not None:
             try:
                 conn.close()
+            except Exception:
+                pass
+        return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+
+# 2026-09-24 — dispatch feedback: manual stop order per driver. Automation comes
+# later; until then the dispatcher sets the round order by hand on the Day board.
+_REORDER_TABLES = {
+    # board kind: (table, id column, activity parent type, "still open" predicate)
+    "delivery": ("WO_DeliveryOrders", "DeliveryOrderID", "deliveryorder",
+                 "ISNULL(Status,'') <> 'completed'"),
+    "joborder": ("WO_JobOrders", "JobOrderID", "joborder", "StatusCode IN (0, 1)"),
+    "movement": ("WO_MovementOrders", "MovementOrderID", "movementorder", "StatusCode IN (0, 1)"),
+}
+
+
+@workorders_bp.route("/stops/reorder", methods=["POST"])
+@require_roles(*DISPATCH_ROLES)
+def api_stop_reorder():
+    """Set one driver's round order for one day.
+
+    Body: {assigned_to, date: YYYY-MM-DD, order: [[{kind, id}, ...], ...]}
+    One inner list per SITE, in the order the driver should visit them. Every
+    order at site n gets RouteSeq = n. All-or-nothing: if any row is no longer
+    this driver's, no longer open, or not dated to this day (undated
+    carry-overs belong to no round and are never sequenced), nothing is written and
+    the board is told to reload.
+    """
+    data = request.get_json(silent=True) or {}
+    user = get_current_user()
+    who = (data.get("assigned_to") or "").strip().lower()
+    day = _parse_date(data.get("date"))
+    order = data.get("order")
+    if not who or not day:
+        return jsonify({"error": "assigned_to and date (YYYY-MM-DD) are required."}), 400
+    if not isinstance(order, list) or not order or len(order) > 200:
+        return jsonify({"error": "order must be a non-empty list of sites."}), 400
+    rows = []
+    for pos, site in enumerate(order, start=1):
+        if not isinstance(site, list):
+            return jsonify({"error": "Each site must be a list of orders."}), 400
+        for it in site:
+            if not isinstance(it, dict):
+                return jsonify({"error": "Unknown stop in the order list."}), 400
+            kind = it.get("kind")
+            try:
+                rid = int(it.get("id"))
+            except Exception:
+                rid = None
+            if kind not in _REORDER_TABLES or not rid:
+                return jsonify({"error": "Unknown stop in the order list."}), 400
+            rows.append((kind, rid, pos))
+    if not rows:
+        return jsonify({"error": "Nothing to reorder."}), 400
+    conn = None
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        seen = {}
+        for kind, rid, pos in rows:
+            table, idcol, ptype, open_pred = _REORDER_TABLES[kind]
+            if table not in seen:
+                seen[table] = (_has_col(cursor, table, "RouteSeq")
+                               and _has_col(cursor, table, "ScheduledDate"))
+            if not seen[table]:
+                conn.rollback(); conn.close()
+                return jsonify({"error": f"{table} has no RouteSeq column yet."}), 409
+            cursor.execute(
+                f"UPDATE {table} SET RouteSeq = %s "
+                f"WHERE {idcol} = %s AND LOWER(AssignedTo) = %s AND {open_pred} "
+                f"  AND ScheduledDate = %s",   # undated carry-overs have no round
+                (pos, rid, who, day))
+            if cursor.rowcount != 1:
+                conn.rollback(); conn.close()
+                return jsonify({"error": "The board is out of date — a stop changed "
+                                         "since it loaded. Reload and try again."}), 409
+            _log_activity(cursor, ptype, rid, "resequenced",
+                          f"Dispatch board: stop {pos} for {who} on {day}", user)
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "updated": len(rows)})
+    except Exception as e:
+        if conn is not None:
+            try:
+                conn.rollback(); conn.close()
             except Exception:
                 pass
         return jsonify({"error": f"Database error: {str(e)}"}), 500
@@ -4032,6 +4156,9 @@ def api_movement_assign(mid):
         _sets = ["AssignedTo = %s", "StatusCode = %s"]
         _params = [assigned, 0 if reset else sc]
         _day = _parse_date(data.get("scheduled_date"))
+        for frag, val in _reseq_on_change(cursor, "WO_MovementOrders", "MovementOrderID", mid,
+                                          assigned, True, _day, bool(_day)):
+            _sets.append(frag); _params.append(val)
         if _day and _has_col(cursor, "WO_MovementOrders", "ScheduledDate"):
             _sets.append("ScheduledDate = %s"); _params.append(_day)
         _params.append(mid)
@@ -4352,6 +4479,9 @@ def api_delivery_assign(did):
         if priority and priority in ("low", "normal", "high"):
             sets.append("Priority = %s"); params.append(priority)
         _day = _parse_date(data.get("scheduled_date"))
+        for frag, val in _reseq_on_change(cursor, "WO_DeliveryOrders", "DeliveryOrderID", did,
+                                          assigned, True, _day, bool(_day)):
+            sets.append(frag); params.append(val)
         if _day:
             sets.append("ScheduledDate = %s"); params.append(_day)
         params.append(did)

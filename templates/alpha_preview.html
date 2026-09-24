@@ -224,6 +224,11 @@
   .stp .x:hover{color:var(--bad)}
   .stp .ed{background:none;border:none;color:#94a3b8;cursor:pointer;font-size:.95rem;line-height:1;padding:0 2px}
   .stp .ed:hover{color:var(--blue)}
+  /* 2026-09-24 manual round order — up/down arrows on each open stop. */
+  .stp .mv{display:flex;flex-direction:column;flex:0 0 auto;gap:1px}
+  .stp .mv button{background:none;border:none;color:#94a3b8;cursor:pointer;font-size:.62rem;line-height:1;padding:1px 2px}
+  .stp .mv button:hover:not(:disabled){color:var(--blue)}
+  .stp .mv button:disabled{opacity:.25;cursor:default}
   .stp .snote{display:block;font-size:.68rem;color:var(--ink);white-space:normal;cursor:pointer;
               margin-top:2px;border-radius:4px;padding:1px 3px}
   .stp .snote:hover{background:#f1f5f9}
@@ -946,8 +951,13 @@ async function assign(id){const w=work.find(x=>x.id===id);const d=($("#as_"+cssI
   await reload(); if(_nok)toast(w.id+" assigned to "+driverName(d)+(_nch?" · note saved":""));}
 function svcMyJobs(){const me=(ME||"").toLowerCase();const today=sgtToday();
   const isMine=w=>(w.assignedTo||"").toLowerCase()===me;
+  /* 2026-09-24 — in the order dispatch set on the Day board: overdue days
+     first, then today's round by RouteSeq; a site's orders stay together. */
   const mine=work.filter(w=>isMine(w)&&w.status==="assigned"
-    &&(!w.scheduledDate||w.scheduledDate<=today));
+    &&(!w.scheduledDate||w.scheduledDate<=today))
+    .sort((a,b)=>(a.scheduledDate||today).localeCompare(b.scheduledDate||today)
+      ||((a.routeSeq??9999)-(b.routeSeq??9999))
+      ||String(a.machine).localeCompare(String(b.machine)));
   /* 2026-09-03 — field team asked to see what they have finished. Today only:
      bootstrap's work[] carries done rows (30-day guard, capped) and a driver's
      question is "did that one go through", not history. Dated by scheduledDate
@@ -1891,7 +1901,25 @@ function buildSites(){
   BOARD_SITES = Object.values(by).map(s => (s.name = s.name || s.code, s));
   return BOARD_SITES;
 }
-const seqOf = s => Math.min(...s.items.map(w => w.routeSeq == null ? 9999 : w.routeSeq));
+/* One driver's view of a site's position: only HIS orders count, so another
+   driver's order at the same machine cannot drag the site up his round. */
+const seqFor = (s, lc) => Math.min(9999, ...s.items
+  .filter(w => seqable(w, lc))
+  .map(w => w.routeSeq == null ? 9999 : w.routeSeq));
+/* The round exactly as driverCard() draws it. moveStop() must reorder THIS
+   list, never re-derive its own, or the arrows would move a different stop
+   from the one the dispatcher clicked. */
+const driverSites = lc => BOARD_SITES
+  .filter(s => s.items.some(w => (w.assignedTo || "").toLowerCase() === lc))
+  .sort((a, b) => seqFor(a, lc) - seqFor(b, lc));
+/* The part of that round that can be reordered: sites where this driver holds
+   at least one order DATED to the board's day. Undated carry-overs belong to
+   no day, so they get no arrows and are never sent — a position set while
+   viewing one day must not follow them onto every other day's board. */
+const seqable = (w, lc) => (w.assignedTo || "").toLowerCase() === lc && w.rid
+  && w.scheduledDate === boardDate && ["delivery", "joborder", "movement"].includes(w.kind);
+const datedRound = lc => driverSites(lc).filter(s => s.items.some(w => seqable(w, lc)));
+let MOVING = false;                      // one reorder in flight at a time
 
 function setBoardDate(v){
   /* The day box is a text input now, so this can be handed "12/08/2026" or
@@ -2411,8 +2439,8 @@ function renderPlanBoard(){
 
 function driverCard(email){
   const lc = (email || "").toLowerCase();
-  const mine = BOARD_SITES.filter(s => s.items.some(w => (w.assignedTo || "").toLowerCase() === lc))
-                          .sort((a, b) => seqOf(a) - seqOf(b));
+  const mine = driverSites(lc);
+  const dated = datedRound(lc);          // only these carry ▲/▼
 
   const stops = mine.map((s, i) => {
     const his = s.items.filter(w => (w.assignedTo || "").toLowerCase() === lc);
@@ -2428,6 +2456,9 @@ function driverCard(email){
           ? ' title="From a customer complaint — edit the diagnosis in Tech Support"' : ""}>${woEsc(w.desc)}</small>` : "")).join("");
     return `<div class="stp${carried ? " carry" : ""}" data-code="${woEsc(s.code)}">
       <span class="n">${i + 1}</span>
+      ${(() => { const k = dated.indexOf(s); return k < 0 ? "" :
+        `<span class="mv"><button title="Move earlier in the round" onclick="moveStop(this,-1)"${k === 0 ? " disabled" : ""}>▲</button>
+        <button title="Move later in the round" onclick="moveStop(this,1)"${k === dated.length - 1 ? " disabled" : ""}>▼</button></span>`; })()}
       <span class="b"><b>${woEsc(s.name)}</b><span class="k">${kinds}${
         carried ? '<span class="tag" title="No scheduled date — carried over">UNDATED</span>' : ""}</span>
         ${notes}
@@ -2708,6 +2739,35 @@ async function unassignStop(btn){
   await reload();
   if (failed) return;                      // leave the server's error on screen
   toast(`${site.name}: ${ok} returned to pool` + (kept ? ` · ${kept} kept (move already started)` : ""));
+}
+
+/* ▲/▼ on a driver's stop (2026-09-24): manual round order until routing is
+   automated. Swaps two neighbouring sites, then writes the WHOLE round
+   1..n for this driver and day in one all-or-nothing call, so stops that never
+   had a RouteSeq (9999) get a real position too. Driver's My Jobs follows it. */
+async function moveStop(btn, dir){
+  const email = cardEmail(btn), code = btn.closest(".stp").dataset.code;
+  if (!email) return;
+  const lc = email.toLowerCase();
+  /* Two quick clicks would build two payloads from the same stale board and
+     the second would silently undo the first. */
+  if (MOVING) return;
+  const round = datedRound(lc);
+  const i = round.findIndex(s => s.code === code), j = i + dir;
+  if (i < 0 || j < 0 || j >= round.length) return;
+  [round[i], round[j]] = [round[j], round[i]];
+  const order = round.map(s => s.items.filter(w => seqable(w, lc))
+                                     .map(w => ({kind: w.kind, id: w.rid})));
+  MOVING = true;
+  document.querySelectorAll(".stp .mv button").forEach(b => b.disabled = true);
+  let r = null;
+  try {
+    r = await api("/api/wo/stops/reorder", {method: "POST",
+      body: {assigned_to: lc, date: boardDate, order}});
+  } finally { MOVING = false; }
+  await reload();
+  render();                              // re-enables arrows even if reload failed
+  if (r) toast(`${driverName(email)}: round order saved`);
 }
 
 /* Inline note editor on a driver's stop. Same PATCH as ✎ Edit, one order. */
