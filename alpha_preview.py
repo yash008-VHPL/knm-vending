@@ -300,7 +300,7 @@ def _fetch_work(cur, meta=None):
     try:
         cur.execute("""SELECT TOP 100 ComplaintID, DisplayID, Description, Source,
                        MachineName, MachineCode, JobOrderID
-                       FROM WO_Complaints WHERE StatusCode = 0 ORDER BY ComplaintID DESC""")
+                       FROM WO_Complaints WHERE StatusCode = 0 AND ArchivedAt IS NULL ORDER BY ComplaintID DESC""")
         for cid, disp, desc, src, mname, mcode, jid in cur.fetchall():
             if jid:
                 continue
@@ -315,7 +315,7 @@ def _fetch_work(cur, meta=None):
     try:
         cur.execute(f"""SELECT TOP 200 JobOrderID, DisplayID, MachineName, MachineCode,
                        AssignedTo, PriorityCode, StatusCode, Diagnosis, ComplaintID, {_sd_cols(cur, "WO_JobOrders")}
-                       FROM WO_JobOrders ORDER BY CreatedAt DESC, JobOrderID DESC""")
+                       FROM WO_JobOrders WHERE ArchivedAt IS NULL ORDER BY CreatedAt DESC, JobOrderID DESC""")
         for jid, disp, mname, mcode, asg, pc, sc, diag, cmpid, sdate, rseq in cur.fetchall():
             lbl = JOBORDER_STATUS.get(int(sc) if sc is not None else 0, "assigned")
             # pending_review = operator finished; treat as done in this UI so a
@@ -353,8 +353,9 @@ def _fetch_work(cur, meta=None):
         # _work_truncated reported so the UI can say so instead of quietly
         # showing an incomplete board.
         _sched = _wo_has_scheduled(cur, "WO_DeliveryOrders")
-        _where = ("WHERE Status <> 'completed' "
-                  "OR CreatedAt >= DATEADD(day, -30, GETUTCDATE())")
+        # OR wrapped so the archive filter applies to both branches.
+        _where = ("WHERE (Status <> 'completed' "
+                  "OR CreatedAt >= DATEADD(day, -30, GETUTCDATE())) AND ArchivedAt IS NULL")
         _order = ("ORDER BY CASE WHEN Status <> 'completed' THEN 0 ELSE 1 END, "
                   + ("ScheduledDate ASC, " if _sched else "")
                   + "CreatedAt DESC, DeliveryOrderID DESC")
@@ -388,7 +389,7 @@ def _fetch_work(cur, meta=None):
         cur.execute(f"""SELECT TOP 200 MovementOrderID, DisplayID, MovementType, MachineCode,
                        FromLocation, ToLocation, StatusCode, AssignedTo,
                        {_sd_cols(cur, "WO_MovementOrders")}
-                       FROM WO_MovementOrders ORDER BY CreatedAt DESC, MovementOrderID DESC""")
+                       FROM WO_MovementOrders WHERE ArchivedAt IS NULL ORDER BY CreatedAt DESC, MovementOrderID DESC""")
         for mid, disp, mtype, mcode, frm, to, sc, asg, sdate, rseq in cur.fetchall():
             lbl = MOVEMENT_STATUS.get(int(sc) if sc is not None else 0, "scheduled")
             desc = f"{(mtype or 'move').title()}"
@@ -511,7 +512,7 @@ def _fetch_completed_day(cur, day):
                             COUNT(*) AS Visits,
                             MAX(CASE WHEN Status = 'signed' THEN VisitID END) AS SignedVisit
                      FROM WO_VisitSessions
-                     WHERE LinkedDeliveryOrderID IS NOT NULL
+                     WHERE LinkedDeliveryOrderID IS NOT NULL AND ArchivedAt IS NULL
                      GROUP BY LinkedDeliveryOrderID
                    ) v ON v.do_id = d.DeliveryOrderID"""
                 if has_visits else "")
@@ -524,6 +525,7 @@ def _fetch_completed_day(cur, day):
                 FROM WO_DeliveryOrders d
                 {_vis}
                 WHERE d.Status = 'completed' AND {_when % ('d', 'd', 'd')}
+                  AND d.ArchivedAt IS NULL
             """, (iso, iso))
             for did, mname, mcode, asg, notes, recip, rseq, nvis, svid in cur.fetchall():
                 recip = (recip or "").strip()
@@ -568,6 +570,7 @@ def _fetch_completed_day(cur, day):
                        j.StatusCode, j.Diagnosis, j.RouteSeq
                 FROM WO_JobOrders j
                 WHERE j.StatusCode IN (2, 3) AND {_when % ('j', 'j', 'j')}
+                  AND j.ArchivedAt IS NULL
             """, (iso, iso))
             rows = cur.fetchall()
             closed = [int(r[0]) for r in rows if int(r[5] or 0) == 3]
@@ -609,6 +612,7 @@ def _fetch_completed_day(cur, day):
                        m.FromLocation, m.ToLocation, m.AssignedTo, m.RouteSeq
                 FROM WO_MovementOrders m
                 WHERE m.StatusCode = 2 AND {_when % ('m', 'm', 'm')}
+                  AND m.ArchivedAt IS NULL
             """, (iso, iso))
             for mid, disp, mtype, mcode, frm, to, asg, rseq in cur.fetchall():
                 desc = (mtype or "move").title()

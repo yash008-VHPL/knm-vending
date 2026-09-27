@@ -376,6 +376,11 @@ def init_workorders_db():
         ("WO_JobOrders",      "RouteSeq",      "INT"),
         ("WO_MovementOrders", "ScheduledDate", "DATE"),
         ("WO_MovementOrders", "RouteSeq",      "INT"),
+        ("WO_DeliveryOrders", "ArchivedAt",    "DATETIME2"),
+        ("WO_JobOrders",      "ArchivedAt",    "DATETIME2"),
+        ("WO_MovementOrders", "ArchivedAt",    "DATETIME2"),
+        ("WO_Complaints",     "ArchivedAt",    "DATETIME2"),
+        ("WO_VisitSessions",  "ArchivedAt",    "DATETIME2"),
     ]
 
     conn = get_connection()
@@ -1036,6 +1041,7 @@ def api_complaint_list():
     if machine_code:
         where.append("MachineCode = %s")
         params.append(machine_code)
+    where.append("ArchivedAt IS NULL")
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     sql = f"""
@@ -1247,12 +1253,14 @@ def api_complaint_oneoff_suggestions():
                    c.Description, c.SubmittedAt, c.RefundIssued
             FROM WO_Complaints c
             WHERE c.StatusCode = 0
+              AND c.ArchivedAt IS NULL
               AND c.SubmittedAt < DATEADD(hour, -48, SYSUTCDATETIME())
               AND NOT EXISTS (
                   SELECT 1 FROM WO_Complaints c2
                   WHERE c2.MachineCode = c.MachineCode
                     AND c2.ComplaintID <> c.ComplaintID
                     AND c2.SubmittedAt > c.SubmittedAt
+                    AND c2.ArchivedAt IS NULL
               )
             ORDER BY c.SubmittedAt
         """)
@@ -1401,10 +1409,10 @@ def api_joborder_create():
             if group_id is not None:
                 cursor.execute("""
                     UPDATE WO_Complaints SET JobOrderID = %s, StatusCode = 1
-                    WHERE GroupID = %s
+                    WHERE GroupID = %s AND ArchivedAt IS NULL
                 """, (new_id, group_id))
                 cursor.execute(
-                    "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s",
+                    "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s AND ArchivedAt IS NULL",
                     (group_id,),
                 )
                 linked_ids = [r[0] for r in cursor.fetchall()]
@@ -1456,6 +1464,7 @@ def api_joborder_list():
     if machine_code:
         where.append("MachineCode = %s")
         params.append(machine_code)
+    where.append("ArchivedAt IS NULL")
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     sql = f"""
@@ -1582,7 +1591,7 @@ def api_joborder_detail(jid):
                     SELECT ComplaintID, DisplayID, Description, MachineName, MachineCode,
                            SubmitterEmail, SubmittedAt, ReportedBy, PerceivedUrgency,
                            ImpactSeverity, ImpactDescription, RefundIssued, StatusCode
-                    FROM WO_Complaints WHERE GroupID = %s
+                    FROM WO_Complaints WHERE GroupID = %s AND ArchivedAt IS NULL
                     ORDER BY SubmittedAt, ComplaintID
                 """, (gid,))
             else:
@@ -1946,10 +1955,10 @@ def api_joborder_review(jid):
                             ClosedReason = %s,
                             ClosedBy = %s,
                             ClosedAt = SYSUTCDATETIME()
-                        WHERE GroupID = %s
+                        WHERE GroupID = %s AND ArchivedAt IS NULL
                     """, (f"Resolved via {old_display}", user, group_id))
                     cursor.execute(
-                        "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s",
+                        "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s AND ArchivedAt IS NULL",
                         (group_id,),
                     )
                     for r in cursor.fetchall():
@@ -1980,10 +1989,10 @@ def api_joborder_review(jid):
                 if group_id is not None:
                     cursor.execute("""
                         UPDATE WO_Complaints SET StatusCode = 3
-                        WHERE GroupID = %s
+                        WHERE GroupID = %s AND ArchivedAt IS NULL
                     """, (group_id,))
                     cursor.execute(
-                        "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s",
+                        "SELECT ComplaintID FROM WO_Complaints WHERE GroupID = %s AND ArchivedAt IS NULL",
                         (group_id,),
                     )
                     for r in cursor.fetchall():
@@ -2589,6 +2598,8 @@ def api_admin_delete_movementorder(mid):
 
             # GUARD: only auto-undo the machine's MOST RECENT completed move. Undoing
             # an older move would corrupt a history that later moves have built on.
+            # Deliberately NOT filtered on ArchivedAt: a safety check must see
+            # archived moves too (a later archived retrieve still counts).
             cursor.execute("""
                 SELECT TOP 1 MovementOrderID FROM WO_MovementOrders
                 WHERE CAST(MachineCode AS NVARCHAR(50)) = %s AND StatusCode = 2
@@ -3137,6 +3148,7 @@ def api_movement_list():
         where.append("StatusCode = %s"); params.append(rev[status_filter])
     if machine_code:
         where.append("MachineCode = %s"); params.append(machine_code)
+    where.append("ArchivedAt IS NULL")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
 
     try:
@@ -3303,7 +3315,7 @@ def _next_route_seq(cursor, assigned, day):
                      ("WO_MovementOrders", "MovementOrderID")):
         try:
             cursor.execute(
-                f"SELECT MAX(RouteSeq) FROM {tbl} WHERE AssignedTo=%s AND ScheduledDate=%s",
+                f"SELECT MAX(RouteSeq) FROM {tbl} WHERE AssignedTo=%s AND ScheduledDate=%s AND ArchivedAt IS NULL",
                 (assigned, day),
             )
             r = cursor.fetchone()
@@ -3412,7 +3424,7 @@ def api_stop_create():
         # The driver's sheet links one open delivery order per machine per day,
         # so a second would be a ghost carrying a note nobody reads.
         _dupq = ("SELECT TOP 1 DeliveryOrderID, AssignedTo FROM WO_DeliveryOrders "
-                 "WHERE MachineCode = %s AND Status <> 'completed'")
+                 "WHERE MachineCode = %s AND Status <> 'completed' AND ArchivedAt IS NULL")
         _dupp = [code]
         if dated_do:
             _dupq += " AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s"
@@ -3732,7 +3744,7 @@ def api_stop_reorder():
                 return jsonify({"error": f"{table} has no RouteSeq column yet."}), 409
             cursor.execute(
                 f"UPDATE {table} SET RouteSeq = %s "
-                f"WHERE {idcol} = %s AND LOWER(AssignedTo) = %s AND {open_pred} "
+                f"WHERE {idcol} = %s AND LOWER(AssignedTo) = %s AND {open_pred} AND ArchivedAt IS NULL "
                 f"  AND ScheduledDate = %s",   # undated carry-overs have no round
                 (pos, rid, who, day))
             if cursor.rowcount != 1:
@@ -3871,6 +3883,7 @@ def api_schedule_list():
         cursor.execute(
             f"SELECT {', '.join(sel + opt)} FROM WO_DeliveryOrders "
             "WHERE Status <> 'completed' AND ScheduledDate >= %s AND ScheduledDate <= %s "
+            "AND ArchivedAt IS NULL "
             "ORDER BY ScheduledDate, MachineName", (frm, to))
         rows = cursor.fetchall()
         conn.close()
@@ -3989,7 +4002,7 @@ def api_schedule_create():
             # and the fix is to date or close the ghost, not to book over it.
             cursor.execute(
                 "SELECT TOP 1 DeliveryOrderID, AssignedTo FROM WO_DeliveryOrders "
-                "WHERE MachineCode = %s AND Status <> 'completed' "
+                "WHERE MachineCode = %s AND Status <> 'completed' AND ArchivedAt IS NULL "
                 "AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s",
                 (code, ds, ds))
             dup = cursor.fetchone()
@@ -4147,7 +4160,7 @@ def api_schedule_delete_series(series_id):
         cursor.execute(
             "SELECT DeliveryOrderID, AssignedTo, CONVERT(VARCHAR(10), ScheduledDate, 23) "
             "FROM WO_DeliveryOrders WHERE SeriesID = %s AND Status = 'open' "
-            "AND ScheduledDate >= %s", (sid, frm))
+            "AND ScheduledDate >= %s AND ArchivedAt IS NULL", (sid, frm))
         rows = cursor.fetchall()
         sales_only = _caller_is_sales_only()
         ids, kept = [], []
@@ -4320,6 +4333,7 @@ def api_delivery_list():
     elif tab == "unassigned":
         where.append("AssignedTo IS NULL")
         where.append("Status <> 'completed'")
+    where.append("ArchivedAt IS NULL")
 
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     sql = f"""
@@ -4604,6 +4618,7 @@ def api_assign_joborder_candidates():
                    ISNULL((
                        SELECT COUNT(*) FROM WO_Complaints c
                        WHERE c.StatusCode <> 2
+                         AND c.ArchivedAt IS NULL
                          AND (
                              (c.MachineCode IS NOT NULL AND c.MachineCode = ml.MachineCode)
                              OR (c.MachineCode IS NULL AND c.MachineName = ml.MachineName)
@@ -4636,7 +4651,7 @@ def api_manager_overview():
         cursor.execute("""
             SELECT JobOrderID, DisplayID, MachineName, AssignedTo,
                    PriorityCode, StatusCode, CreatedAt
-            FROM WO_JobOrders WHERE StatusCode <> 2
+            FROM WO_JobOrders WHERE StatusCode <> 2 AND ArchivedAt IS NULL
             ORDER BY PriorityCode DESC, CreatedAt
         """)
         jobs = [{
@@ -4648,7 +4663,7 @@ def api_manager_overview():
 
         cursor.execute("""
             SELECT DeliveryOrderID, MachineName, AssignedTo, Priority, Status, CreatedAt
-            FROM WO_DeliveryOrders WHERE Status <> 'completed'
+            FROM WO_DeliveryOrders WHERE Status <> 'completed' AND ArchivedAt IS NULL
             ORDER BY CASE Priority WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,
                      CreatedAt
         """)
@@ -4927,7 +4942,7 @@ def api_equipment_log():
             SELECT ComplaintID, DisplayID, Description, Source,
                    ImpactDescription, ImpactSeverity,
                    StatusCode, SubmitterEmail, SubmittedAt, JobOrderID
-            FROM WO_Complaints WHERE MachineCode = %s
+            FROM WO_Complaints WHERE MachineCode = %s AND ArchivedAt IS NULL
         """, (code,))
         complaint_ids = []
         for r in cursor.fetchall():
@@ -4947,7 +4962,7 @@ def api_equipment_log():
             SELECT JobOrderID, DisplayID, ComplaintID, AssignedTo,
                    PriorityCode, StatusCode,
                    CreatedBy, CreatedAt, CompletedBy, CompletedAt, Notes
-            FROM WO_JobOrders WHERE MachineCode = %s
+            FROM WO_JobOrders WHERE MachineCode = %s AND ArchivedAt IS NULL
         """, (code,))
         job_ids = []
         for r in cursor.fetchall():
@@ -4971,7 +4986,7 @@ def api_equipment_log():
         cursor.execute("""
             SELECT DeliveryOrderID, AssignedTo, Priority, Status,
                    CreatedBy, CreatedAt, CompletedBy, CompletedAt, RecipientName
-            FROM WO_DeliveryOrders WHERE MachineCode = %s
+            FROM WO_DeliveryOrders WHERE MachineCode = %s AND ArchivedAt IS NULL
         """, (code,))
         delivery_ids = []
         for r in cursor.fetchall():
@@ -4995,7 +5010,7 @@ def api_equipment_log():
             SELECT MovementOrderID, DisplayID, MovementType,
                    FromLocation, ToLocation, AssignedTo,
                    StatusCode, CreatedBy, CreatedAt, CompletedBy, CompletedAt
-            FROM WO_MovementOrders WHERE MachineCode = %s
+            FROM WO_MovementOrders WHERE MachineCode = %s AND ArchivedAt IS NULL
         """, (code,))
         movement_ids = []
         for r in cursor.fetchall():
@@ -5681,7 +5696,7 @@ def api_operator_locations():
             SELECT MachineCode, MachineName, JobOrderID, DisplayID, PriorityCode,
                    StatusCode, Diagnosis, ProposedFix, AttachedKBID, CreatedAt
             FROM WO_JobOrders
-            WHERE AssignedTo = %s AND StatusCode IN (0, 1) """ + _jo_dt + """
+            WHERE AssignedTo = %s AND StatusCode IN (0, 1) AND ArchivedAt IS NULL """ + _jo_dt + """
             ORDER BY MachineCode, PriorityCode DESC, CreatedAt
         """, (user,) + ((_today,) if _jo_dt else ()))
         service_rows = cursor.fetchall()
@@ -5701,7 +5716,7 @@ def api_operator_locations():
             SELECT MachineCode, MachineName, DeliveryOrderID, Priority,
                    Notes, CreatedAt
             FROM WO_DeliveryOrders
-            WHERE AssignedTo = %s AND Status <> 'completed' """ + _do_dt + """
+            WHERE AssignedTo = %s AND Status <> 'completed' AND ArchivedAt IS NULL """ + _do_dt + """
             ORDER BY MachineCode, CreatedAt
         """, (user,) + ((_today,) if _do_dt else ()))
         delivery_rows = cursor.fetchall()
@@ -5838,7 +5853,7 @@ def api_operator_location_detail(code):
                    OnSiteObservations, OnSiteChanges, TechnicianComments,
                    CreatedBy, CreatedAt
             FROM WO_JobOrders
-            WHERE MachineCode = %s AND AssignedTo = %s AND StatusCode IN (0, 1) """ + _jo_dt + """
+            WHERE MachineCode = %s AND AssignedTo = %s AND StatusCode IN (0, 1) AND ArchivedAt IS NULL """ + _jo_dt + """
             ORDER BY PriorityCode DESC, CreatedAt
         """, (code, user) + ((_today,) if _jo_dt else ()))
         service_wos = []
@@ -5894,7 +5909,7 @@ def api_operator_location_detail(code):
             SELECT TOP 1 DeliveryOrderID, Notes, Priority, Status,
                          CreatedBy, CreatedAt, """ + _svc_cols + """
             FROM WO_DeliveryOrders
-            WHERE MachineCode = %s AND AssignedTo = %s AND Status <> 'completed' """ + _do_dt + """
+            WHERE MachineCode = %s AND AssignedTo = %s AND Status <> 'completed' AND ArchivedAt IS NULL """ + _do_dt + """
             ORDER BY """ + ("CASE WHEN ScheduledDate = %s THEN 0 ELSE 1 END, " if _do_dt else "") + """CreatedAt
         """, (code, user) + ((_today, _today) if _do_dt else ()))
         drow = cursor.fetchone()
@@ -6044,6 +6059,7 @@ def api_visit_start():
             SELECT TOP 1 VisitID FROM WO_VisitSessions
             WHERE MachineCode = %s AND OperatorEmail = %s AND VisitDate = %s
               AND (Status IS NULL OR Status NOT IN ('signed', 'pending_email_signature'))
+              AND ArchivedAt IS NULL
             ORDER BY VisitID DESC
         """, (code, user, today))
         exist = cursor.fetchone()
@@ -6078,13 +6094,14 @@ def api_visit_start():
             if get_role(user) in MANAGER_ROLES:
                 cursor.execute(
                     "SELECT 1 FROM WO_JobOrders WHERE JobOrderID=%s "
-                    "AND MachineCode=%s AND StatusCode IN (0,1)",
+                    "AND MachineCode=%s AND StatusCode IN (0,1) AND ArchivedAt IS NULL",
                     (jid_int, code),
                 )
             else:
                 cursor.execute(
                     "SELECT 1 FROM WO_JobOrders WHERE JobOrderID=%s "
-                    "AND MachineCode=%s AND StatusCode IN (0,1) AND LOWER(AssignedTo)=%s",
+                    "AND MachineCode=%s AND StatusCode IN (0,1) AND LOWER(AssignedTo)=%s "
+                    "AND ArchivedAt IS NULL",
                     (jid_int, code, user.lower()),
                 )
             if not cursor.fetchone():
@@ -6858,6 +6875,7 @@ def api_visit_list():
     if scope == "mine":
         where.append("OperatorEmail = %s")
         params.append(user)
+    where.append("ArchivedAt IS NULL")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
     try:
         conn = get_connection()

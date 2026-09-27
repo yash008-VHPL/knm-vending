@@ -130,7 +130,7 @@ def _load_existing(cur, frm, to):
         "CONVERT(VARCHAR(10), ScheduledDate, 23), AssignedTo, Status "
         "FROM WO_DeliveryOrders "
         "WHERE GCalEventID IS NOT NULL "
-        "AND ScheduledDate BETWEEN %s AND %s", (frm, to))
+        "AND ScheduledDate BETWEEN %s AND %s AND ArchivedAt IS NULL", (frm, to))
     return [{"id": int(r[0]), "gcal_id": r[1], "code": str(r[2]),
              "date": r[3], "assigned_to": r[4], "status": r[5]}
             for r in cur.fetchall()]
@@ -160,7 +160,7 @@ def apply(p, cur):
         # every date, so ISNULL() is deliberate, not sloppy.
         cur.execute(
             "SELECT TOP 1 DeliveryOrderID, AssignedTo FROM WO_DeliveryOrders "
-            "WHERE MachineCode = %s AND Status <> 'completed' "
+            "WHERE MachineCode = %s AND Status <> 'completed' AND ArchivedAt IS NULL "
             "AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s",
             (c["code"], c["date"], c["date"]))
         dup = cur.fetchone()

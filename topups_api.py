@@ -327,6 +327,7 @@ def api_topups_calendar():
                 FROM WO_VisitSessions v
                 JOIN WO_DeliveryOrders dd ON dd.DeliveryOrderID = v.LinkedDeliveryOrderID
                 WHERE v.LinkedDeliveryOrderID IS NOT NULL
+                  AND v.ArchivedAt IS NULL
                   AND (dd.ScheduledDate BETWEEN %s AND %s
                        OR (dd.ScheduledDate IS NULL
                            AND CAST(DATEADD(hour, 8, dd.CompletedAt) AS DATE)
@@ -340,12 +341,14 @@ def api_topups_calendar():
         sql = ("SELECT " + cols + ", " + vsel +
                " FROM WO_DeliveryOrders d" + vjoin +
                " WHERE d.ScheduledDate BETWEEN %s AND %s"
+               "   AND d.ArchivedAt IS NULL"
                " UNION ALL "
                "SELECT " + cols + ", " + vsel +
                " FROM WO_DeliveryOrders d" + vjoin +
                " WHERE d.ScheduledDate IS NULL"
                "   AND d.CompletedAt IS NOT NULL"
                "   AND CAST(DATEADD(hour, 8, d.CompletedAt) AS DATE) BETWEEN %s AND %s"
+               "   AND d.ArchivedAt IS NULL"
                " UNION ALL "
                # Undated AND still open. These block every date for their
                # machine through the ISNULL rule the batch endpoint enforces,
@@ -356,6 +359,7 @@ def api_topups_calendar():
                " FROM WO_DeliveryOrders d" + vjoin +
                " WHERE d.ScheduledDate IS NULL AND d.CompletedAt IS NULL"
                "   AND d.Status <> 'completed'"
+               "   AND d.ArchivedAt IS NULL"
                "   AND %s BETWEEN %s AND %s")
         cur.execute(sql, vparams + (a, b) + vparams + (a, b) + vparams + (today, a, b))
 
@@ -409,7 +413,7 @@ def api_topups_calendar():
             try:
                 cur.execute(
                     "SELECT CONVERT(VARCHAR(10), ScheduledDate, 23), COUNT(*) "
-                    "FROM %s WHERE ScheduledDate BETWEEN %%s AND %%s AND %s "
+                    "FROM %s WHERE ScheduledDate BETWEEN %%s AND %%s AND %s AND ArchivedAt IS NULL "
                     "GROUP BY ScheduledDate" % (tbl, cond),
                     (frm.isoformat(), to.isoformat()))
                 for d, n in cur.fetchall():
@@ -778,7 +782,7 @@ def api_topups_gcal():
                 "       DeliveryOrderID "
                 "FROM WO_DeliveryOrders "
                 "WHERE Status <> 'completed' AND MachineCode IN (%s) "
-                "  AND ScheduledDate BETWEEN %%s AND %%s" % marks,
+                "  AND ScheduledDate BETWEEN %%s AND %%s AND ArchivedAt IS NULL" % marks,
                 tuple(codes) + (today, far))
             for c, d, i in cur.fetchall():
                 booked.setdefault(str(c), []).append({"date": d, "id": int(i)})
@@ -901,6 +905,7 @@ def api_topups_batch():
                 "FROM WO_DeliveryOrders "
                 "WHERE MachineCode IN (%s) AND Status <> 'completed' "
                 "  AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %%s) = %%s "
+                "  AND ArchivedAt IS NULL "
                 "ORDER BY CreatedAt, DeliveryOrderID" % marks,
                 tuple(want) + (iso, iso))
             for c, i, d in cur.fetchall():
@@ -913,6 +918,7 @@ def api_topups_batch():
                 "FROM WO_DeliveryOrders "
                 "WHERE MachineCode IN (%s) AND Status <> 'completed' "
                 "  AND ScheduledDate IS NOT NULL AND ScheduledDate >= %%s "
+                "  AND ArchivedAt IS NULL "
                 "ORDER BY ScheduledDate, DeliveryOrderID" % marks,
                 tuple(want) + (_sgt_today(),))
             for c, i, d in cur.fetchall():
@@ -1159,6 +1165,7 @@ def api_topups_assign():
                     "WHERE MachineCode = %s AND DeliveryOrderID <> %s "
                     "  AND Status <> 'completed' "
                     "  AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s "
+                    "  AND ArchivedAt IS NULL "
                     "ORDER BY CreatedAt, DeliveryOrderID",
                     (r[1], did, iso, iso))
                 dup = cur.fetchone()
@@ -1302,6 +1309,7 @@ def api_topups_move():
                 "WHERE MachineCode = %s AND DeliveryOrderID <> %s "
                 "  AND Status <> 'completed' "
                 "  AND ISNULL(CONVERT(VARCHAR(10), ScheduledDate, 23), %s) = %s "
+                "  AND ArchivedAt IS NULL "
                 "ORDER BY CreatedAt, DeliveryOrderID", (code, did, iso, iso))
             dup = cur.fetchone()
             if dup:
