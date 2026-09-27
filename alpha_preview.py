@@ -663,6 +663,179 @@ def alpha_board_completed():
                 pass
 
 
+def _folder_of(web_url):
+    """SharePoint folder URL of a filed report (see workorders._sp_folder_url)."""
+    if not web_url or "?" in web_url or ".aspx" in web_url.lower():
+        return None
+    if "/WorkOrderUploads/" not in web_url:
+        return None
+    return web_url.rsplit("/", 1)[0]
+
+
+@alpha_bp.route("/alpha/api/myjobs/done")
+def alpha_myjobs_done():
+    """The CALLER's own finished site visits (+ completed machine moves) on one day.
+
+    2026-09-27 — ops: a driver must see the sites he finished. Keyed on the
+    Work Order sheet itself (WO_VisitSessions.VisitDate, the SGT day the visit
+    was started) rather than on the orders' ScheduledDate, so an overdue stop
+    finished today, an unplanned ad-hoc top-up and a service-only sheet all
+    appear. Always scoped to the signed-in user — no email parameter.
+    """
+    blocked = _gate(is_api=True)
+    if blocked is not None:
+        return blocked
+    day = _iso_day(request.args.get("date"))
+    if day is None:
+        return jsonify({"error": "date must be YYYY-MM-DD."}), 400
+    me = _current_user()
+    iso = day.isoformat()
+    out, failed = [], False
+    conn = None
+    try:
+        conn = _conn()
+        cur = conn.cursor()
+        # Archive-aware without depending on the archive migration having run.
+        def _live(table, alias):
+            try:
+                cur.execute("SELECT COL_LENGTH(%s, 'ArchivedAt')", ("dbo." + table,))
+                r = cur.fetchone()
+                return f" AND {alias}.ArchivedAt IS NULL" if r and r[0] is not None else ""
+            except Exception:
+                return ""
+        _av, _am = _live("WO_VisitSessions", "v"), _live("WO_MovementOrders", "m")
+        _ad, _aj = _live("WO_DeliveryOrders", "d"), _live("WO_JobOrders", "j")
+        try:
+            cur.execute("""
+                SELECT v.VisitID, v.DisplayID, v.MachineCode, v.MachineNameSnap,
+                       v.Status, v.ReceivingName, v.PDFSPWebURL,
+                       v.LinkedDeliveryOrderID, v.SubmittedAt,
+                       (SELECT MIN(i.SPWebURL) FROM WO_Images i
+                         WHERE i.ParentType = 'visit' AND i.ParentID = v.VisitID
+                           AND i.SPWebURL IS NOT NULL) AS AnyPhoto
+                FROM WO_VisitSessions v
+                WHERE LOWER(v.OperatorEmail) = %s AND v.VisitDate = %s
+                  AND v.Status IN ('signed', 'pending_email_signature')""" + _av + """
+                ORDER BY v.SubmittedAt, v.VisitID
+            """, (me, iso))
+            for vid, disp, mcode, mname, st, recip, pdf, do_id, sub, photo in cur.fetchall():
+                signed = st == "signed"
+                recip = (recip or "").strip()
+                out.append({
+                    "id": disp or f"VIS-{vid}", "kind": "visit", "rid": int(vid),
+                    "type": "delivery" if do_id is not None else "service",
+                    "machine": str(mcode) if mcode else "?", "machineName": mname,
+                    # SubmittedAt is UTC (SYSUTCDATETIME); show SGT.
+                    "desc": "Work Order submitted"
+                            + ((" " + (sub + timedelta(hours=8)).strftime("%H:%M"))
+                               if hasattr(sub, "strftime") else ""),
+                    "assignedTo": me, "status": "done",
+                    "state": "finalised" if signed else "submitted",
+                    "why": (("Signed for by " + recip) if (signed and recip) else
+                            "Signed on site" if signed else
+                            "Customer unavailable - signature still outstanding"),
+                    "visitId": int(vid),
+                    "folderUrl": _folder_of(pdf) or _folder_of(photo),
+                })
+        except Exception as e:
+            import sys
+            print("[alpha] myjobs visits failed:", e, file=sys.stderr)
+            failed = True
+        try:
+            cur.execute("""
+                SELECT m.MovementOrderID, m.DisplayID, m.MovementType, m.MachineCode,
+                       m.FromLocation, m.ToLocation
+                FROM WO_MovementOrders m
+                WHERE m.StatusCode = 2
+                  AND LOWER(COALESCE(m.CompletedBy, m.AssignedTo)) = %s
+                  AND CAST(DATEADD(hour, 8, m.CompletedAt) AS DATE) = %s""" + _am + """
+            """, (me, iso))
+            for mid, disp, mtype, mcode, frm, to in cur.fetchall():
+                desc = (mtype or "move").title()
+                if frm or to:
+                    desc += f": {frm or '?'} -> {to or '?'}"
+                out.append({
+                    "id": disp or f"MOV-{mid}", "kind": "movement", "rid": int(mid),
+                    "type": "movement",
+                    "machine": str(mcode) if mcode else "?", "machineName": None,
+                    "desc": desc[:140], "assignedTo": me, "status": "done",
+                    "state": "finalised", "why": "Move completed",
+                    "visitId": None, "folderUrl": None,
+                })
+        except Exception as e:
+            import sys
+            print("[alpha] myjobs movements failed:", e, file=sys.stderr)
+            failed = True
+        # Orders the caller closed WITHOUT a Work Order sheet (main-dashboard
+        # delivery complete, legacy job-order task flow) — otherwise they would
+        # vanish from his list the way the old ScheduledDate feed lost stops.
+        try:
+            cur.execute("""
+                SELECT d.DeliveryOrderID, d.MachineCode, d.MachineName, d.RecipientName
+                FROM WO_DeliveryOrders d
+                WHERE d.Status = 'completed' AND LOWER(d.CompletedBy) = %s
+                  AND CAST(DATEADD(hour, 8, d.CompletedAt) AS DATE) = %s""" + _ad + """
+                  AND NOT EXISTS (SELECT 1 FROM WO_VisitSessions v
+                                  WHERE v.LinkedDeliveryOrderID = d.DeliveryOrderID
+                                    AND v.Status IN ('signed', 'pending_email_signature'))
+            """, (me, iso))
+            for did, mcode, mname, recip in cur.fetchall():
+                recip = (recip or "").strip()
+                out.append({
+                    "id": f"DEL-{did}", "kind": "delivery", "rid": int(did),
+                    "type": "delivery",
+                    "machine": str(mcode) if mcode else "?", "machineName": mname,
+                    "desc": "Delivery completed", "assignedTo": me, "status": "done",
+                    "state": "finalised" if recip else "submitted",
+                    "why": ("Signed for by " + recip) if recip else "Completed with no signature on file",
+                    "visitId": None, "folderUrl": None,
+                })
+            cur.execute("""
+                SELECT j.JobOrderID, j.DisplayID, j.MachineCode, j.MachineName, j.StatusCode
+                FROM WO_JobOrders j
+                WHERE j.StatusCode IN (2, 3) AND LOWER(j.CompletedBy) = %s
+                  AND CAST(DATEADD(hour, 8, j.CompletedAt) AS DATE) = %s""" + _aj + """
+                  AND NOT EXISTS (SELECT 1 FROM WO_Activity a
+                                  WHERE a.ParentType = 'joborder' AND a.ParentID = j.JobOrderID
+                                    AND a.Action = 'visit_submit')
+            """, (me, iso))
+            _jrows = cur.fetchall()
+            # Reject also sets StatusCode 3 — same three-way split as the board.
+            _ok = _accepted_joborders(cur, [int(r[0]) for r in _jrows if int(r[4] or 0) == 3])
+            for jid, disp, mcode, mname, sc in _jrows:
+                if int(sc or 0) == 2:
+                    _fin, _why = False, "Submitted - awaiting manager review"
+                elif _ok is None or int(jid) in _ok:
+                    _fin, _why = True, ("Closed by the manager" if _ok is None
+                                        else "Reviewed and accepted")
+                else:
+                    _fin, _why = False, "Closed as REJECTED - may need re-dispatch"
+                out.append({
+                    "id": disp or f"JOB-{jid}", "kind": "joborder", "rid": int(jid),
+                    "type": "service",
+                    "machine": str(mcode) if mcode else "?", "machineName": mname,
+                    "desc": "Service job completed", "assignedTo": me, "status": "done",
+                    "state": "finalised" if _fin else "submitted",
+                    "why": _why,
+                    "visitId": None, "folderUrl": None,
+                })
+        except Exception as e:
+            import sys
+            print("[alpha] myjobs sheetless orders failed:", e, file=sys.stderr)
+            failed = True
+        return jsonify({"date": iso, "stops": out, "partial": failed})
+    except Exception as e:
+        import sys
+        print("[alpha] myjobs DB error:", e, file=sys.stderr)
+        return jsonify({"date": iso, "stops": [], "partial": True})
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 @alpha_bp.route("/")
 @alpha_bp.route("/alpha")
 def alpha_index():

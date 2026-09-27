@@ -115,17 +115,35 @@ def _drive_id() -> str:
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
 
-def _folder_path(kind: str, year: int, month: int, display_id: str) -> str:
+def _safe_label(label: str) -> str:
+    """Location name made safe for a SharePoint folder name.
+
+    SharePoint refuses " * : < > ? / \\ | and treats # % badly in URLs; a
+    trailing dot or space is also rejected. Everything else a machine name
+    realistically holds (letters, digits, spaces, & ( ) . , -) is kept so the
+    folder reads the same as the location on screen. An apostrophe becomes a
+    space: Graph path addressing (root:/…:/content) mishandles ' even encoded.
+    """
+    out = "".join(c if (c.isalnum() or c in " &().,-_") else " " for c in (label or ""))
+    out = " ".join(out.split())[:80].rstrip(" .")
+    return out
+
+
+def _folder_path(kind: str, year: int, month: int, display_id: str,
+                 folder_label: Optional[str] = None) -> str:
     """
     kind: 'complaint' or 'workorder'
     Returns server-relative path under the drive root, e.g.
         ComplaintUploads/2026/06/KNM-CMP-0001-2606
+        WorkOrderUploads/2026/09/Gleneagles L1 - KNM-VIS-0012-2609   (folder_label)
     """
     root = FOLDER_COMPLAINT if kind == "complaint" else FOLDER_WORKORDER
     if kind not in ("complaint", "workorder"):
         raise ValueError(f"Unknown kind: {kind!r}")
     safe_display = "".join(c for c in display_id if c.isalnum() or c in "-_")
-    return f"{root}/{year:04d}/{month:02d}/{safe_display}"
+    lbl = _safe_label(folder_label) if folder_label else ""
+    leaf = f"{lbl} - {safe_display}" if lbl else safe_display
+    return f"{root}/{year:04d}/{month:02d}/{leaf}"
 
 
 def _encode_path(path: str) -> str:
@@ -143,6 +161,7 @@ def upload_bytes(
     file_name: str,
     data: bytes,
     content_type: str = "application/octet-stream",
+    folder_label: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     """
     Upload raw bytes to SP. Auto-creates parent folders.
@@ -156,7 +175,7 @@ def upload_bytes(
     if not file_name:
         raise ValueError("file_name required.")
 
-    folder = _folder_path(kind, year, month, display_id)
+    folder = _folder_path(kind, year, month, display_id, folder_label)
     # Sanitize filename: keep only safe characters
     safe_name = "".join(c if (c.isalnum() or c in "._- ") else "_" for c in file_name).strip()
     if not safe_name:

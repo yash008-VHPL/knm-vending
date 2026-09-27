@@ -23,6 +23,7 @@ from functools import wraps
 from datetime import datetime, timedelta
 import base64
 import io
+import urllib.parse
 import uuid
 
 from flask import Blueprint, request, jsonify, Response
@@ -544,19 +545,69 @@ def _display_for_parent(cursor, parent_type: str, parent_id: int) -> str:
     return (row[0] if row and row[0] else f"{parent_type}-{parent_id}")
 
 
+def _visit_sp_target(cursor, vid, display_id=None, machine_name=None, visit_date=None):
+    """(display_id, folder_label, year, month) for one visit's SharePoint folder.
+
+    2026-09-27 — ops: WorkOrderUploads/{YYYY}/{MM}/{Location} - {KNM-VIS-…}/ so
+    sales can find a site's delivery orders by name. Photos (uploaded during
+    the visit) and the signed PDF (at finalize) MUST resolve to the same folder,
+    so both derive it from the visit row: MachineNameSnap is frozen when the
+    visit starts, and the month is the visit's SGT VisitDate — not upload time,
+    which split a month-end visit across two month folders.
+    """
+    if (display_id is None or visit_date is None) and cursor is not None:
+        cursor.execute("SELECT DisplayID, MachineNameSnap, VisitDate "
+                       "FROM WO_VisitSessions WHERE VisitID = %s", (vid,))
+        r = cursor.fetchone()
+        if r:
+            display_id   = display_id or r[0]
+            machine_name = machine_name if machine_name is not None else r[1]
+            visit_date   = visit_date or r[2]
+    # Transition guard: a visit whose photos were already filed under the old
+    # flat layout (…/{YYYY}/{MM}/{DisplayID}/) keeps that folder, so a sheet
+    # started before this change does not end up split across two folders.
+    if cursor is not None and display_id:
+        try:
+            cursor.execute("SELECT TOP 1 SPWebURL FROM WO_Images "
+                           "WHERE ParentType = 'visit' AND ParentID = %s "
+                           "AND SPWebURL IS NOT NULL ORDER BY ImageID", (vid,))
+            r = cursor.fetchone()
+            segs = urllib.parse.unquote(r[0]).split("/") if r and r[0] else []
+            if "WorkOrderUploads" in segs:
+                i = segs.index("WorkOrderUploads")
+                if len(segs) > i + 3 and segs[i + 3] == display_id:
+                    return display_id, None, int(segs[i + 1]), int(segs[i + 2])
+        except Exception as e:
+            print(f"[visit_sp_target] legacy-folder check skipped for {vid}: {e}")
+    d = None
+    if visit_date:
+        try:
+            d = datetime.strptime(str(visit_date)[:10], "%Y-%m-%d").date()
+        except Exception:
+            d = None
+    if d is None:
+        d = (datetime.utcnow() + timedelta(hours=8)).date()
+    return (display_id or f"VIS-{vid}"), (machine_name or None), d.year, d.month
+
+
 def _save_image_to_sp(cursor, parent_type, parent_id, stage, file_name,
                       content_type, raw_bytes, uploaded_by) -> int:
     """Upload to SP, insert WO_Images row, return ImageID. Caller commits."""
-    display_id = _display_for_parent(cursor, parent_type, parent_id)
     now = datetime.utcnow()
+    label, year, month = None, now.year, now.month
+    if parent_type == "visit":
+        display_id, label, year, month = _visit_sp_target(cursor, parent_id)
+    else:
+        display_id = _display_for_parent(cursor, parent_type, parent_id)
     sp_item_id, web_url, _path = sp.upload_bytes(
         kind        = _kind_for_parent(parent_type),
         display_id  = display_id,
-        year        = now.year,
-        month       = now.month,
+        year        = year,
+        month       = month,
         file_name   = file_name or f"{stage}.bin",
         data        = raw_bytes,
         content_type = content_type or "application/octet-stream",
+        folder_label = label,
     )
     cursor.execute("""
         INSERT INTO WO_Images
@@ -4737,6 +4788,94 @@ def api_record_move(code):
         return jsonify({"error": f"Database error: {str(e)}"}), 500
 
 
+def _sp_folder_url(web_url):
+    """Folder URL of a SharePoint file's webUrl, or None when it cannot be
+    derived safely (Office-style Doc.aspx links carry no folder path)."""
+    if not web_url or "?" in web_url or ".aspx" in web_url.lower():
+        return None
+    if "/WorkOrderUploads/" not in web_url:
+        return None
+    return web_url.rsplit("/", 1)[0]
+
+
+def _visit_reports(cursor, delivery_ids, job_ids):
+    """{(type, order id): {ref, visit_id, status, folder_url}} for the visit
+    (Work Order sheet) that closed each delivery / job order.
+
+    A DO can carry a signed visit AND a later draft; the finalised one wins,
+    then the newest. Folder comes from the PDF's webUrl, falling back to any
+    photo filed for the visit (a PDF upload can fail; the photos still exist).
+    """
+    rank = {"signed": 2, "pending_email_signature": 1}
+    best = {}
+    # Only FILED sheets count: a draft has no report yet, and quoting its
+    # number would send ops looking for a PDF that does not exist.
+    filed = "Status IN ('signed', 'pending_email_signature')"
+    try:
+        cursor.execute("SELECT COL_LENGTH('dbo.WO_VisitSessions', 'ArchivedAt')")
+        _r = cursor.fetchone()
+        if _r and _r[0] is not None:
+            filed += " AND ArchivedAt IS NULL"
+    except Exception:
+        pass
+
+    def _take(key, vid, disp, status, pdf_url):
+        cand = (rank.get(status or "", 0), int(vid))
+        cur = best.get(key)
+        if cur is None or cand > cur[0]:
+            best[key] = (cand, int(vid), disp, status, pdf_url)
+
+    def _chunks(ids):
+        ids = list(ids)
+        for i in range(0, len(ids), 500):
+            yield ids[i:i + 500]
+
+    for part in _chunks(delivery_ids or []):
+        ph = ", ".join(["%s"] * len(part))
+        cursor.execute(f"""
+            SELECT LinkedDeliveryOrderID, VisitID, DisplayID, Status, PDFSPWebURL
+            FROM WO_VisitSessions WHERE LinkedDeliveryOrderID IN ({ph}) AND {filed}
+        """, tuple(part))
+        for r in cursor.fetchall():
+            _take(("deliveryorder", int(r[0])), r[1], r[2], r[3], r[4])
+    for part in _chunks(job_ids or []):
+        ph = ", ".join(["%s"] * len(part))
+        cursor.execute(f"""
+            SELECT j.JobOrderID, v.VisitID, v.DisplayID, v.Status, v.PDFSPWebURL
+            FROM WO_VisitSession_JobOrders j
+            INNER JOIN WO_VisitSessions v ON v.VisitID = j.VisitID
+            WHERE j.JobOrderID IN ({ph}) AND {filed.replace("Status", "v.Status").replace("ArchivedAt", "v.ArchivedAt")}
+              AND EXISTS (SELECT 1 FROM WO_Activity a
+                          WHERE a.ParentType = 'joborder' AND a.ParentID = j.JobOrderID
+                            AND a.Action = 'visit_submit'
+                            AND a.Detail = 'Linked to visit ' + v.DisplayID)
+        """, tuple(part))
+        for r in cursor.fetchall():
+            _take(("joborder", int(r[0])), r[1], r[2], r[3], r[4])
+
+    folder = {}
+    for _, vid, _d, _s, pdf_url in best.values():
+        f = _sp_folder_url(pdf_url)
+        if f:
+            folder[vid] = f
+    missing = sorted({v[1] for v in best.values() if v[1] not in folder})
+    for part in _chunks(missing):
+        ph = ", ".join(["%s"] * len(part))
+        cursor.execute(f"""
+            SELECT ParentID, MIN(SPWebURL) FROM WO_Images
+            WHERE ParentType = 'visit' AND ParentID IN ({ph}) AND SPWebURL IS NOT NULL
+            GROUP BY ParentID
+        """, tuple(part))
+        for r in cursor.fetchall():
+            f = _sp_folder_url(r[1])
+            if f:
+                folder[int(r[0])] = f
+
+    return {key: {"ref": disp or f"VIS-{vid}", "visit_id": vid, "status": status,
+                  "folder_url": folder.get(vid)}
+            for key, (_, vid, disp, status, _u) in best.items()}
+
+
 @workorders_bp.route("/manager/equipment-log")
 @require_roles(*OPERATOR_ROLES)
 def api_equipment_log():
@@ -4898,6 +5037,20 @@ def api_equipment_log():
         _activity_in("joborder",      job_ids)
         _activity_in("deliveryorder", delivery_ids)
         _activity_in("movementorder", movement_ids)
+
+        # ── Report number + SharePoint folder per order (2026-09-27, ops) ────────
+        # The number ops quote must be the one on the filed report (KNM-VIS-…,
+        # the SharePoint folder name), not the internal DeliveryOrderID, and
+        # clicking it opens that report's folder.
+        try:
+            _reports = _visit_reports(cursor, delivery_ids, job_ids)
+        except Exception as ve:
+            print(f"[machine_history] visit reports skipped: {ve}")
+            _reports = {}
+        for e in events:
+            rep = _reports.get((e["type"], e["id"]))
+            if rep:
+                e["report"] = rep
 
         # ── Location history (every place this machine has been) ──────────────────
         location_history = []
@@ -6611,6 +6764,11 @@ def api_visit_finalize(vid):
                                   "topup_skipped",
                                   "Nothing delivered — refill clock left untouched", user)
 
+        # SharePoint folder for the PDF — resolved here, while a cursor is open,
+        # so it matches the folder the visit's photos went to.
+        _sp_target = _visit_sp_target(cursor, vid, visit["display_id"],
+                                      visit["machine_name"], visit["visit_date"])
+
         # Commit the record BEFORE touching SharePoint. The upload is a 60-120s
         # external HTTP call; doing it inside the transaction held write locks on
         # MachineLookup / WO_JobOrders / WO_DeliveryOrders for its whole duration.
@@ -6623,14 +6781,15 @@ def api_visit_finalize(vid):
         conn2 = None
         try:
             pdf_bytes = _build_visit_pdf(visit, service_wos, None, delivery_items_with_qty)
-            now = datetime.utcnow()
+            _disp, _lbl, _yr, _mo = _sp_target
             sp_item_id, web_url, _path = sp.upload_bytes(
                 kind="workorder",
-                display_id=visit["display_id"] or f"VIS-{vid}",
-                year=now.year, month=now.month,
-                file_name=f"{visit['display_id'] or 'VIS-' + str(vid)}.pdf",
+                display_id=_disp,
+                year=_yr, month=_mo,
+                file_name=f"{_disp}.pdf",
                 data=pdf_bytes,
                 content_type="application/pdf",
+                folder_label=_lbl,
             )
             conn2 = get_connection()
             c2 = conn2.cursor()
