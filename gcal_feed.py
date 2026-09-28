@@ -21,6 +21,7 @@ Feed is simply disabled when GCAL_FEED_URL is unset — nothing breaks.
 
 import os
 import re
+import unicodedata
 import threading
 import time
 from datetime import datetime, timedelta
@@ -81,6 +82,22 @@ def parse_title(raw):
     return _WS.sub(" ", t).strip(), qty, flagged
 
 
+_FOLD = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u2032": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-", "\u2014": "-",
+    "\u00a0": " ", "\u202f": " ", "\u2007": " ",
+})
+
+
+def norm(text):
+    """One key for calendar titles, alias rows and MachineName alike.
+    NFKC, curly quotes/dashes/odd spaces folded, whitespace collapsed,
+    casefolded. Dots, brackets and '(new)' are kept: exact means exact."""
+    t = unicodedata.normalize("NFKC", text or "").translate(_FOLD)
+    return _WS.sub(" ", t).strip().casefold()
+
+
 # ── alias resolution ────────────────────────────────────────────────────────
 
 def load_aliases(cursor):
@@ -90,7 +107,7 @@ def load_aliases(cursor):
     )
     out = {}
     for text, code in cursor.fetchall():
-        key = (text or "").strip().lower()
+        key = norm(text)
         if not key:
             continue
         slot = out.setdefault(key, {"codes": [], "known": True})
@@ -99,7 +116,31 @@ def load_aliases(cursor):
     return out
 
 
-def resolve(raw_title, aliases):
+def load_site_names(cursor):
+    """-> {norm(MachineName): [codes]} for active KNM machines.
+
+    Fallback when a calendar title has no GCalSiteAlias row: an exact
+    (normalised) match on the machine's current site name. Franchisee rows
+    (9-digit codes starting with 9, migration_2026-09-03_franchisee.sql) are
+    excluded so a title can never land on a partner outlet. IsActive NULL is
+    treated as active, matching the rest of the app."""
+    cursor.execute(
+        "SELECT MachineCode, MachineName FROM dbo.MachineLookup "
+        "WHERE ISNULL(IsActive, 1) = 1 AND MachineCode IS NOT NULL "
+        "AND MachineName IS NOT NULL "
+        "AND NOT (LEN(CAST(MachineCode AS NVARCHAR(50))) = 9 "
+        "AND CAST(MachineCode AS NVARCHAR(50)) LIKE '9%')"
+    )
+    out = {}
+    for code, name in cursor.fetchall():
+        key = norm(name)
+        code = str(code or "").strip()
+        if key and code and code not in out.setdefault(key, []):
+            out[key].append(code)
+    return out
+
+
+def resolve(raw_title, aliases, site_names=None):
     """Map one event title onto machine codes plus a status the UI can act on.
 
     ok        count matches the alias rows -> safe to create one stop each
@@ -109,10 +150,19 @@ def resolve(raw_title, aliases):
     unknown   title has never been seen
     """
     base, qty, flagged = parse_title(raw_title)
-    entry = aliases.get(base.lower())
+    key = norm(base)
+    entry = aliases.get(key)
+    source = "alias"
+    # An alias row always wins, including a NULL-code (deliberately
+    # unmapped) one. Only a title with no alias row falls back to an exact
+    # match on the machine's site name.
+    if entry is None and site_names and key in site_names:
+        entry = {"codes": list(site_names[key]), "known": True}
+        source = "name"
     codes = list(entry["codes"]) if entry else []
 
     if entry is None:
+        source = None
         status = "unknown"
     elif not codes:
         status = "unmapped"
@@ -129,6 +179,7 @@ def resolve(raw_title, aliases):
         "flagged": flagged,
         "codes": codes,
         "status": status,
+        "source": source,
     }
 
 
@@ -214,6 +265,13 @@ def _fetch(get_cursor):
     try:
         conn, cur = get_cursor()
         aliases = load_aliases(cur)
+        # Own guard: a failure here must never take the feed down -- it just
+        # drops back to alias-only matching, as before.
+        try:
+            site_names = load_site_names(cur)
+        except Exception as e:
+            print(f"[gcal_feed] site-name fallback unavailable: {e}")
+            site_names = {}
     finally:
         if conn is not None:
             try:
@@ -223,7 +281,7 @@ def _fetch(get_cursor):
 
     out = []
     for ev in data.get("events", []):
-        res = resolve(ev.get("title"), aliases)
+        res = resolve(ev.get("title"), aliases, site_names)
         out.append({
             "gcalId":   ev.get("id"),
             "title":    ev.get("title"),
@@ -237,6 +295,7 @@ def _fetch(get_cursor):
             "isNew":    res["flagged"],
             "codes":    res["codes"],
             "status":   res["status"],
+            "matchedBy": res["source"],
         })
     return out, data.get("generatedAt")
 
