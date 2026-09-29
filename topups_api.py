@@ -59,7 +59,7 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, jsonify, request
 
-from app import get_connection, get_current_user
+from app import get_connection, get_current_user, get_role
 from workorders import (
     require_roles,
     DISPATCH_ROLES, SALES_ROLES,
@@ -214,7 +214,8 @@ def _topup_cols(cursor):
         return _COLS_CACHE
     out = {c: _has_col(cursor, "WO_DeliveryOrders", c) for c in
            ("ScheduledDate", "RouteSeq", "ShiftCode", "OutcomeCode", "OutcomeNote",
-            "OutcomeBy", "OutcomeAt", "SourceGCalEventID", "NeedsService")}
+            "OutcomeBy", "OutcomeAt", "SourceGCalEventID", "NeedsService",
+            "ServiceNote")}
     # RouteSeq is a separate swallowed ALTER from ScheduledDate
     # (workorders.py:358-359), so "dated but no RouteSeq" is a real state and
     # selecting it unguarded is the 500 this probing exists to prevent.
@@ -302,6 +303,21 @@ def api_topups_calendar():
         sel.append("d.OutcomeNote"   if have["OutcomeNote"] else "CAST(NULL AS NVARCHAR(500))")
         sel.append("d.NeedsService"  if have["NeedsService"] else "CAST(NULL AS BIT)")
         cols = ", ".join(sel)
+        # Driver note — for every OPEN stop, assigned or not: dispatch edits it
+        # on the Calendar day view, Calendar > Assign and the Plan (2026-09-29).
+        # Completed rows get NULL, so the wire-cost rule below still holds for
+        # the long history. Read from the column the stop's mode uses, exactly
+        # as PATCH /api/wo/stops/topup writes it (workorders.py
+        # api_stop_update) and the Day board reads it (alpha_preview.py).
+        # Untruncated: the editor sends it back as note_was, and a clipped copy
+        # would read as a conflict.
+        if have["NeedsService"] and have["ServiceNote"]:
+            _nexpr = ("CASE WHEN ISNULL(d.NeedsService,0) = 1 "
+                      "THEN d.ServiceNote ELSE d.Notes END")
+        else:
+            _nexpr = "d.Notes"
+        nsel = (", CASE WHEN ISNULL(d.Status,'') <> 'completed' AND d.CompletedAt IS NULL "
+                "THEN " + _nexpr + " END")
 
         # Notes is NVARCHAR(MAX) and nothing on this screen renders it. Shipping
         # it for every stop in a 400-day range is pure wire cost.
@@ -338,12 +354,12 @@ def api_topups_calendar():
         else:
             vjoin, vsel, vparams = "", "CAST(0 AS INT), CAST(NULL AS INT)", ()
 
-        sql = ("SELECT " + cols + ", " + vsel +
+        sql = ("SELECT " + cols + ", " + vsel + nsel +
                " FROM WO_DeliveryOrders d" + vjoin +
                " WHERE d.ScheduledDate BETWEEN %s AND %s"
                "   AND d.ArchivedAt IS NULL"
                " UNION ALL "
-               "SELECT " + cols + ", " + vsel +
+               "SELECT " + cols + ", " + vsel + nsel +
                " FROM WO_DeliveryOrders d" + vjoin +
                " WHERE d.ScheduledDate IS NULL"
                "   AND d.CompletedAt IS NOT NULL"
@@ -355,7 +371,7 @@ def api_topups_calendar():
                # and until now they appeared on no screen the error message
                # pointed at. Surfaced against today so a dispatcher can see
                # what is jamming the machine.
-               "SELECT " + cols + ", " + vsel +
+               "SELECT " + cols + ", " + vsel + nsel +
                " FROM WO_DeliveryOrders d" + vjoin +
                " WHERE d.ScheduledDate IS NULL AND d.CompletedAt IS NULL"
                "   AND d.Status <> 'completed'"
@@ -380,6 +396,7 @@ def api_topups_calendar():
                 "outcomeNote": r[11],
                 "needsService": bool(r[12]) if r[12] is not None else False,
                 "visits": r[13], "signed_visit": r[14],
+                "note": r[15],
             }
             derived, why = _derive_state(row, today)
             # The dispatcher's judgement always wins over the derivation. That
@@ -852,6 +869,13 @@ def api_topups_batch():
     data = request.get_json(silent=True) or {}
     day = _iso(data.get("scheduled_date"))
     items = data.get("items") or []
+    # Replacing the note of an EXISTING stop (a move) is a dispatch edit —
+    # PATCH /api/wo/stops is DISPATCH_ROLES, so this route must not become a
+    # side door for sales. A note on a NEW stop is fine for either role.
+    try:
+        can_edit_note = get_role(get_current_user()) in DISPATCH_ROLES
+    except Exception:
+        can_edit_note = False
     # An item carrying move_id RELOCATES that stop instead of creating one.
     # See the module docstring: a sales calendar entry is a request, and placing
     # it must never leave two open stops for one machine.
@@ -1008,6 +1032,20 @@ def api_topups_batch():
                 # Moving a stop invalidates its position in the old day's round.
                 if have["RouteSeq"]:
                     sets.append("RouteSeq = NULL")
+                # A note typed on the Plan for a stop being MOVED replaces its
+                # note; left blank, the stop keeps the note it already has.
+                # Same column rule as PATCH /api/wo/stops/topup.
+                _mn = (str((it or {}).get("note") or "").strip()[:3900]
+                       if can_edit_note else "")
+                if _mn:
+                    _ns = False
+                    if have["NeedsService"] and have["ServiceNote"]:
+                        cur.execute("SELECT ISNULL(NeedsService,0) FROM WO_DeliveryOrders "
+                                    "WHERE DeliveryOrderID = %s", (mid,))
+                        _r = cur.fetchone(); _ns = bool(_r and _r[0])
+                        sets.append(("Notes" if _ns else "ServiceNote") + " = NULL")
+                    sets.append(("ServiceNote" if _ns else "Notes") + " = %s")
+                    params.append(_mn)
                 params.append(mid)
                 cur.execute("UPDATE WO_DeliveryOrders SET %s WHERE DeliveryOrderID = %%s"
                             % ", ".join(sets), tuple(params))
@@ -1055,7 +1093,7 @@ def api_topups_batch():
             # "needs service" stays on the Day board, where it already works.
             if have["NeedsService"]:
                 cols.append("NeedsService"); vals.append(0)
-            note = (it or {}).get("note") or ""
+            note = str((it or {}).get("note") or "").strip()
             src = (it or {}).get("source") or "planner"
             gid = (it or {}).get("gcal_event_id")
             if gid and have["SourceGCalEventID"]:

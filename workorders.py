@@ -34,6 +34,7 @@ from app import (
     to_ole_date, from_ole_date, log_deletion, mlh_record_change,
 )
 import json
+import re
 
 # SharePoint helper — module-level import; nothing executes here.
 import sharepoint_helper as sp
@@ -3497,6 +3498,22 @@ def api_stop_update(kind, sid):
     data = request.get_json(silent=True) or {}
     user = get_current_user()
     note = data.get("note")
+    # 2026-09-29 — the driver note is editable on every screen (Plan, Calendar,
+    # Assign, Repeats, Day board). A screen opened an hour ago must not
+    # silently overwrite what someone typed since, so a caller that sends
+    # note_was (the note as it showed it) gets a 409 when the stored note no
+    # longer matches. Callers that omit it keep the old last-write-wins.
+    has_was = note is not None and "note_was" in data
+    def _nnorm(v):
+        # CRLF and lone CR both become LF: a browser's HTML parser does the same
+        # to the copy it sends back, and a mismatch would be a false conflict.
+        return re.sub(r"\r\n?", "\n", v or "").strip()
+    def _note_conflict(current):
+        return jsonify({
+            "error": ("This note was changed on another screen. It now reads: \u201c%s\u201d. "
+                      "Nothing was saved \u2014 check the note and save again."
+                      % (_nnorm(current)[:300] or "(blank)")),
+            "code": "note_conflict", "current": _nnorm(current)}), 409
     pri = (data.get("priority") or "").strip().lower() or None
     if pri and pri not in ("low", "normal", "high"):
         return jsonify({"error": "Priority must be low, normal or high."}), 400
@@ -3526,6 +3543,16 @@ def api_stop_update(kind, sid):
                 conn.close(); return jsonify({"error": "Stop not found."}), 404
             if (r[0] or "").lower() == "completed":
                 conn.close(); return jsonify({"error": "This top-up is already completed."}), 400
+            if has_was:
+                # Same column rule as every reader (alpha_preview bootstrap,
+                # /api/topups/calendar): ServiceNote when the stop needs
+                # service, Notes otherwise — judged on the stop as stored now.
+                cursor.execute("SELECT ISNULL(NeedsService,0), Notes, ServiceNote "
+                               "FROM WO_DeliveryOrders WHERE DeliveryOrderID=%s", (sid,))
+                _c = cursor.fetchone()
+                _cur = (_c[2] if _c[0] else _c[1]) if _c else None
+                if _nnorm(_cur) != _nnorm(data.get("note_was")):
+                    conn.close(); return _note_conflict(_cur)
             if "needs_service" in data:
                 ns = 1 if data.get("needs_service") else 0
                 sets.append("NeedsService = %s"); params.append(ns)
@@ -3565,6 +3592,11 @@ def api_stop_update(kind, sid):
                 conn.close(); return jsonify({"error": "This job order is in review or closed; it cannot be edited here."}), 400
             if note is not None and r[1]:
                 conn.close(); return jsonify({"error": "This job order came from a customer complaint; edit its diagnosis in Tech Support."}), 400
+            if has_was:
+                cursor.execute("SELECT Diagnosis FROM WO_JobOrders WHERE JobOrderID=%s", (sid,))
+                _c = cursor.fetchone()
+                if _nnorm(_c[0] if _c else None) != _nnorm(data.get("note_was")):
+                    conn.close(); return _note_conflict(_c[0] if _c else None)
             if note is not None:
                 # Diagnosis is what the driver reads on the Work Order sheet.
                 sets.append("Diagnosis = %s"); params.append((note or "").strip() or None)
@@ -3890,7 +3922,11 @@ def api_schedule_list():
         out = []
         for r in rows:
             ext = dict(zip(opt, r[len(sel):]))
-            note = ext.get("ServiceNote") or r[6]
+            # Same column rule as every other reader and as PATCH's note_was
+            # check (2026-09-29): ServiceNote when the stop needs service,
+            # Notes otherwise. "ServiceNote or Notes" disagreed on legacy rows
+            # and made the Repeats editor report a false conflict.
+            note = ext.get("ServiceNote") if ext.get("NeedsService") else r[6]
             out.append({
                 "id": int(r[0]), "machine_code": r[1], "machine_name": r[2] or r[1],
                 "assigned_to": r[3], "priority": (r[4] or "normal"),
