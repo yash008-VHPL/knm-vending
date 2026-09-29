@@ -235,7 +235,8 @@
   .stp .snote.empty{color:#94a3b8;font-style:italic}
   .stp .snote textarea{min-height:42px;font-size:.74rem;padding:5px 8px;margin:2px 0 4px;cursor:text}
   .stp .snote .r{display:flex;gap:6px}
-  .row .pnote{margin-top:5px;height:28px;font-size:.74rem;padding:3px 8px;max-width:420px}
+  .row .pnote{display:block;width:100%;margin-top:5px;min-height:28px;height:auto;font-size:.74rem;line-height:1.35;
+    padding:4px 8px;max-width:420px;resize:vertical;font-family:inherit;box-sizing:border-box}
   .stp.carry{border-style:dashed;border-color:var(--amber-br);background:#fffbeb}
   /* Completed stops. Compound selectors (.stp.is-*), never a bare .done — the
      existing `.tag.done` rule already paints the DONE chip and the fleet
@@ -916,7 +917,7 @@ function triageRow(w){const m=mByCode(w.machine);
   const _fd=w.scheduledDate&&w.scheduledDate!==boardDate?` · <b>for ${woEsc(w.scheduledDate)}</b>`:"";
   return `<div class="row"><span class="dot ${m?m.status:'g'}"></span><div class="grow"><b>${woEsc(wName(w))} — ${woEsc(w.desc)}</b>
     <div class="meta">${woEsc(w.id)} · ${woEsc(w.source)} · priority ${woEsc(w.priority)}${_fd}</div>
-    ${poolNoteOk(w)?`<input type="text" id="an_${cssId(w.id)}" class="pnote" value="${woEsc(w.note||"")}" data-orig="${woEsc(w.note||"")}" placeholder="Note for the driver (optional)" autocomplete="off">`:""}</div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
+    ${poolNoteOk(w)?`<textarea id="an_${cssId(w.id)}" class="pnote" rows="${Math.min(4,Math.max(1,String(w.note||"").split("\n").length))}" data-orig="${woEsc(w.note||"")}" placeholder="Note for the driver (optional)" autocomplete="off">${woEsc(w.note||"")}</textarea>`:""}</div><span class="tag ${tagFor(w.type)}">${tagTxt(w.type)}</span>
     ${w.kind==="complaint"&&!(state.role==="field_manager"||state.role==="admin")
         ? `<span class="pill" title="A complaint becomes assignable once a job order is raised for it">needs a job order first</span>`
       :drivers.length?`<select id="as_${cssId(w.id)}" class="btn sm ghost" style="width:auto">${drivers.map(d=>`<option value="${d}">${driverName(d)}</option>`).join("")}</select>
@@ -946,8 +947,11 @@ async function assign(id){const w=work.find(x=>x.id===id);const d=($("#as_"+cssI
   // Assigned first, note second: a refused note (e.g. a complaint-born job
   // order) must never block the assignment itself. api() shows the error.
   let _nok=true;
-  if(_nch&&w.kind!=="complaint"&&stopKind(w))
-    _nok=!!(await api(`/api/wo/stops/${stopKind(w)}/${w.rid}`,{method:"PATCH",body:{note:_nt}}));
+  if(_nch&&w.kind!=="complaint"&&stopKind(w)){
+    const _nr=await tpNotePatch(stopKind(w),w.rid,_nt,(_ne.dataset.orig||""));
+    _nok=_nr.ok;
+    if(_nr.ok&&stopKind(w)==="topup")tpNoteApply(w.rid,_nt);
+    if(_nr.conflict)toast(`${w.id} assigned — but its note was changed on another screen to “${_nr.current||"(blank)"}”, so yours was NOT saved. Edit it on the driver's card.`);}
   await reload(); if(_nok)toast(w.id+" assigned to "+driverName(d)+(_nch?" · note saved":""));}
 function svcMyJobs(){const me=(ME||"").toLowerCase();const today=sgtToday();
   const isMine=w=>(w.assignedTo||"").toLowerCase()===me;
@@ -2223,7 +2227,8 @@ function scItem(s){
   return `<div class="sc-it ${cls}">
     <div class="g"><b>${woEsc(s.machine_name || s.machine_code)}</b>
       ${s.needs_service ? '<span class="tag svc">SERVICE</span> ' : ""}${rep}
-      ${s.note ? `<small>${woEsc(s.note)}</small>` : ""}${who}</div>
+      ${tpNoteEditable(s) ? tpNoteField(s.id, s.note, false)
+        : (s.note ? `<small>${woEsc(s.note)}</small>` : "")}${who}</div>
     ${/* Once dispatch has named a driver the stop belongs to the round. The
           server refuses a sales cancel on it, so do not offer the button and
           then fail — show why instead. */
@@ -2713,6 +2718,7 @@ async function saveStop(btn){
   const svcBox = box.querySelector(".svc");
   btn.disabled = true;
   let ok = 0, failed = 0, skipped = 0;
+  const conflicts = [];
   for (const w of his){
     const k = stopKind(w);
     if (!k || !w.rid){ skipped++; continue; }
@@ -2721,15 +2727,61 @@ async function saveStop(btn){
     // Tech Support job order at the same site would be meaningless.
     if (svcBox && k === "topup") body.needs_service = svcBox.checked;
     const ta = box.querySelector(`textarea[data-rid="${w.rid}"][data-kind="${k}"]`);
-    if (ta){
-      const typed = (ta.value || "").trim();
-      if (typed !== (ta.dataset.orig || "").trim()) body.note = typed;
-    }
+    const typed = ta ? (ta.value || "").trim() : null;
+    const noteChanged = ta && typed !== (ta.dataset.orig || "").trim();
+    // The service flag travels WITH the note when the note changed: the server
+    // checks note_was before it moves text between Notes and ServiceNote, so
+    // sending the flag first would make its own copy-across look like someone
+    // else's edit. Without a note change it goes with the date/driver.
+    const svcExtra = {};
+    if (noteChanged && "needs_service" in body){
+      svcExtra.needs_service = body.needs_service; delete body.needs_service; }
+    // Date / driver (and service) first, WITHOUT the note, so a note conflict
+    // can never throw away the rest of the edit or split a site between days.
     const r = await api(`/api/wo/stops/${k}/${w.rid}`, {method: "PATCH", body});
-    if (r) ok++; else failed++;
+    if (!r){ failed++; continue; }
+    ok++;
+    if (!noteChanged) continue;
+    // Then the note, checked against what this editor showed (2026-09-29).
+    const nr = await tpNotePatch(k, w.rid, typed, ta.dataset.orig || "", svcExtra);
+    if (nr.ok){ if (k === "topup") tpNoteApply(w.rid, typed); }
+    else if (nr.conflict){
+      conflicts.push({w, k, typed, current: nr.current});
+      // The note is held for a decision; the service tick is not in question.
+      if ("needs_service" in svcExtra)
+        await api(`/api/wo/stops/${k}/${w.rid}`, {method: "PATCH", body: svcExtra});
+    }
+    else failed++;
   }
   btn.disabled = false;
   await reload();
+  if (conflicts.length){
+    /* Reopen the editor where the stop now sits, with what they typed still in
+       the box and the other screen's note as the new base — Save again is then
+       a deliberate overwrite. If the stop left this board (other day, or
+       unassigned) there is no card to reopen: say it in full instead. */
+    const who = ("assigned_to" in common) ? (common.assigned_to || "") : email;
+    const onBoard = who && (common.scheduled_date || boardDate) === boardDate;
+    const card = onBoard && document.querySelector(`.bd-c[data-email="${CSS.escape(who)}"]`);
+    const ed = card && card.querySelector(`.stp[data-code="${CSS.escape(code)}"] .ed`);
+    if (ed){
+      editStop(ed);
+      const nbox = ed.closest(".stp").querySelector(".edit");
+      conflicts.forEach(c => {
+        const t = nbox.querySelector(`textarea[data-rid="${c.w.rid}"][data-kind="${c.k}"]`);
+        if (!t) return;
+        t.value = c.typed; t.dataset.orig = c.current;
+        t.insertAdjacentHTML("beforebegin", `<p class="note" style="color:var(--bad);margin:2px 0">
+          Changed on another screen to “${woEsc(c.current || "(blank)")}”. Yours is below and was
+          NOT saved — press Save to replace it.</p>`);
+      });
+      toast(`${site.name}: date/driver saved · a note was changed on another screen — check it`);
+    } else {
+      const c = conflicts[0];
+      toast(`${site.name}: saved, but the note was changed on another screen to “${c.current || "(blank)"}” — yours (“${c.typed}”) was NOT saved`);
+    }
+    return;
+  }
   if (failed) return;                      // leave the server's error on screen
   toast(`${site.name}: ${ok} order(s) updated` + (skipped ? ` · ${skipped} not editable here` : ""));
 }
@@ -2833,9 +2885,17 @@ async function noteSave(btn){
   const typed = (ta.value || "").trim();
   if (typed === (ta.dataset.orig || "").trim()){ render(); return; }
   btn.disabled = true;
-  const r = await api(`/api/wo/stops/${el.dataset.kind}/${el.dataset.rid}`, {method: "PATCH", body: {note: typed}});
+  const r = await tpNotePatch(el.dataset.kind, el.dataset.rid, typed, ta.dataset.orig || "");
   btn.disabled = false;
-  if (!r) return;                          // keep the editor open with the server's error
+  if (r.conflict){
+    // Someone changed it on another screen. Keep the editor open with what
+    // they typed; the next Save is a deliberate overwrite of the new note.
+    ta.dataset.orig = r.current;
+    toast(`Changed on another screen to “${r.current || "(blank)"}” — yours was NOT saved. Save again to replace it.`);
+    return;
+  }
+  if (!r.ok) return;                       // keep the editor open with the server's error
+  if (el.dataset.kind === "topup") tpNoteApply(el.dataset.rid, typed);
   await reload();
   toast("Note saved");
 }

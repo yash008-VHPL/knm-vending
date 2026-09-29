@@ -122,6 +122,21 @@
 .tp-m:hover{border-color:var(--blue)}
 .tp-m.on{border-color:var(--blue);background:var(--chip);box-shadow:inset 0 0 0 1px var(--blue)}
 .tp-m .who{font-size:.68rem;color:var(--mut)}
+.tp-m.hasnote{flex-wrap:wrap}
+/* Driver note — one field per stop, same look on every Topups screen and the
+   same size as the Day board's .pnote (28px), per the field-width rule. */
+.tp-nf{flex:1 1 100%;min-width:0}
+.tp-mnote{display:block;width:100%;max-width:420px;min-height:28px;height:auto;font-size:.74rem;
+  line-height:1.35;padding:4px 8px;margin:4px 0 0;cursor:text;box-sizing:border-box;
+  resize:vertical;font-family:inherit}
+.tp-nf.conflict .tp-mnote{border-color:var(--bad)}
+.tp-mnote.unsaved{border-color:var(--warn)}
+.tp-nconf button{margin-left:6px}
+.tp-nconf{font-size:.68rem;color:var(--bad);margin-top:2px;overflow-wrap:anywhere}
+.tp-nro{font-size:.7rem;color:var(--ink);margin-top:3px;white-space:normal;overflow-wrap:anywhere}
+.tp-dnote{margin:-1px 0 7px}
+.tp-chip.hasnote{flex-wrap:wrap}
+.tp-chip .tp-mnote{flex:1 1 100%;width:auto;min-width:220px}
 .tp-drvbtn{display:block;width:100%;text-align:left;border:1px solid var(--line);
   background:#fff;border-radius:7px;padding:7px 9px;margin:0 0 5px;font-size:.78rem;
   cursor:pointer;font-family:inherit}
@@ -370,6 +385,7 @@ function tpStopRow(s, past, judgeable){
                           : " — click to move it to another day or withdraw it") : ""))}">
     <span class="nm">${tpEsc(s.machineName||s.machineCode||"?")}</span>
     ${sh?`<span class="sh">${sh}</span>`:""}
+    ${s.note && !tpNoteIsStock(s.note)?`<span class="src" title="${tpEsc("Note for the driver: "+s.note)}">📝</span>`:""}
     ${s.colourSource==="dispatch"?'<span class="src" title="Set by dispatch">✎</span>':""}
   </div>`;
 
@@ -650,13 +666,18 @@ function tpRenderDay(){
       <h4>${head}<span class="n">${n}</span>${action||""}<span class="sp"></span></h4>
       <div class="tp-drows">${rows}</div></div>`;
 
+  /* The stop, then its driver note underneath — outside the clickable row, so
+     typing never opens the outcome/move prompt. Blocking (undated) rows are
+     fixed by dating them, not annotated here. */
+  const withNote = st => tpStopRow(st,past,judgeable) + (st.blocking ? "" :
+    `<div class="tp-dnote">${tpNoteField(st.id, st.note, !tpNoteEditable(st))}</div>`);
   const drivers = Object.keys(groups).sort().map(em =>
     sec(tpEsc(tpDriverName(em)), groups[em].length,
-        groups[em].map(s=>tpStopRow(s,past,judgeable)).join(""))).join("");
+        groups[em].map(withNote).join(""))).join("");
 
   const un = unassigned.length
     ? sec("Unassigned", unassigned.length,
-          unassigned.map(s=>tpStopRow(s,past,judgeable)).join(""),
+          unassigned.map(withNote).join(""),
           tpCanAssign()
             ? `<button class="btn sm ghost" onclick="tpAssignOpen(${tpJ(iso)})">Assign…</button>`
             : "")
@@ -742,6 +763,150 @@ async function tpMoveOpen(id){
 function tpAssignOpen(iso){ TP.assign = {open:true, date:iso, picked:new Set(), busy:false};
   render(); }
 function tpAssignClose(){ TP.assign.open = false; render(); }
+/* ── Driver note: ONE per stop, editable at every stage ──────────────────
+   2026-09-29 — ops: a stop often carries a non-standard ask (extra beans, a
+   message for the site). Dispatch must be able to add or change it at any
+   stage — Plan, Calendar day view, Calendar ▸ Assign, Repeats, Day board —
+   and it must carry over. There is exactly ONE stored note per stop (Notes, or
+   ServiceNote when the stop needs service; PATCH /api/wo/stops/topup picks the
+   column), and moves/assignments update the stop in place, so carrying over
+   is automatic as long as every screen reads and writes that one field
+   through that one PATCH. This block is that one editor.
+   note_was: every save states the note it was edited from, and the server
+   answers 409 note_conflict if someone changed it since on another screen —
+   a stale screen never silently overwrites a newer note.
+   Drafts live in TP_ND keyed by stop id, NOT in the DOM: these screens
+   re-render on every click and refetch after every assignment.
+     TP_ND drafts · TP_NT debounce timers · TP_NP saves in flight
+     TP_NV the note each draft was started from · TP_NC unresolved conflicts */
+const TP_ND = {}, TP_NT = {}, TP_NP = {}, TP_NV = {}, TP_NC = {};
+
+/* Editable only where the server will accept it: a dispatch role (the PATCH
+   is DISPATCH_ROLES) and a stop that is not completed. */
+function tpNoteEditable(st){
+  return !!st && tpCanAssign() && String(st.status||"").toLowerCase() !== "completed";
+}
+/* Stock text the planner writes when nobody typed a note. It is what the
+   driver sees, so the field shows it as-is, but it is not a real ask and must
+   not light up the 📝 marker on every stop. */
+function tpNoteIsStock(n){
+  return /^(Top-up planner \((day|night) shift\)|From sales calendar: .*)$/i.test(String(n||"").trim());
+}
+const TP_NE = {};     // saves that failed (not a conflict) — shown as "not saved yet"
+function tpNoteRows(v){ return Math.min(4, Math.max(1, String(v||"").split("\n").length)); }
+/* The one field. ro -> read-only line (or nothing when there is no note).
+   A <textarea>, not an <input>: an input silently drops line breaks, and a
+   multi-line note would be flattened by the first save. */
+function tpNoteField(id, note, ro){
+  const cur = note == null ? "" : String(note);
+  // Record the base a new draft starts from — never while one is open or a
+  // save is in flight, or a stale screen could move the goalposts under it.
+  if (!(id in TP_ND) && !TP_NP[id]) TP_NV[id] = cur;
+  if (ro) return cur ? `<div class="tp-nro" title="Note for the driver">📝 ${tpEsc(cur)}</div>` : "";
+  const val = (id in TP_ND) ? TP_ND[id] : cur;
+  const c = TP_NC[id];
+  return `<div class="tp-nf${c != null ? " conflict" : ""}" onclick="event.stopPropagation()">
+    <textarea class="tp-mnote${TP_NE[id] ? " unsaved" : ""}" data-nid="${id}" rows="${tpNoteRows(val)}"
+      maxlength="3900" autocomplete="off"
+      placeholder="Note for the driver (optional) — e.g. extra beans"
+      onclick="event.stopPropagation()"
+      oninput="tpNoteInput(${id},this)" onblur="tpNoteSave(${id})">${tpEsc(val)}</textarea>
+    ${c != null ? `<div class="tp-nconf">Changed on another screen to: “${tpEsc(c) || "(blank)"}”.
+      Yours is still in the box and was NOT saved.
+      <button class="btn sm" onclick="event.stopPropagation();tpNoteKeep(${id})">Save mine</button></div>`
+      : TP_NE[id] ? `<div class="tp-nconf">Not saved yet — click outside the box to retry.</div>` : ""}
+  </div>`;
+}
+function tpNoteInput(id, el){
+  TP_ND[id] = el.value;
+  delete TP_NC[id];                 // they have seen the conflict and are acting on it
+  clearTimeout(TP_NT[id]);
+  TP_NT[id] = setTimeout(() => tpNoteSave(id), 1500);
+}
+/* Deliberate overwrite after a conflict: the base is already the other
+   screen's note, so this save replaces it knowingly. */
+function tpNoteKeep(id){
+  const el = document.querySelector(`.tp-mnote[data-nid="${id}"]`);
+  if (el) TP_ND[id] = el.value;
+  delete TP_NC[id];
+  tpNoteSave(id).then(ok => { if (ok) render(); });
+}
+function tpNoteMark(id, bad){
+  if (bad) TP_NE[id] = true; else delete TP_NE[id];
+  document.querySelectorAll(`.tp-mnote[data-nid="${id}"]`)
+    .forEach(el => el.classList.toggle("unsaved", !!bad));
+}
+/* The PATCH, shared with the Day board. Raw fetch, not api(): api() throws
+   the body away on error, and a conflict needs the current note from it. */
+async function tpNotePatch(kind, id, note, was, extra){
+  try{
+    const res = await fetch(`/api/wo/stops/${kind}/${id}`, {method: "PATCH",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(Object.assign({}, extra || {},
+        {note: note, note_was: was == null ? "" : String(was)}))});
+    let d = null; try { d = await res.json(); } catch(_) {}
+    if (res.ok && !(d && d.error)) return {ok: true};
+    if (d && d.code === "note_conflict") return {ok: false, conflict: true, current: d.current || ""};
+    toast((d && d.error) || ("Request failed (" + res.status + ")"));
+    return {ok: false, status: res.status};
+  }catch(e){ toast("Network error — " + e); return {ok: false}; }
+}
+/* A note changed (here or on the Day board): put it into every copy of that
+   stop the page holds, so no other screen shows — or later sends back as
+   note_was — an old one. */
+function tpNoteApply(id, v){
+  id = Number(id);
+  const n = (v == null || String(v).trim() === "") ? null : String(v).trim();
+  if (!(id in TP_ND)) TP_NV[id] = n || "";
+  const lists = [TP.cal.stops || [], (TP.plan.onDate && TP.plan.onDate.stops) || []];
+  if (typeof SC !== "undefined" && SC && SC.stops) lists.push(SC.stops);
+  lists.forEach(l => l.forEach(x => { if (Number(x.id) === id) x.note = n; }));
+  if (typeof RAIL !== "undefined" && RAIL) RAIL.stale = true;   // dispatch rail shows notes too
+  if (typeof work !== "undefined" && Array.isArray(work))
+    work.forEach(w => { if (w.kind === "delivery" && Number(w.rid) === id){
+      w.note = n; w.desc = (n || "Refill / delivery").slice(0, 140); } });
+}
+/* -> true when the stop's stored note equals the draft (or there is none).
+   One PATCH in flight per stop; a second caller waits and re-checks, so the
+   timer, change and flush never send the same note twice. */
+async function tpNoteSave(id){
+  id = Number(id);
+  clearTimeout(TP_NT[id]); delete TP_NT[id];
+  while (TP_NP[id]) { try { await TP_NP[id]; } catch(_) {} }
+  if (!(id in TP_ND)) return true;
+  if (TP_NC[id] != null) return false;       // unresolved conflict: never overwrite blind
+  const v = String(TP_ND[id] || "").trim();
+  const base = String(TP_NV[id] || "");
+  if (v === base.trim()) { delete TP_ND[id]; tpNoteMark(id, false); return true; }
+  const p = tpNotePatch("topup", id, v, base);
+  TP_NP[id] = p;
+  const r = await p;
+  delete TP_NP[id];
+  if (r.ok){
+    if (id in TP_ND && String(TP_ND[id] || "").trim() === v) delete TP_ND[id];
+    tpNoteApply(id, v);
+    TP_NV[id] = v;
+    tpNoteMark(id, false);
+    toast("Note saved.");
+    return true;
+  }
+  if (r.conflict){
+    TP_NV[id] = r.current; TP_NC[id] = r.current;
+    const keep = TP_ND[id]; delete TP_ND[id];
+    tpNoteApply(id, r.current);               // every other copy shows the real note
+    TP_ND[id] = keep;                         // this box keeps what they typed
+    toast("That note was changed on another screen — yours was NOT saved. Check it.");
+    render();
+    return false;
+  }
+  tpNoteMark(id, true);             // failed (not a conflict): say so, keep the draft
+  return false;
+}
+/* Only the stops about to be assigned. -> true when every one is saved. */
+async function tpNoteFlush(ids){
+  const res = await Promise.all(ids.map(tpNoteSave));
+  return res.every(Boolean);
+}
 function tpAssignPick(id){
   const s = TP.assign.picked;
   s.has(id) ? s.delete(id) : s.add(id);
@@ -757,6 +922,14 @@ async function tpAssignTo(email){
   const ids = [...TP.assign.picked];
   if(!ids.length){ toast("Tick the machines first, then pick a driver."); return; }
   TP.assign.busy = true; render();
+  /* A note typed a moment ago must be on the stop before it reaches the
+     driver. If it did not save, do NOT assign: a stop must never reach a
+     driver without the note dispatch just typed for it. */
+  if(!(await tpNoteFlush(ids))){
+    TP.assign.busy = false; render();
+    toast("A note is not saved (or was changed on another screen) — nothing assigned. Check the note, then assign.");
+    return;
+  }
   const r = await api("/api/topups/assign", {method:"POST", body:{
     scheduled_date: TP.assign.date,
     assignments: ids.map(id=>({id, assigned_to: email||null}))}});
@@ -804,17 +977,19 @@ function tpRenderAssign(){
       <div class="tp-ascol">
         <h4>Unassigned machines</h4>
         ${un.length ? un.map(s=>`
-          <div class="tp-m${TP.assign.picked.has(s.id)?" on":""}" onclick="tpAssignPick(${s.id})">
+          <div class="tp-m hasnote${TP.assign.picked.has(s.id)?" on":""}" onclick="tpAssignPick(${s.id})">
             <span>${tpEsc(s.machineName||s.machineCode)}</span>
             <span class="who">${s.shift===1?"NIGHT":s.shift===0?"DAY":"—"}${s.needsService?" · service":""}</span>
+            ${tpNoteField(s.id, s.note, !tpNoteEditable(s))}
           </div>`).join("") : '<p class="tp-empty">Nothing left unassigned on this day.</p>'}
         ${already.length ? `<h4 style="margin-top:14px">Already assigned</h4>
           <p class="tp-note" style="margin:-4px 0 6px">Tick one to move it to a
             different driver, or to put it back in the unassigned pile.</p>
-          ${already.map(s=>`<div class="tp-m${TP.assign.picked.has(s.id)?" on":""}"
+          ${already.map(s=>`<div class="tp-m hasnote${TP.assign.picked.has(s.id)?" on":""}"
               onclick="tpAssignPick(${s.id})">
             <span>${tpEsc(s.machineName||s.machineCode)}</span>
             <span class="who">${tpEsc(tpDriverName(s.assignedTo))}</span>
+            ${tpNoteField(s.id, s.note, !tpNoteEditable(s))}
           </div>`).join("")}` : ""}
       </div>
       <div class="tp-ascol">
@@ -913,8 +1088,15 @@ function tpStage(code, name, shift, source, gcalId, title, moveId){
   /* move_id, when present, is the stop this request is already sitting on.
      The server relocates that row instead of inserting a second one. */
   TP.plan.staged.push({machine_code:code, name, shift, move_id:moveId||null,
-                       source:source||"planner", gcal_event_id:gcalId||null, title:title||null});
+                       source:source||"planner", gcal_event_id:gcalId||null, title:title||null,
+                       note:""});
   TP.plan.shiftFor = null; render();
+}
+/* Held on the staged item itself (no request yet — the stop does not exist
+   until Submit), so re-renders keep it. No render() here: it would steal focus. */
+function tpStageNote(code, v){
+  const x = TP.plan.staged.find(y => String(y.machine_code) === String(code));
+  if (x) x.note = v;
 }
 function tpUnstage(code){ TP.plan.staged = TP.plan.staged.filter(x=>x.machine_code!==code); render(); }
 function tpClear(){ TP.plan.staged = []; TP.plan.shiftFor = null; render(); }
@@ -937,7 +1119,8 @@ async function tpSubmit(){
       body:JSON.stringify({scheduled_date: TP.plan.date,
         items: TP.plan.staged.map(x=>({machine_code:x.machine_code, shift:x.shift,
           move_id:x.move_id, source:x.source,
-          gcal_event_id:x.gcal_event_id, title:x.title}))})});
+          gcal_event_id:x.gcal_event_id, title:x.title,
+          note:String(x.note||"").trim()}))})});
     let d=null; try{ d = await res.json(); }catch(_){}
     if(!res.ok || (d && d.error)){
       TP.plan.busy = false;
@@ -956,8 +1139,19 @@ async function tpSubmit(){
      skipped stays put with its reason, so a duplicate does not silently
      disappear along with the successes. */
   const madeCodes = new Set((r.created||[]).map(x=>x.code));
+  /* A note typed for a MOVED stop replaced that stop's note on the server.
+     Put it into every copy this page holds, or the Day board / Repeats would
+     keep showing the old one and answer the next edit with a false conflict. */
+  (r.created||[]).forEach(c => {
+    const st = TP.plan.staged.find(x => String(x.machine_code) === String(c.code));
+    const n = st ? String(st.note||"").trim() : "";
+    if (st && st.move_id && n && tpCanAssign()) tpNoteApply(c.id, n);
+  });
   TP.plan.staged = TP.plan.staged.filter(x=>!madeCodes.has(x.machine_code));
   TP.cal.stale = true; TP.plan.gcal.stale = true;
+  TP.plan.onDate.date = null;                       // refetch what is on the day
+  if (typeof SC !== "undefined" && SC) SC.stale = true;
+  if (typeof RAIL !== "undefined" && RAIL) RAIL.stale = true;
   toast(sk.length
     ? `${made} stop${made===1?"":"s"} created · ${sk.length} skipped — ${sk[0].why}`
     : `${made} unassigned stop${made===1?"":"s"} created for ${TP.plan.date}.`);
@@ -1265,15 +1459,21 @@ function tpRenderPlan(){
               + " (DO-" + x.id + ")")}">${tpEsc(x.machineName||x.machineCode)}
             <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":x.shift===0?"DAY":"—"}</span>
             <span class="who">${tpEsc(x.assignedTo ? tpDriverName(x.assignedTo) : "unassigned")}</span>
+            ${x.note && !tpNoteIsStock(x.note)?`<span class="who" title="${tpEsc("Note for the driver: "+x.note)}">📝</span>`:""}
             ${rm?`<button class="x" title="${tpEsc("Take "+(x.machineName||x.machineCode)
                   +" off "+d+". The stop is deleted and the site goes back to the request list.")}"
                   onclick="tpWithdraw(${x.id})">✕</button>`:""}
           </span>`;}).join("")}
         ${TP.plan.staged.map(x=>`
-          <span class="tp-chip">${tpEsc(x.name)}
+          <span class="tp-chip hasnote">${tpEsc(x.name)}
             <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":"DAY"}</span>
             ${x.move_id?'<span class="who">moving</span>':""}
             <button class="x" title="Remove" onclick="tpUnstage(${tpJ(x.machine_code)})">✕</button>
+            ${(!x.move_id || tpCanAssign()) ? `<textarea class="tp-mnote" rows="${tpNoteRows(x.note)}"
+              maxlength="3900" autocomplete="off"
+              placeholder="${x.move_id ? "Note for the driver — leave blank to keep the current one"
+                                       : "Note for the driver (optional) — e.g. extra beans"}"
+              oninput="tpStageNote(${tpJ(x.machine_code)},this.value)">${tpEsc(x.note||"")}</textarea>` : ""}
           </span>`).join("")}
         ${(!existing.length && !TP.plan.staged.length)
           ? (TP.plan.onDate.loading
