@@ -3167,8 +3167,8 @@ function renderSalesUI(){
   return `<div class="card">
     <div class="sales-controls">
       <div class="field"><label>Location</label><select id="sal_loc"><option value="">All Locations</option></select></div>
-      <div class="field"><label>Start</label><div class="datetime-row"><input type="text" class="isodate" id="sal_s0" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_s1" value="00:00" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
-      <div class="field"><label>End</label><div class="datetime-row"><input type="text" class="isodate" id="sal_e0" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_e1" value="23:59" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
+      <div class="field"><label>Start</label><div class="datetime-row"><input type="text" class="isodate" id="sal_s0" onchange="loadSalesLocations()" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_s1" onchange="loadSalesLocations()" value="00:00" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
+      <div class="field"><label>End</label><div class="datetime-row"><input type="text" class="isodate" id="sal_e0" onchange="loadSalesLocations()" placeholder="YYYY-MM-DD" pattern="[0-9]{4}-[0-9]{2}-[0-9]{2}" inputmode="numeric" maxlength="10" autocomplete="off" size="10"><input type="text" class="isotime" id="sal_e1" onchange="loadSalesLocations()" value="23:59" style="max-width:90px" placeholder="HH:MM" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" inputmode="numeric" maxlength="5" autocomplete="off" size="5"></div></div>
       <div class="view-toggle"><button id="sal_vsum" class="${sv?"on":""}" onclick="setSalesView('summary')">Summary</button><button id="sal_vtxn" class="${sv?"":"on"}" onclick="setSalesView('transactions')">Transactions</button></div>
       <button class="btn" id="sal_btn" onclick="runSalesSearch()">Search</button>
     </div>
@@ -3211,13 +3211,32 @@ function initSalesTab(){
   loadSalesLocations();
 }
 
+/* Location list follows the Start/End window: active sites (as Messages
+   shows) plus a past or renamed-from name only if the machine held it inside
+   the window — so an old label with no vends in range is not listed. Re-run
+   on any date/time change; _salLocSeq drops out-of-order responses. The
+   current pick is kept (even if now out of range) so a search never silently
+   widens to All Locations. */
+let _salLocSeq=0;
 async function loadSalesLocations(){
+  const seq=++_salLocSeq;
   try{
-    const names=await(await fetch("/api/location-names")).json();
-    if(!Array.isArray(names))return;
+    const s0=$("#sal_s0"),s1=$("#sal_s1"),e0=$("#sal_e0"),e1=$("#sal_e1");
+    let url="/api/location-names";
+    const ok=v=>v&&!v.classList.contains("iso-bad")&&v.value;
+    if(!(ok(s0)&&ok(s1)&&ok(e0)&&ok(e1)))return;        // half-typed/bad date → leave list as is
+    url+=`?start=${encodeURIComponent(s0.value+" "+s1.value)}&end=${encodeURIComponent(e0.value+" "+e1.value)}`;
+    let names=await(await fetch(url)).json();
+    if(seq!==_salLocSeq||!Array.isArray(names))return;  // inverted window (400) → leave list as is
     const sel=$("#sal_loc");if(!sel)return;
+    const keep=sel.value;
     while(sel.options.length>1)sel.remove(1);
+    if(keep&&names.indexOf(keep)<0){             // slot it in without re-sorting the server's order
+      const lk=keep.toLowerCase();let i=names.findIndex(n=>String(n).toLowerCase()>lk);
+      if(i<0)i=names.length;names=names.slice(0,i).concat([keep],names.slice(i));
+    }
     names.forEach(n=>{const o=document.createElement("option");o.value=n;o.textContent=n;sel.appendChild(o);});
+    sel.value=keep;
   }catch(e){}
 }
 
