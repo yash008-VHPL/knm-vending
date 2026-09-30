@@ -744,21 +744,56 @@ def get_locations():
 @app.route("/api/location-names")
 @login_required
 def get_location_names():
-    """Distinct location names for the Sales/Transactions location filter — every
-    name a machine has EVER been at (from history) plus current names, so past
-    locations remain selectable after a relocation. Falls back to MachineLookup
-    if the history table does not exist yet."""
+    """Distinct location names for the Sales/Transactions location filter.
+
+    With ?start=&end= (YYYY-MM-DD HH:MM, SGT — same format as /api/dispenses):
+    names of ACTIVE machines (the list Messages shows) plus any history name
+    whose interval overlaps that window, so a site a machine left, or a label it
+    was renamed from, appears only when it can hold vends in the window. Without
+    them (legacy /archive2608 dashboard): every name ever held (history ∪
+    current), unchanged. Falls back to MachineLookup if the history table does
+    not exist yet."""
+    start_str = request.args.get("start", "").strip()
+    end_str   = request.args.get("end",   "").strip()
+    win = None
+    if start_str or end_str:
+        try:
+            s_dt = datetime.strptime(start_str, "%Y-%m-%d %H:%M")
+            e_dt = datetime.strptime(end_str,   "%Y-%m-%d %H:%M")
+        except ValueError:
+            return jsonify({"error": "start and end must both be YYYY-MM-DD HH:MM."}), 400
+        if s_dt >= e_dt:
+            return jsonify({"error": "Start time must be before end time."}), 400
+        win = (to_ole_date(s_dt), to_ole_date(e_dt))
     try:
         conn = get_connection()
         cursor = conn.cursor()
         try:
-            cursor.execute("""
-                SELECT DISTINCT LocationName FROM MachineLocationHistory
-                WHERE LocationName IS NOT NULL AND LocationName <> '(decommissioned)'
-                UNION
-                SELECT DISTINCT MachineName FROM MachineLookup WHERE MachineName IS NOT NULL
-                ORDER BY LocationName
-            """)
+            if win:
+                # Overlap uses the same bounds /api/dispenses resolves vends with:
+                # vend >= ValidFromOle AND vend < ValidToOle, window inclusive.
+                # Zero-length intervals (ValidTo <= ValidFrom) can hold no vend.
+                # MachineLookup fallback only counts for ACTIVE machines — the
+                # same CASE /api/dispenses and /api/transactions resolve with.
+                cursor.execute("""
+                    SELECT DISTINCT LocationName FROM MachineLocationHistory
+                    WHERE LocationName IS NOT NULL AND LocationName <> '(decommissioned)'
+                      AND ISNULL(ValidFromOle, 0) <= %s
+                      AND (ValidToOle IS NULL
+                           OR (ValidToOle > %s AND ValidToOle > ISNULL(ValidFromOle, 0)))
+                    UNION
+                    SELECT DISTINCT ml.MachineName FROM MachineLookup ml
+                    WHERE ml.MachineName IS NOT NULL AND ISNULL(ml.IsActive, 1) = 1
+                    ORDER BY LocationName
+                """, (win[1], win[0]))
+            else:
+                cursor.execute("""
+                    SELECT DISTINCT LocationName FROM MachineLocationHistory
+                    WHERE LocationName IS NOT NULL AND LocationName <> '(decommissioned)'
+                    UNION
+                    SELECT DISTINCT MachineName FROM MachineLookup WHERE MachineName IS NOT NULL
+                    ORDER BY LocationName
+                """)
         except Exception:
             # history table not migrated yet → current names only
             conn.rollback() if hasattr(conn, "rollback") else None
