@@ -964,7 +964,8 @@ def api_topups_batch():
             cur.execute(
                 "SELECT DeliveryOrderID, MachineCode, MachineName, Status, AssignedTo, "
                 "       CONVERT(VARCHAR(10), ScheduledDate, 23) "
-                "FROM WO_DeliveryOrders WHERE DeliveryOrderID IN (%s)" % mm,
+                "FROM WO_DeliveryOrders WHERE DeliveryOrderID IN (%s) "
+                "  AND ArchivedAt IS NULL" % mm,
                 tuple(move_ids))
             for did, mc, mn, st, who, sd in cur.fetchall():
                 movable[int(did)] = {"code": (str(mc).upper() if mc else None),
@@ -1030,8 +1031,15 @@ def api_topups_batch():
                 if have["ShiftCode"]:
                     sets.append("ShiftCode = %s"); params.append(shift)
                 # Moving a stop invalidates its position in the old day's round.
+                # A driver's stop goes to the END of that driver's round on the
+                # new day (same rule as /api/topups/move), not to NULL-last.
                 if have["RouteSeq"]:
-                    sets.append("RouteSeq = NULL")
+                    _who = (row["assigned"] or "").lower() or None
+                    _seq = _next_route_seq(cur, _who, iso) if _who else None
+                    if _seq is not None:
+                        sets.append("RouteSeq = %s"); params.append(_seq)
+                    else:
+                        sets.append("RouteSeq = NULL")
                 # A note typed on the Plan for a stop being MOVED replaces its
                 # note; left blank, the stop keeps the note it already has.
                 # Same column rule as PATCH /api/wo/stops/topup.
@@ -1059,15 +1067,29 @@ def api_topups_batch():
             # No move_id, but this machine already has an open stop on some
             # OTHER future day. Creating one here would leave two, and the
             # driver's TOP 1 sheet can only ever reach one of them. Refuse and
-            # say where the existing one is, so the planner picks it from the
-            # request list and moves it instead.
+            # mark it movable, so the client re-stages it as a MOVE.
             elsewhere = future_open.get(code.upper())
+            if elsewhere and elsewhere[1] != iso and blocked.get(code.upper()):
+                # Open on another day AND already open on this day (or undated):
+                # a move would be refused by the move branch, so do not offer one.
+                _b = blocked[code.upper()]
+                skipped.append({
+                    "code": code, "name": m[0], "existing_id": _b[0],
+                    "why": "already has open stops on %s (DO-%d) and %s (DO-%d) — "
+                           "ask dispatch to withdraw or unassign one first" % (elsewhere[1], elsewhere[0],
+                                                   _b[1] or "no date", _b[0])})
+                continue
             if elsewhere and elsewhere[1] != iso:
+                # movable: the client re-stages this item with move_id =
+                # existing_id, so ANY machine (not only a sales request) can be
+                # moved with a second Submit. Never moved silently here: the
+                # existing row may be a repeat occurrence or a driver's stop.
                 skipped.append({
                     "code": code, "name": m[0], "existing_id": elsewhere[0],
-                    "why": "already has an open stop on %s (DO-%d) — pick that "
-                           "request from the list to MOVE it here rather than "
-                           "adding a second" % (elsewhere[1], elsewhere[0])})
+                    "existing_date": elsewhere[1], "movable": True,
+                    "why": "already has an open stop on %s (DO-%d) — marked to "
+                           "MOVE it here; press Submit again to confirm"
+                           % (elsewhere[1], elsewhere[0])})
                 continue
 
             # See the module docstring, point 2. The ISNULL is load-bearing.
@@ -1075,10 +1097,12 @@ def api_topups_batch():
             if dup:
                 skipped.append({
                     "code": code, "name": m[0], "existing_id": dup[0],
+                    # An UNDATED open stop can be moved (= dated) onto this day;
+                    # one already on this day cannot.
+                    "existing_date": dup[1], "movable": not dup[1],
                     "why": ("already has an open stop on this day" if dup[1]
-                            else "has an open stop with no date (DO-%d), which blocks "
-                                 "every day until it is closed or dated — it is shown "
-                                 "on today's cell in the Calendar" % dup[0])})
+                            else "has an open stop with no date (DO-%d) — marked to "
+                                 "MOVE it here; press Submit again to confirm" % dup[0])})
                 continue
 
             cols = ["MachineName", "MachineCode", "AssignedTo", "Priority",
