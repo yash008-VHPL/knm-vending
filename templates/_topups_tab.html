@@ -1148,12 +1148,37 @@ async function tpSubmit(){
     if (st && st.move_id && n && tpCanAssign()) tpNoteApply(c.id, n);
   });
   TP.plan.staged = TP.plan.staged.filter(x=>!madeCodes.has(x.machine_code));
+  /* Machine already open on another day (or undated): the server refused to
+     add a second stop and said which one exists. Turn the staged pick into a
+     MOVE of that stop, so a second Submit relocates it. Works for every
+     machine, not only sales requests, which are the only picks that arrive
+     with a move_id up front. Never auto-resubmitted: the user confirms. */
+  let marked = 0, noteLost = 0;
+  sk.forEach(s => {
+    if (!s || !s.movable || !s.existing_id) return;
+    const st = TP.plan.staged.find(x => String(x.machine_code).toUpperCase()
+                                        === String(s.code).toUpperCase());
+    if (st && !st.move_id) {
+      st.move_id = s.existing_id; st.move_from = s.existing_date || null; marked++;
+      /* Only dispatch may replace an existing stop's note (server rule). For
+         sales the textarea disappears on a move, so say the note is dropped. */
+      if (!tpCanAssign() && String(st.note||"").trim()) { st.note = ""; noteLost++; }
+    }
+  });
+  const otherSk = sk.filter(s => !(s && s.movable && s.existing_id));
+  const moved = (r.created||[]).filter(c => c && c.moved_from !== undefined).length;
   TP.cal.stale = true; TP.plan.gcal.stale = true;
   TP.plan.onDate.date = null;                       // refetch what is on the day
   if (typeof SC !== "undefined" && SC) SC.stale = true;
   if (typeof RAIL !== "undefined" && RAIL) RAIL.stale = true;
-  toast(sk.length
-    ? `${made} stop${made===1?"":"s"} created · ${sk.length} skipped — ${sk[0].why}`
+  toast(marked
+    ? `${made} done · ${marked} already open elsewhere — marked MOVE. Press Submit again to move ${marked===1?"it":"them"}.`
+      + (noteLost ? " Note not carried — the existing stop keeps its note; ask dispatch." : "")
+      + (otherSk.length ? ` ${otherSk.length} skipped — ${otherSk[0].why}` : "")
+    : (moved && !sk.length)
+    ? `${made - moved ? (made - moved) + " created · " : ""}${moved} moved to ${TP.plan.date}.`
+    : sk.length
+    ? `${made - moved} stop${(made-moved)===1?"":"s"} created${moved ? " · " + moved + " moved" : ""} · ${sk.length} skipped — ${sk[0].why}`
     : `${made} unassigned stop${made===1?"":"s"} created for ${TP.plan.date}.`);
   render();
 }
@@ -1467,7 +1492,7 @@ function tpRenderPlan(){
         ${TP.plan.staged.map(x=>`
           <span class="tp-chip hasnote">${tpEsc(x.name)}
             <span class="sh ${x.shift===1?"night":""}">${x.shift===1?"NIGHT":"DAY"}</span>
-            ${x.move_id?'<span class="who">moving</span>':""}
+            ${x.move_id?`<span class="who" title="${tpEsc("Submit moves the existing stop (DO-"+x.move_id+") to this date. It does not create a second one.")}">${x.move_from?"move from "+tpEsc(tpLabel(x.move_from)):"moving"}</span>`:""}
             <button class="x" title="Remove" onclick="tpUnstage(${tpJ(x.machine_code)})">✕</button>
             ${(!x.move_id || tpCanAssign()) ? `<textarea class="tp-mnote" rows="${tpNoteRows(x.note)}"
               maxlength="3900" autocomplete="off"
